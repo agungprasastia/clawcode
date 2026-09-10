@@ -1,7 +1,7 @@
 //! Bounded async-batch writer. Owns the `Db` on a worker thread; the UI thread
 //! only sends appends through a bounded channel and never blocks on SQLite.
 
-use crate::persistence::db::Db;
+use crate::persistence::db::{Db, MAX_MESSAGE_BYTES};
 use std::sync::mpsc;
 use std::thread;
 
@@ -35,37 +35,39 @@ impl WriterHandle {
         let (sender, receiver) = mpsc::sync_channel::<Command>(WRITER_CHANNEL_CAPACITY);
         let worker = thread::spawn(move || {
             let mut pending: Vec<PendingAppend> = Vec::new();
-            loop {
+            let mut shutdown = false;
+            while !shutdown {
                 // Block until first command, then drain what is ready.
                 let Ok(command) = receiver.recv() else {
                     break;
                 };
-                match command {
-                    Command::Shutdown => break,
-                    Command::Flush(ack) => {
-                        flush_batch(&db, &mut pending);
-                        let _ = ack.send(());
-                    }
-                    Command::Append { .. } => {
-                        let mut command = command;
-                        loop {
-                            if let Command::Append {
-                                session_id,
-                                role,
-                                content,
-                                reply,
-                            } = command
-                            {
-                                pending.push((session_id, role, content, reply));
-                            }
-                            match receiver.try_recv() {
-                                Ok(next) => command = next,
-                                Err(_) => break,
-                            }
+                let mut command = Some(command);
+                loop {
+                    let Some(current) = command.take() else {
+                        break;
+                    };
+                    match current {
+                        Command::Append {
+                            session_id,
+                            role,
+                            content,
+                            reply,
+                        } => pending.push((session_id, role, content, reply)),
+                        Command::Flush(ack) => {
+                            flush_batch(&db, &mut pending);
+                            let _ = ack.send(());
                         }
-                        flush_batch(&db, &mut pending);
+                        Command::Shutdown => {
+                            shutdown = true;
+                            break;
+                        }
+                    }
+                    match receiver.try_recv() {
+                        Ok(next) => command = Some(next),
+                        Err(_) => break,
                     }
                 }
+                flush_batch(&db, &mut pending);
             }
             db
         });
@@ -75,9 +77,24 @@ impl WriterHandle {
         }
     }
 
-    /// Queue an append. Blocks only when the bounded channel is full, which
-    /// applies backpressure instead of unbounded memory growth.
-    pub fn append(&self, session_id: i64, role: &str, content: &str) -> Result<(), String> {
+    /// Queue an append without waiting for the commit. Returns the receiver
+    /// for the eventual result so callers that care can await it; dropping
+    /// the receiver is fine — the write still happens.
+    ///
+    /// Errors when the bounded channel is full (backpressure) or the content
+    /// exceeds [`MAX_MESSAGE_BYTES`].
+    pub fn try_append(
+        &self,
+        session_id: i64,
+        role: &str,
+        content: &str,
+    ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+        if content.len() > MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
+                content.len()
+            ));
+        }
         let (reply_tx, reply_rx) = mpsc::channel();
         self.sender
             .send(Command::Append {
@@ -87,8 +104,13 @@ impl WriterHandle {
                 reply: reply_tx,
             })
             .map_err(|error| error.to_string())?;
-        // Wait for the batch ack so tests are deterministic; production
-        // callers may ignore the receiver.
+        Ok(reply_rx)
+    }
+
+    /// Queue an append and wait until it is committed. Blocking variant for
+    /// tests and callers that need the durable ack.
+    pub fn append(&self, session_id: i64, role: &str, content: &str) -> Result<(), String> {
+        let reply_rx = self.try_append(session_id, role, content)?;
         reply_rx.recv().map_err(|error| error.to_string())?
     }
 

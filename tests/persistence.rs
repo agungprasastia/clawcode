@@ -61,6 +61,67 @@ fn batched_writer_persists_all_and_returns_db() {
 }
 
 #[test]
+fn concurrent_appends_commit_in_batches() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("concurrent").unwrap();
+    let session_id = session.id;
+
+    let writer = std::sync::Arc::new(WriterHandle::spawn(db));
+    let handles: Vec<_> = (0..4)
+        .map(|worker| {
+            let writer = std::sync::Arc::clone(&writer);
+            std::thread::spawn(move || {
+                for i in 0..25 {
+                    writer
+                        .append(session_id, "user", &format!("w{worker}m{i}"))
+                        .expect("append should succeed");
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let db = std::sync::Arc::into_inner(writer)
+        .expect("sole owner")
+        .shutdown();
+    assert_eq!(db.messages(session_id).unwrap().len(), 100);
+}
+
+#[test]
+fn try_append_rejects_oversized_without_blocking() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("limits").unwrap();
+    let writer = WriterHandle::spawn(db);
+    let oversized = "x".repeat(clawcode::persistence::MAX_MESSAGE_BYTES + 1);
+
+    let error = writer
+        .try_append(session.id, "user", &oversized)
+        .expect_err("oversized append should fail");
+    assert!(error.contains("too large"));
+
+    // Non-blocking path still persists normal messages.
+    writer
+        .try_append(session.id, "user", "ok")
+        .expect("append should succeed");
+    writer.flush();
+    let db = writer.shutdown();
+    assert_eq!(db.messages(session.id).unwrap().len(), 1);
+}
+
+#[test]
+fn append_then_shutdown_does_not_hang() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("shutdown").unwrap();
+    let writer = WriterHandle::spawn(db);
+    writer
+        .append(session.id, "user", "last words")
+        .expect("append should succeed");
+    let db = writer.shutdown();
+    assert_eq!(db.messages(session.id).unwrap().len(), 1);
+}
+
+#[test]
 fn retention_caps_messages_per_session() {
     let db = Db::open_in_memory().unwrap();
     let session = db.create_session("retention").unwrap();
@@ -92,6 +153,18 @@ fn oversized_message_is_rejected() {
         .append_message(session.id, "user", &oversized)
         .expect_err("oversized append should fail");
     assert!(error.to_string().contains("too large"));
+}
+
+#[test]
+fn retention_leaves_under_cap_sessions_untouched() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("small").unwrap();
+    db.append_message(session.id, "user", "only one").unwrap();
+
+    let removed = db.enforce_retention().unwrap();
+
+    assert_eq!(removed, 0);
+    assert_eq!(db.messages(session.id).unwrap().len(), 1);
 }
 
 #[test]

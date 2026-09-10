@@ -148,23 +148,19 @@ impl Db {
                 params![session_id],
                 |row| row.get(0),
             )?;
-            let excess = count as usize - MAX_MESSAGES_PER_SESSION;
+            let excess = count.saturating_sub(MAX_MESSAGES_PER_SESSION as i64);
             if excess > 0 {
                 removed += self.connection.execute(
                     "DELETE FROM messages WHERE id IN (
                          SELECT id FROM messages WHERE session_id = ?1 ORDER BY id LIMIT ?2
                      )",
-                    params![session_id, excess as i64],
+                    params![session_id, excess],
                 )?;
             }
         }
         if session_ids.len() > MAX_SESSIONS {
             let excess_sessions = session_ids.split_off(MAX_SESSIONS);
             for session_id in &excess_sessions {
-                removed += self.connection.execute(
-                    "DELETE FROM messages WHERE session_id = ?1",
-                    params![session_id],
-                )?;
                 self.connection
                     .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
             }
