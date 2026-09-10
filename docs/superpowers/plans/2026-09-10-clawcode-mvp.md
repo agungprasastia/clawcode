@@ -48,11 +48,13 @@
 
 **Files:** Create `src/tui/app.rs`, `src/tui/render.rs`, `src/tui/input.rs`, `benches/first_frame.rs`, `tests/tui.rs`; Modify `src/tui/mod.rs`.
 
-- [ ] Test quit, resize, and synthetic stream responsiveness.
-- [ ] Implement Ratatui/Crossterm event loop, Quiet editorial layout, keyboard input, and clean terminal restore.
-- [ ] Implement render batching interface accepting coalesced UI events.
-- [ ] Run TUI tests and benchmark; record warm/local first-frame measurement.
-- [ ] Commit `feat: add terminal ui shell`.
+- [x] Test quit, resize, and synthetic stream responsiveness.
+- [x] Implement Ratatui/Crossterm event loop, Quiet editorial layout, keyboard input, and clean terminal restore.
+- [x] Implement render batching interface accepting coalesced UI events.
+- [x] Run TUI tests and benchmark; record warm/local first-frame measurement.
+- [x] Commit `feat: add terminal ui shell`.
+
+Benchmark recorded 2026-09-10 on local Windows development machine using Criterion release build: `first_frame_in_process_test_backend_120x40` mean **443.01 µs** (95% CI **429.58–456.97 µs**). This measures in-process Ratatui construction and first render to `TestBackend`; it is not process startup or real terminal I/O. Process startup remains unmeasured because Task 3 has no non-interactive TUI startup mode suitable for a truthful subprocess benchmark.
 
 ### Task 4: JSONC configuration
 

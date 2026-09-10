@@ -19,7 +19,6 @@ pub enum UiEvent {
 pub struct App {
     running: bool,
     cancellation_pending: bool,
-    terminal_size: Option<(u16, u16)>,
     prompt: String,
     transcript: String,
 }
@@ -29,7 +28,6 @@ impl Default for App {
         Self {
             running: true,
             cancellation_pending: false,
-            terminal_size: None,
             prompt: String::new(),
             transcript: String::new(),
         }
@@ -37,6 +35,9 @@ impl Default for App {
 }
 
 impl App {
+    pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
+    pub const TRUNCATION_MARKER: &str = "[earlier transcript truncated]\n";
+
     pub fn apply(&mut self, event: UiEvent) {
         match event {
             UiEvent::Input(Input::Quit) => self.running = false,
@@ -45,8 +46,11 @@ impl App {
             UiEvent::Input(Input::Backspace) => {
                 self.prompt.pop();
             }
-            UiEvent::Resize { width, height } => self.terminal_size = Some((width, height)),
-            UiEvent::StreamDelta(delta) => self.transcript.push_str(&delta),
+            UiEvent::Resize { .. } => {}
+            UiEvent::StreamDelta(delta) => {
+                self.transcript.push_str(&delta);
+                self.truncate_transcript();
+            }
         }
     }
 
@@ -86,16 +90,26 @@ impl App {
         std::mem::take(&mut self.cancellation_pending)
     }
 
-    pub fn terminal_size(&self) -> Option<(u16, u16)> {
-        self.terminal_size
-    }
-
     pub fn prompt(&self) -> &str {
         &self.prompt
     }
 
     pub fn transcript(&self) -> &str {
         &self.transcript
+    }
+
+    fn truncate_transcript(&mut self) {
+        if self.transcript.len() <= Self::MAX_TRANSCRIPT_BYTES {
+            return;
+        }
+
+        let retained_bytes = Self::MAX_TRANSCRIPT_BYTES - Self::TRUNCATION_MARKER.len();
+        let start = ceil_char_boundary(
+            &self.transcript,
+            self.transcript.len().saturating_sub(retained_bytes),
+        );
+        self.transcript
+            .replace_range(..start, Self::TRUNCATION_MARKER);
     }
 }
 
@@ -186,6 +200,13 @@ impl UiEventQueue {
 fn floor_char_boundary(value: &str, mut index: usize) -> usize {
     while !value.is_char_boundary(index) {
         index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(value: &str, mut index: usize) -> usize {
+    while !value.is_char_boundary(index) {
+        index += 1;
     }
     index
 }

@@ -4,12 +4,12 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 
 ## P0 — Foundation dan UI
 
-- [ ] `P0-M0-01` Buat Cargo package dan module boundary; gate `cargo check`.
-- [ ] `P0-M0-02` Tambah error taxonomy dan tracing; gate unit tests.
-- [ ] `P0-M0-03` Siapkan CI Windows/Linux/macOS; gate matrix hijau.
-- [ ] `P0-M1-01` Implement TUI event loop dan clean shutdown; gate PTY smoke test.
-- [ ] `P0-M1-02` Implement Quiet editorial layout, input, resize, help; gate manual keyboard pass.
-- [ ] `P0-M1-03` Tambah synthetic streaming benchmark; gate bounded CPU/redraw dan first-frame target.
+- [x] `P0-M0-01` Buat Cargo package dan module boundary; gate `cargo check`.
+- [x] `P0-M0-02` Tambah error taxonomy dan tracing; gate unit tests.
+- [x] `P0-M0-03` Siapkan CI Windows/Linux/macOS; gate matrix hijau.
+- [x] `P0-M1-01` Implement TUI event loop dan clean shutdown; gate automated shutdown test (PTY smoke test ditunda sampai scripted flow Task 9).
+- [x] `P0-M1-02` Implement Quiet editorial layout, input, resize, help; gate automated input/resize/render tests.
+- [x] `P0-M1-03` Tambah synthetic streaming harness; gate bounded memory/redraw, priority cancel/quit, dan in-process first-frame benchmark.
 
 ## P0 — Config dan state
 

@@ -24,12 +24,10 @@ pub fn run() -> io::Result<()> {
         .terminal
         .draw(|frame| render::render(frame, &app))?;
     while app.is_running() {
-        if event::poll(INPUT_POLL_INTERVAL)?
-            && let Some(event) = input::translate(event::read()?)
-        {
-            events.push(event);
-        }
-        process_pending(&mut app, &mut events, |app| {
+        let input = event::poll(INPUT_POLL_INTERVAL)?
+            .then(event::read)
+            .transpose()?;
+        runtime_step(&mut app, &mut events, input, |app| {
             terminal
                 .terminal
                 .draw(|frame| render::render(frame, app))
@@ -49,6 +47,18 @@ pub fn process_pending<E>(
         draw(app)?;
     }
     Ok(())
+}
+
+pub fn runtime_step<E>(
+    app: &mut App,
+    events: &mut UiEventQueue,
+    input_event: Option<event::Event>,
+    draw: impl FnOnce(&App) -> Result<(), E>,
+) -> Result<(), E> {
+    if let Some(event) = input_event.and_then(input::translate) {
+        events.push(event);
+    }
+    process_pending(app, events, draw)
 }
 
 pub fn render_to_test_backend(app: &App, width: u16, height: u16) -> Result<(), Infallible> {
