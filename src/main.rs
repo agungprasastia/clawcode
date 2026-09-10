@@ -1,7 +1,6 @@
 mod adapters;
 mod cli;
 mod notify;
-mod persistence;
 mod provider;
 mod workspace;
 
