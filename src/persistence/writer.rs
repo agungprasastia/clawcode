@@ -97,7 +97,7 @@ impl WriterHandle {
         }
         let (reply_tx, reply_rx) = mpsc::channel();
         self.sender
-            .send(Command::Append {
+            .try_send(Command::Append {
                 session_id,
                 role: role.to_string(),
                 content: content.to_string(),
@@ -133,7 +133,8 @@ impl WriterHandle {
     }
 }
 
-/// Commit pending appends in one transaction and ack each sender.
+/// Commit pending appends in one transaction and ack each sender. A row that
+/// fails to insert gets `Err` in its own reply; remaining rows still commit.
 fn flush_batch(db: &Db, pending: &mut Vec<PendingAppend>) {
     let batch: Vec<PendingAppend> = std::mem::take(pending);
     let tx = match db.connection.unchecked_transaction() {
