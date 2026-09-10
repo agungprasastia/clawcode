@@ -1,0 +1,17 @@
+{
+  "$schema": "./schema.meta.json",
+  "title": "clawcode config",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "model": { "type": "string" },
+    "endpoint": { "type": "string", "format": "uri" },
+    "api_key": {
+      "type": "string",
+      "pattern": "^(env|credential):.+",
+      "description": "Secret reference; plaintext rejected."
+    }
+  },
+  "additionalProperties": false
+}
