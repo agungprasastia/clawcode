@@ -18,7 +18,8 @@ pub enum UiEvent {
 #[derive(Debug)]
 pub struct App {
     running: bool,
-    cancelled: bool,
+    cancellation_pending: bool,
+    terminal_size: Option<(u16, u16)>,
     prompt: String,
     transcript: String,
 }
@@ -27,7 +28,8 @@ impl Default for App {
     fn default() -> Self {
         Self {
             running: true,
-            cancelled: false,
+            cancellation_pending: false,
+            terminal_size: None,
             prompt: String::new(),
             transcript: String::new(),
         }
@@ -38,12 +40,12 @@ impl App {
     pub fn apply(&mut self, event: UiEvent) {
         match event {
             UiEvent::Input(Input::Quit) => self.running = false,
-            UiEvent::Input(Input::Cancel) => self.cancelled = true,
+            UiEvent::Input(Input::Cancel) => self.cancellation_pending = true,
             UiEvent::Input(Input::Character(character)) => self.prompt.push(character),
             UiEvent::Input(Input::Backspace) => {
                 self.prompt.pop();
             }
-            UiEvent::Resize { .. } => {}
+            UiEvent::Resize { width, height } => self.terminal_size = Some((width, height)),
             UiEvent::StreamDelta(delta) => self.transcript.push_str(&delta),
         }
     }
@@ -79,8 +81,13 @@ impl App {
         self.running
     }
 
-    pub fn was_cancelled(&self) -> bool {
-        self.cancelled
+    /// Consumes a UI cancellation request. Provider cancellation is not wired yet.
+    pub fn take_cancellation(&mut self) -> bool {
+        std::mem::take(&mut self.cancellation_pending)
+    }
+
+    pub fn terminal_size(&self) -> Option<(u16, u16)> {
+        self.terminal_size
     }
 
     pub fn prompt(&self) -> &str {
@@ -102,6 +109,8 @@ pub struct UiEventQueue {
 }
 
 impl UiEventQueue {
+    pub const MAX_COALESCED_STREAM_BYTES: usize = 64 * 1024;
+
     pub fn new(capacity: usize) -> Self {
         assert!(capacity >= 3, "UI event queue capacity must be at least 3");
         Self {
@@ -117,7 +126,11 @@ impl UiEventQueue {
         match event {
             UiEvent::Input(Input::Quit) => self.quit = true,
             UiEvent::Input(Input::Cancel) => self.cancel = true,
-            UiEvent::StreamDelta(delta) => self.delta.push_str(&delta),
+            UiEvent::StreamDelta(delta) => {
+                let remaining = Self::MAX_COALESCED_STREAM_BYTES.saturating_sub(self.delta.len());
+                let end = floor_char_boundary(&delta, remaining.min(delta.len()));
+                self.delta.push_str(&delta[..end]);
+            }
             event => {
                 if self.events.len() == self.capacity - 3 {
                     self.events.pop_front();
@@ -168,4 +181,11 @@ impl UiEventQueue {
         self.events.clear();
         self.delta.clear();
     }
+}
+
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    while !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }

@@ -29,13 +29,25 @@ pub fn run() -> io::Result<()> {
         {
             events.push(event);
         }
-        if app.apply_pending(&mut events) && app.is_running() {
+        process_pending(&mut app, &mut events, |app| {
             terminal
                 .terminal
-                .draw(|frame| render::render(frame, &app))?;
-        }
+                .draw(|frame| render::render(frame, app))
+                .map(|_| ())
+        })?;
     }
 
+    Ok(())
+}
+
+pub fn process_pending<E>(
+    app: &mut App,
+    events: &mut UiEventQueue,
+    draw: impl FnOnce(&App) -> Result<(), E>,
+) -> Result<(), E> {
+    if app.apply_pending(events) && app.is_running() {
+        draw(app)?;
+    }
     Ok(())
 }
 
