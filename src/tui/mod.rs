@@ -10,22 +10,29 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-pub use app::{App, Input, UiEvent};
+pub use app::{App, Input, UiEvent, UiEventQueue};
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const UI_EVENT_QUEUE_CAPACITY: usize = 64;
 
 pub fn run() -> io::Result<()> {
     let mut terminal = TerminalSession::start()?;
     let mut app = App::default();
+    let mut events = UiEventQueue::new(UI_EVENT_QUEUE_CAPACITY);
 
+    terminal
+        .terminal
+        .draw(|frame| render::render(frame, &app))?;
     while app.is_running() {
-        terminal
-            .terminal
-            .draw(|frame| render::render(frame, &app))?;
         if event::poll(INPUT_POLL_INTERVAL)?
             && let Some(event) = input::translate(event::read()?)
         {
-            app.apply(event);
+            events.push(event);
+        }
+        if app.apply_pending(&mut events) && app.is_running() {
+            terminal
+                .terminal
+                .draw(|frame| render::render(frame, &app))?;
         }
     }
 

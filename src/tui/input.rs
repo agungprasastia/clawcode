@@ -15,7 +15,7 @@ pub fn translate(event: Event) -> Option<UiEvent> {
 fn translate_key(key: KeyEvent) -> Option<Input> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') if key.modifiers.is_empty() => Some(Input::Quit),
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Quit),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Cancel),
         KeyCode::Char(character)
             if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
         {
@@ -23,5 +23,17 @@ fn translate_key(key: KeyEvent) -> Option<Input> {
         }
         KeyCode::Backspace => Some(Input::Backspace),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_c_cancels_without_quitting() {
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        assert_eq!(translate_key(key), Some(Input::Cancel));
     }
 }

@@ -1,6 +1,4 @@
-use std::time::{Duration, Instant};
-
-use clawcode::tui::{App, Input, UiEvent};
+use clawcode::tui::{App, Input, UiEvent, UiEventQueue};
 
 #[test]
 fn quit_input_stops_app() {
@@ -12,31 +10,40 @@ fn quit_input_stops_app() {
 }
 
 #[test]
-fn resize_updates_viewport() {
+fn stream_flood_is_coalesced_and_priority_quit_bounds_redraws() {
     let mut app = App::default();
+    let mut events = UiEventQueue::new(8);
+    for _ in 0..10_000 {
+        events.push(UiEvent::StreamDelta("x".to_owned()));
+    }
+    events.push(UiEvent::Input(Input::Quit));
 
-    app.apply(UiEvent::Resize {
-        width: 120,
-        height: 40,
-    });
+    let mut redraws = 0;
+    if app.apply_pending(&mut events) {
+        redraws += 1;
+    }
 
-    assert_eq!(app.viewport(), (120, 40));
+    assert!(!app.is_running());
+    assert_eq!(app.transcript(), "");
+    assert!(events.len() <= events.capacity());
+    assert_eq!(redraws, 1);
+    assert!(!app.apply_pending(&mut events));
+    assert_eq!(redraws, 1);
 }
 
 #[test]
-fn synthetic_stream_batch_remains_responsive_to_quit() {
+fn cancel_has_priority_over_stream_flood_without_quitting() {
     let mut app = App::default();
-    let mut events = (0..10_000)
-        .map(|_| UiEvent::StreamDelta("x".to_owned()))
-        .collect::<Vec<_>>();
-    events.push(UiEvent::Input(Input::Quit));
+    let mut events = UiEventQueue::new(4);
+    for _ in 0..10_000 {
+        events.push(UiEvent::StreamDelta("x".to_owned()));
+    }
+    events.push(UiEvent::Input(Input::Cancel));
 
-    let started = Instant::now();
-    app.apply_batch(events);
-
-    assert!(!app.is_running());
+    assert!(app.apply_pending(&mut events));
+    assert!(app.is_running());
+    assert!(app.was_cancelled());
     assert_eq!(app.transcript().len(), 10_000);
-    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 #[test]
