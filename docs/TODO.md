@@ -13,10 +13,10 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 
 ## P0 — Config dan state
 
-- [ ] `P0-M2-01` Parse JSONC dengan lokasi error file/line/column; gate malformed fixtures.
-- [ ] `P0-M2-02` Merge global → project; gate precedence fixtures.
-- [ ] `P0-M2-03` Tambah `schema_version` migration dan unknown-field diagnostics; gate migration tests.
-- [ ] `P0-M2-04` Implement env/credential references; gate secret non-plaintext test.
+- [x] `P0-M2-01` Parse JSONC dengan lokasi error file/line/column; gate malformed fixtures.
+- [x] `P0-M2-02` Merge global → project; gate precedence fixtures.
+- [x] `P0-M2-03` Tambah `schema_version` migration dan unknown-field diagnostics; gate migration tests.
+- [x] `P0-M2-04` Implement env/credential references; gate secret non-plaintext test.
 - [ ] `P0-M3-01` Rancang SQLite schema dan migration; gate fresh/upgrade DB tests.
 - [ ] `P0-M3-02` Implement session CRUD dan assembled message recovery; gate restart test.
 - [ ] `P0-M3-03` Implement async batched writes; gate render loop non-blocking test.
