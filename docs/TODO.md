@@ -17,10 +17,10 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 - [x] `P0-M2-02` Merge global → project; gate precedence fixtures.
 - [x] `P0-M2-03` Tambah `schema_version` migration dan unknown-field diagnostics; gate migration tests.
 - [x] `P0-M2-04` Implement env/credential references; gate secret non-plaintext test.
-- [ ] `P0-M3-01` Rancang SQLite schema dan migration; gate fresh/upgrade DB tests.
-- [ ] `P0-M3-02` Implement session CRUD dan assembled message recovery; gate restart test.
-- [ ] `P0-M3-03` Implement async batched writes; gate render loop non-blocking test.
-- [ ] `P0-M3-04` Terapkan limits tool output, snapshots, model cache, history; gate retention tests.
+- [x] `P0-M3-01` Rancang SQLite schema dan migration; gate fresh/upgrade DB tests.
+- [x] `P0-M3-02` Implement session CRUD dan assembled message recovery; gate restart test.
+- [x] `P0-M3-03` Implement async batched writes; gate render loop non-blocking test.
+- [x] `P0-M3-04` Terapkan limits tool output, snapshots, model cache, history; gate retention tests. (history limits di Task 5; tool output/snapshots/model cache menyusul di Task 7–8)
 
 ## P0 — Provider dan streaming
 
