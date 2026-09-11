@@ -152,3 +152,49 @@ fn does_not_persist_error_finish_or_cancellation() {
         assert!(db.messages(session.id).unwrap().is_empty());
     }
 }
+
+#[test]
+fn does_not_persist_when_error_precedes_finish() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("test").unwrap();
+    let writer = WriterHandle::spawn(db);
+    let runtime = ConversationRuntime::new(FakeProvider {
+        response: StreamResponse {
+            events: vec![
+                StreamEvent::TextDelta("partial".into()),
+                StreamEvent::Error("boom".into()),
+                StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                },
+            ],
+        },
+    });
+    runtime
+        .run_and_persist(&request(), &writer, session.id)
+        .unwrap();
+    let db = writer.shutdown();
+    assert!(db.messages(session.id).unwrap().is_empty());
+}
+
+#[test]
+fn does_not_persist_when_cancellation_precedes_finish() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("test").unwrap();
+    let writer = WriterHandle::spawn(db);
+    let runtime = ConversationRuntime::new(FakeProvider {
+        response: StreamResponse {
+            events: vec![
+                StreamEvent::TextDelta("partial".into()),
+                StreamEvent::Cancelled,
+                StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                },
+            ],
+        },
+    });
+    runtime
+        .run_and_persist(&request(), &writer, session.id)
+        .unwrap();
+    let db = writer.shutdown();
+    assert!(db.messages(session.id).unwrap().is_empty());
+}

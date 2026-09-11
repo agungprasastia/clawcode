@@ -32,6 +32,7 @@ pub struct TurnState {
     output: String,
     usage: Option<Usage>,
     finish_reason: Option<FinishReason>,
+    terminal_failure: bool,
     metrics: TurnMetrics,
 }
 
@@ -41,6 +42,7 @@ impl TurnState {
             output: String::new(),
             usage: None,
             finish_reason: None,
+            terminal_failure: false,
             metrics: TurnMetrics {
                 duration: std::time::Duration::ZERO,
                 usage: None,
@@ -55,6 +57,9 @@ impl TurnState {
         state
     }
     fn apply(&mut self, event: StreamEvent, text_limit: usize) {
+        if self.terminal_failure {
+            return;
+        }
         match event {
             StreamEvent::TextDelta(delta) => {
                 let remaining = text_limit.saturating_sub(self.output.len());
@@ -68,7 +73,13 @@ impl TurnState {
                 self.output.push_str(&delta[..end]);
             }
             StreamEvent::Usage(usage) => self.usage = Some(usage),
-            StreamEvent::Finish { reason } => self.finish_reason = Some(reason),
+            StreamEvent::Finish { reason } => {
+                self.finish_reason = Some(reason);
+                self.terminal_failure = reason == FinishReason::Error;
+            }
+            StreamEvent::Error(_) | StreamEvent::Cancelled => {
+                self.terminal_failure = true;
+            }
             _ => {}
         }
     }
@@ -140,10 +151,12 @@ impl ConversationRuntime {
         session_id: i64,
     ) -> Result<TurnState, ProviderError> {
         let state = self.run(request)?;
-        if matches!(
-            state.finish_reason,
-            Some(FinishReason::Stop | FinishReason::Length | FinishReason::ToolCall)
-        ) {
+        if !state.terminal_failure
+            && matches!(
+                state.finish_reason,
+                Some(FinishReason::Stop | FinishReason::Length | FinishReason::ToolCall)
+            )
+        {
             writer
                 .try_append(session_id, "assistant", &state.output)
                 .map_err(ProviderError::Protocol)?;

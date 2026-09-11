@@ -12,6 +12,7 @@ Implemented bounded turn metrics and persistence integration:
 - No stream delta rows are written.
 - Exposed cached metrics through `App`; render formats cached values only. No DB/provider work in render.
 - Added regression tests for error finish, cancellation, and App metrics propagation.
+- TurnState now gives Error and Cancelled terminal precedence over later Finish events; added TextDelta+Error+Finish and TextDelta+Cancelled+Finish persistence regressions.
 
 Gates passed:
 
@@ -21,3 +22,4 @@ Gates passed:
 - `git diff --check`
 
 Concern: exact first-output timing remains unavailable without changing provider contract; no fake TTFT is exposed.
+Concern: none.
