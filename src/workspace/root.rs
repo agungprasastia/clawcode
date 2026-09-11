@@ -15,6 +15,15 @@ impl WorkspaceRoot {
                 format!("failed to open workspace {}: {error}", path.display()),
             )
         })?;
+        if !canonical_path.is_dir() {
+            return Err(Diagnostic::new(
+                ErrorCategory::Workspace,
+                format!(
+                    "workspace root is not a directory: {}",
+                    canonical_path.display()
+                ),
+            ));
+        }
         Ok(Self { canonical_path })
     }
 
@@ -38,13 +47,22 @@ impl WorkspaceRoot {
         }
 
         let target = self.canonical_path.join(relative);
-        let checked_path = if target.exists() {
+        let resolved_path = if target.exists() {
             fs::canonicalize(&target)
         } else {
             let parent = target.parent().ok_or_else(|| {
                 Diagnostic::new(ErrorCategory::Workspace, "workspace path has no parent")
             })?;
-            fs::canonicalize(parent)
+            let final_component = target.file_name().ok_or_else(|| {
+                Diagnostic::new(
+                    ErrorCategory::Workspace,
+                    format!(
+                        "workspace path has no final component: {}",
+                        relative.display()
+                    ),
+                )
+            })?;
+            fs::canonicalize(parent).map(|canonical_parent| canonical_parent.join(final_component))
         }
         .map_err(|error| {
             Diagnostic::new(
@@ -56,13 +74,13 @@ impl WorkspaceRoot {
             )
         })?;
 
-        if !checked_path.starts_with(&self.canonical_path) {
+        if !resolved_path.starts_with(&self.canonical_path) {
             return Err(Diagnostic::new(
                 ErrorCategory::Workspace,
                 format!("workspace path escapes root: {}", relative.display()),
             ));
         }
 
-        Ok(target)
+        Ok(resolved_path)
     }
 }
