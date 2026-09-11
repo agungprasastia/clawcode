@@ -5,6 +5,7 @@ mod shell;
 mod snapshot;
 
 use crate::core::error::{Diagnostic, ErrorCategory};
+use std::collections::HashSet;
 use std::path::Path;
 
 pub use files::{FileSystem, RealFileSystem};
@@ -86,6 +87,7 @@ impl Workspace {
         approved: bool,
     ) -> Result<TransactionResult, Diagnostic> {
         let mut prepared = Vec::with_capacity(mutations.len());
+        let mut paths = HashSet::new();
         for mutation in mutations {
             let (relative, after, operation) = match mutation {
                 Mutation::Write { path, bytes } => {
@@ -94,6 +96,12 @@ impl Workspace {
                 Mutation::Delete { path } => (path, FileState::Missing, Operation::Delete),
             };
             let path = self.root.resolve(&relative)?;
+            if !paths.insert(path.clone()) {
+                return Err(Diagnostic::new(
+                    ErrorCategory::Workspace,
+                    format!("duplicate mutation path: {}", path.display()),
+                ));
+            }
             let before = if self.filesystem.exists(&path) {
                 FileState::present(
                     self.filesystem
@@ -115,19 +123,32 @@ impl Workspace {
         let mut snapshots = SnapshotStore::new();
         let mut entries = Vec::with_capacity(prepared.len());
         for (path, before, after, operation) in prepared {
-            let decision = Policy::evaluate(mode, operation);
-            if decision == PolicyDecision::Denied {
-                return Err(Diagnostic::new(
-                    ErrorCategory::Workspace,
-                    "workspace mutation denied by policy",
-                ));
-            }
             let id = snapshots.capture(path.clone(), before.clone(), after.clone())?;
-            entries.push((id, path, before, after, decision));
+            entries.push((id, path, before, after, operation));
+        }
+        let mut diffs: Vec<_> = entries
+            .iter()
+            .map(|(_, path, before, after, _)| Diff {
+                path: path.clone(),
+                before: before.clone(),
+                after: after.clone(),
+            })
+            .collect();
+        diffs.sort_by(|left, right| left.path.cmp(&right.path));
+        let decisions: Vec<_> = entries
+            .iter()
+            .map(|(_, _, _, _, operation)| Policy::evaluate(mode, *operation))
+            .collect();
+        if decisions.contains(&PolicyDecision::Denied) {
+            return Err(Diagnostic::new(
+                ErrorCategory::Workspace,
+                "workspace mutation denied by policy",
+            ));
         }
         if entries
             .iter()
-            .any(|(_, _, _, _, decision)| *decision == PolicyDecision::ApprovalRequired)
+            .zip(&decisions)
+            .any(|(_, decision)| *decision == PolicyDecision::ApprovalRequired)
             && !approved
         {
             return Err(Diagnostic::new(
@@ -137,9 +158,12 @@ impl Workspace {
         }
 
         let mut applied = Vec::new();
-        for (id, path, _, after, _) in &entries {
+        for ((id, path, _, after, _), _) in entries.iter().zip(&decisions) {
             let result = match after {
-                FileState::Missing => self.filesystem.remove_file(path),
+                FileState::Missing if self.filesystem.exists(path) => {
+                    self.filesystem.remove_file(path)
+                }
+                FileState::Missing => Ok(()),
                 FileState::Present { bytes, .. } => {
                     let temporary =
                         crate::workspace::files::temporary_sibling(path, &id.value().to_string())
@@ -155,22 +179,26 @@ impl Workspace {
                 }
             };
             if let Err(error) = result {
+                let mut rollback_failure = None;
                 for applied_id in applied.iter().rev() {
-                    let _ = snapshots.restore_before(*applied_id, &self.filesystem);
+                    if let Err(rollback_error) =
+                        snapshots.restore_before(*applied_id, &self.filesystem)
+                    {
+                        rollback_failure = Some(rollback_error.to_string());
+                        break;
+                    }
                 }
-                return Err(diagnostic("apply workspace mutation", path, error));
+                let mut diagnostic = diagnostic("apply workspace mutation", path, error);
+                if let Some(rollback_failure) = rollback_failure {
+                    diagnostic = Diagnostic::new(
+                        ErrorCategory::Workspace,
+                        format!("{diagnostic}; rollback failed: {rollback_failure}"),
+                    );
+                }
+                return Err(diagnostic);
             }
             applied.push(*id);
         }
-        let mut diffs: Vec<_> = entries
-            .iter()
-            .map(|(_, path, before, after, _)| Diff {
-                path: path.clone(),
-                before: before.clone(),
-                after: after.clone(),
-            })
-            .collect();
-        diffs.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(TransactionResult {
             snapshot_ids: entries.iter().map(|entry| entry.0).collect(),
             diffs,
