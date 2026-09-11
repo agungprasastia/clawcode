@@ -93,7 +93,10 @@ fn provider_cancellation_is_cancelled_terminal_event() {
         result: Err(ProviderError::Cancelled),
     });
 
-    assert_eq!(runtime.events(&request()), vec![ConversationEvent::Cancelled]);
+    assert_eq!(
+        runtime.events(&request()),
+        vec![ConversationEvent::Cancelled]
+    );
 }
 
 #[test]

@@ -1,34 +1,56 @@
-use clawcode::provider::{DiscoveryService, DiscoverySource, ModelInfo, ProviderError, ProviderId};
+use crate::persistence::{Db, Session};
+use crate::provider::{DiscoveryService, DiscoverySource, ModelInfo, ProviderError, ProviderId};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
 type RefreshResult = Result<Vec<ModelInfo>, ProviderError>;
 type PendingRefresh = (ProviderId, Receiver<RefreshResult>);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
+    New(String),
+    Sessions,
+    Exit,
+    Mode(ConversationMode),
     Connect,
     Models,
     ModelsRefresh,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConversationMode {
+    Plan,
+    Build,
+}
+
 pub fn parse_command(input: &str) -> Option<Command> {
     match input.trim() {
+        "/sessions" => Some(Command::Sessions),
+        "/exit" => Some(Command::Exit),
+        "/plan" => Some(Command::Mode(ConversationMode::Plan)),
+        "/build" => Some(Command::Mode(ConversationMode::Build)),
         "/connect" => Some(Command::Connect),
         "/models" => Some(Command::Models),
         "/models refresh" => Some(Command::ModelsRefresh),
+        value if value.starts_with("/new ") => Some(Command::New(value[5..].trim().to_owned())),
         _ => None,
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum CommandOutput {
+    SessionCreated(Session),
+    Sessions(Vec<Session>),
+    Mode(ConversationMode),
+    Exit,
     Connected(ProviderId),
     Models(Vec<ModelInfo>),
     RefreshStarted,
 }
 
 pub struct CommandService<D> {
+    db: Option<Db>,
+    mode: ConversationMode,
     provider: Option<ProviderId>,
     discovery: DiscoveryService,
     source: D,
@@ -49,6 +71,8 @@ impl DiscoverySource for CliDiscovery {
 impl<D: DiscoverySource + Clone> CommandService<D> {
     pub fn new(source: D) -> Self {
         Self {
+            db: None,
+            mode: ConversationMode::Plan,
             provider: None,
             discovery: DiscoveryService::new(Duration::from_secs(300), Duration::from_secs(5)),
             source,
@@ -56,9 +80,41 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
         }
     }
 
+    pub fn with_db(source: D, db: Db) -> Self {
+        let mut service = Self::new(source);
+        service.db = Some(db);
+        service
+    }
+
     pub fn execute(&mut self, command: Command) -> Result<CommandOutput, ProviderError> {
         self.poll_refresh();
         match command {
+            Command::New(title) => {
+                let title = bounded_title(&title);
+                let session = self
+                    .db
+                    .as_ref()
+                    .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+                    .and_then(|db| {
+                        db.create_session(&title)
+                            .map_err(|error| ProviderError::Protocol(error.to_string()))
+                    })?;
+                Ok(CommandOutput::SessionCreated(session))
+            }
+            Command::Sessions => {
+                let sessions = self
+                    .db
+                    .as_ref()
+                    .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))?
+                    .list_sessions()
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))?;
+                Ok(CommandOutput::Sessions(sessions))
+            }
+            Command::Exit => Ok(CommandOutput::Exit),
+            Command::Mode(mode) => {
+                self.mode = mode;
+                Ok(CommandOutput::Mode(mode))
+            }
             Command::Connect => {
                 let provider = ProviderId::new("openai");
                 self.provider = Some(provider.clone());
@@ -112,6 +168,19 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
     }
 }
 
+const MAX_SESSION_TITLE_BYTES: usize = 80;
+
+fn bounded_title(title: &str) -> String {
+    let end = title
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(title.len()))
+        .take_while(|index| *index <= MAX_SESSION_TITLE_BYTES)
+        .last()
+        .unwrap_or(0);
+    title[..end].to_owned()
+}
+
 pub fn run() -> std::io::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("--version") {
@@ -127,7 +196,7 @@ pub fn run() -> std::io::Result<()> {
         return Ok(());
     }
 
-    clawcode::tui::run()
+    crate::tui::run()
 }
 
 #[cfg(test)]

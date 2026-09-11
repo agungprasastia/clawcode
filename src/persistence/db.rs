@@ -11,7 +11,7 @@ pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 /// Maximum sessions kept.
 pub const MAX_SESSIONS: usize = 200;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Session {
     pub id: i64,
     pub title: String,
