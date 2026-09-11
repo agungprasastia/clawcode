@@ -1,8 +1,12 @@
 use std::fmt;
 use std::path::PathBuf;
 
+mod clipboard;
+mod credentials;
 mod shell;
 
+pub use clipboard::{BackendClipboard, ClipboardBackend, SystemClipboard};
+pub use credentials::UnsupportedCredentialStore;
 pub use shell::PathShellDiscovery;
 
 pub const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
@@ -41,15 +45,4 @@ pub trait ShellDiscovery {
 
 pub trait CredentialStore {
     fn get(&self, key: &str) -> Result<String, PlatformError>;
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct UnsupportedCredentialStore;
-
-impl CredentialStore for UnsupportedCredentialStore {
-    fn get(&self, _key: &str) -> Result<String, PlatformError> {
-        Err(PlatformError::Unsupported(
-            "credential store is not available in MVP".into(),
-        ))
-    }
 }

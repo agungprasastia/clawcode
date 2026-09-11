@@ -1,10 +1,27 @@
-use clawcode::platform::PathShellDiscovery;
 use clawcode::platform::{
     Clipboard, CredentialStore, MAX_CLIPBOARD_BYTES, PlatformError, ShellDiscovery,
     UnsupportedCredentialStore,
 };
+use clawcode::platform::{ClipboardBackend, PathShellDiscovery, SystemClipboard};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Default)]
+struct RecordingBackend {
+    writes: Arc<Mutex<Vec<String>>>,
+}
+
+impl ClipboardBackend for RecordingBackend {
+    fn read(&self) -> Result<String, PlatformError> {
+        Ok("backend value".into())
+    }
+
+    fn write(&self, text: &str) -> Result<(), PlatformError> {
+        self.writes.lock().unwrap().push(text.into());
+        Ok(())
+    }
+}
 
 struct FakeClipboard {
     value: String,
@@ -77,6 +94,30 @@ fn fake_clipboard_reports_read_failure_and_rejects_oversized_input() {
 }
 
 #[test]
+fn system_clipboard_rejects_oversized_write_before_backend_invocation() {
+    let backend = RecordingBackend::default();
+    let writes = backend.writes.clone();
+    let clipboard = SystemClipboard::with_backend(Box::new(backend));
+
+    assert!(matches!(
+        clipboard.write(&"x".repeat(MAX_CLIPBOARD_BYTES + 1)),
+        Err(PlatformError::InvalidInput(_))
+    ));
+    assert!(writes.lock().unwrap().is_empty());
+}
+
+#[test]
+fn system_clipboard_delegates_valid_operations() {
+    let backend = RecordingBackend::default();
+    let writes = backend.writes.clone();
+    let clipboard = SystemClipboard::with_backend(Box::new(backend));
+
+    assert_eq!(clipboard.read().unwrap(), "backend value");
+    clipboard.write("safe").unwrap();
+    assert_eq!(writes.lock().unwrap().as_slice(), ["safe"]);
+}
+
+#[test]
 fn empty_shell_name_is_invalid() {
     assert!(matches!(
         FakeShell.find(""),
@@ -87,10 +128,9 @@ fn empty_shell_name_is_invalid() {
 #[test]
 fn credential_lookup_is_explicitly_unsupported() {
     let store = UnsupportedCredentialStore;
-    assert!(matches!(
-        store.get("token"),
-        Err(PlatformError::Unsupported(_))
-    ));
+    let error = store.get("token").unwrap_err();
+    assert!(matches!(error, PlatformError::Unsupported(_)));
+    assert!(!error.to_string().contains("token"));
 }
 
 #[test]
