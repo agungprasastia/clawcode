@@ -173,7 +173,13 @@ fn restore_rejects_tampered_snapshot() {
 
 #[test]
 fn restore_replaces_file_with_before_state() {
-    // create note.txt="new", capture before="old", restore_before, then assert file="old"
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("note.txt");
+    std::fs::write(&path, b"new").unwrap();
+    let mut store = SnapshotStore::default();
+    let id = store.capture(path.clone(), FileState::present(b"old"), FileState::present(b"new"));
+    store.restore_before(id, &RealFileSystem).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"old");
 }
 ```
 
@@ -223,12 +229,22 @@ fn denied_transaction_does_not_mutate_file() {
 
 #[test]
 fn approval_required_transaction_applies_only_when_approved() {
-    // deleting a file with approved=false leaves it unchanged; approved=true removes it
+    let workspace = test_workspace_with_file("note.txt", b"old");
+    let delete = vec![Mutation::Delete { path: PathBuf::from("note.txt") }];
+    assert!(workspace.build(Mode::Build, delete.clone(), false).is_err());
+    assert_eq!(read_file(workspace.root(), "note.txt"), b"old");
+    workspace.build(Mode::Build, delete, true).unwrap();
+    assert!(!workspace.root().join("note.txt").exists());
 }
 
 #[test]
 fn failed_second_apply_restores_first_file() {
-    // FaultInjectingFileSystem fails second rename; both files retain before bytes
+    let filesystem = FaultInjectingFileSystem::fail_on_rename(2);
+    let workspace = Workspace::with_filesystem(test_root_with_two_files(), filesystem);
+    let mutations = vec![write("first.txt", b"new-first"), write("second.txt", b"new-second")];
+    assert!(workspace.build(Mode::Build, mutations, true).is_err());
+    assert_eq!(read_file(workspace.root(), "first.txt"), b"old-first");
+    assert_eq!(read_file(workspace.root(), "second.txt"), b"old-second");
 }
 ```
 
@@ -270,13 +286,21 @@ git commit -m "feat: add transactional workspace mutations"
 ```rust
 #[test]
 fn undo_then_redo_restores_both_file_versions() {
-    // build old→new, undo asserts old, redo asserts new
+    let workspace = test_workspace_with_file("note.txt", b"old");
+    workspace.build(Mode::Build, vec![write("note.txt", b"new")], true).unwrap();
+    workspace.undo().unwrap();
+    assert_eq!(read_file(workspace.root(), "note.txt"), b"old");
+    workspace.redo().unwrap();
+    assert_eq!(read_file(workspace.root(), "note.txt"), b"new");
 }
 
 #[cfg(unix)]
 #[test]
 fn root_rejects_symlink_escape() {
-    // symlink root/link to an external directory; resolve("link/secret.txt") returns error
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+    assert!(WorkspaceRoot::open(root.path()).unwrap().resolve("link/secret.txt").is_err());
 }
 ```
 
