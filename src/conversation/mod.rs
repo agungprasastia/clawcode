@@ -104,19 +104,46 @@ impl ConversationRuntime {
         ))
     }
     pub fn events(&self, request: &StreamRequest) -> Vec<ConversationEvent> {
-        match self.run(request) {
-            Ok(turn) => {
+        match self
+            .provider
+            .as_ref()
+            .expect("provider runtime has provider")
+            .send(request)
+        {
+            Ok(response) => {
                 let mut events = Vec::new();
-                if !turn.assistant_output().is_empty() {
-                    events.push(ConversationEvent::TextDelta(
-                        turn.assistant_output().to_owned(),
-                    ));
-                }
-                if let Some(usage) = turn.usage() {
-                    events.push(ConversationEvent::Usage(usage));
-                }
-                if let Some(reason) = turn.finish_reason() {
-                    events.push(ConversationEvent::Finished(reason));
+                let mut collected_text = 0;
+                for event in response.events {
+                    match event {
+                        StreamEvent::TextDelta(delta) => {
+                            let remaining = self.text_limit.saturating_sub(collected_text);
+                            let end = delta
+                                .char_indices()
+                                .map(|(index, _)| index)
+                                .chain(std::iter::once(delta.len()))
+                                .take_while(|&index| index <= remaining)
+                                .last()
+                                .unwrap_or(0);
+                            collected_text += end;
+                            if end > 0 {
+                                events.push(ConversationEvent::TextDelta(delta[..end].to_owned()));
+                            }
+                        }
+                        StreamEvent::Usage(usage) => events.push(ConversationEvent::Usage(usage)),
+                        StreamEvent::Finish { reason } => {
+                            events.push(ConversationEvent::Finished(reason))
+                        }
+                        StreamEvent::Cancelled => {
+                            events.push(ConversationEvent::Cancelled);
+                            break;
+                        }
+                        StreamEvent::Error(message) => {
+                            events.push(ConversationEvent::Error(message))
+                        }
+                        _ => {
+                            events.push(ConversationEvent::Error("unsupported stream event".into()))
+                        }
+                    }
                 }
                 events
             }
@@ -159,6 +186,9 @@ impl ConversationRuntime {
                 StreamEvent::Cancelled => ConversationEvent::Cancelled,
                 _ => ConversationEvent::Error("unsupported stream event".into()),
             })
+            .filter(
+                |event| !matches!(event, ConversationEvent::TextDelta(delta) if delta.is_empty()),
+            )
             .collect()
     }
 }

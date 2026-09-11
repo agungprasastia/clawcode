@@ -42,6 +42,28 @@ fn cancellation_wins_over_later_finish_and_error() {
 }
 
 #[test]
+fn stale_prompt_and_text_cannot_revive_cancelled_turn() {
+    let mut app = App::default();
+    app.apply_conversation(ConversationEvent::PromptSubmitted {
+        prompt: "hello".into(),
+        provider: "p".into(),
+        model: "m".into(),
+    });
+    app.apply_conversation(ConversationEvent::Cancelled);
+    app.apply_conversation(ConversationEvent::PromptSubmitted {
+        prompt: "stale".into(),
+        provider: "stale-provider".into(),
+        model: "stale-model".into(),
+    });
+    app.apply_conversation(ConversationEvent::TextDelta("stale output".into()));
+
+    assert_eq!(app.conversation_status(), ConversationStatus::Cancelled);
+    assert_eq!(app.selected_provider(), "p");
+    assert_eq!(app.selected_model(), "m");
+    assert_eq!(app.transcript(), "");
+}
+
+#[test]
 fn plan_mode_rejects_mutation() {
     let mut app = App::default();
     app.set_mode(ConversationMode::Plan);

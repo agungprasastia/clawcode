@@ -26,9 +26,13 @@ Connected `ConversationEvent` to bounded TUI state. Preserved existing priority 
 - Added selected provider/model state and bounded diagnostic state.
 - Added PLAN mutation rejection. Rejected mutation sets `Rejected` status and bounded diagnostic; it does not perform mutation.
 - Added cancellation terminal priority. Once cancelled, later finish/error events cannot overwrite cancellation.
+- Made cancellation terminal across stale events: cancelled turns ignore later prompts, deltas, finishes, errors, and mutations.
+- Preserved `ConversationEvent::Cancelled` in `ConversationRuntime::events()` and stopped processing later events.
+- Suppressed empty text deltas produced after configured text limit.
 - Kept transcript bounded by `App::MAX_TRANSCRIPT_BYTES` and UTF-8 safe.
 - Rendered mode, status, provider, model, and diagnostic state.
 - Added focused integration tests in `tests/tui_conversation.rs`.
+- Added runtime cancellation and empty-delta regression tests in `tests/conversation_runtime.rs`.
 
 ## TDD Evidence
 
@@ -59,3 +63,4 @@ All passed:
 - `Usage` is consumed but not yet stored in TUI state; metrics integration belongs to M7 Task 5.
 - `PromptSubmitted.prompt` is intentionally not copied into transcript; existing prompt editing state remains separate from assistant transcript.
 - BUILD mutation execution and approval lifecycle remain Task 4 scope.
+- Normalized tool lifecycle events remain deferred; Task 2 keeps current event model and does not add tool-specific states.

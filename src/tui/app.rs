@@ -114,9 +114,7 @@ impl App {
     }
 
     pub fn apply_conversation(&mut self, event: ConversationEvent) {
-        if matches!(self.status, ConversationStatus::Cancelled)
-            && !matches!(event, ConversationEvent::PromptSubmitted { .. })
-        {
+        if self.status == ConversationStatus::Cancelled {
             return;
         }
         match event {

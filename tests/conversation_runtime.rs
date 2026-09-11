@@ -88,6 +88,29 @@ fn provider_error_is_terminal_event() {
 }
 
 #[test]
+fn events_preserves_cancelled_as_terminal_event() {
+    let runtime = ConversationRuntime::new(FakeProvider {
+        result: Ok(StreamResponse {
+            events: vec![
+                StreamEvent::TextDelta("partial".into()),
+                StreamEvent::Cancelled,
+                StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                },
+            ],
+        }),
+    });
+
+    assert_eq!(
+        runtime.events(&request()),
+        vec![
+            ConversationEvent::TextDelta("partial".into()),
+            ConversationEvent::Cancelled,
+        ]
+    );
+}
+
+#[test]
 fn stream_cancellation_emits_only_terminal_cancelled() {
     let (sender, stream) = ProviderStream::channel(2);
     sender
@@ -136,6 +159,28 @@ fn collected_stream_text_respects_configured_utf8_safe_limit() {
         events,
         vec![
             ConversationEvent::TextDelta("a".into()),
+            ConversationEvent::Finished(FinishReason::Stop),
+        ]
+    );
+}
+
+#[test]
+fn collected_stream_text_omits_empty_delta_after_limit() {
+    let (sender, stream) = ProviderStream::channel(4);
+    sender.send(StreamEvent::TextDelta("ab".into())).unwrap();
+    sender.send(StreamEvent::TextDelta("cd".into())).unwrap();
+    sender
+        .send(StreamEvent::Finish {
+            reason: FinishReason::Stop,
+        })
+        .unwrap();
+    drop(sender);
+    let runtime = ConversationRuntime::from_stream_with_text_limit(stream, 2);
+
+    assert_eq!(
+        runtime.collect_events(),
+        vec![
+            ConversationEvent::TextDelta("ab".into()),
             ConversationEvent::Finished(FinishReason::Stop),
         ]
     );
