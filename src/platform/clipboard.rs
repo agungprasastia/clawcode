@@ -36,7 +36,13 @@ pub struct BackendClipboard {
 
 impl Clipboard for BackendClipboard {
     fn read(&self) -> Result<String, PlatformError> {
-        self.backend.read()
+        let text = self.backend.read()?;
+        if text.len() > MAX_CLIPBOARD_BYTES {
+            return Err(PlatformError::InvalidInput(
+                "clipboard payload exceeds limit".into(),
+            ));
+        }
+        Ok(text)
     }
 
     fn write(&self, text: &str) -> Result<(), PlatformError> {
@@ -127,4 +133,37 @@ fn io_error(error: std::io::Error) -> PlatformError {
 
 fn unavailable(message: &str) -> PlatformError {
     PlatformError::Unavailable(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeClipboard {
+        text: String,
+    }
+
+    impl ClipboardBackend for FakeClipboard {
+        fn read(&self) -> Result<String, PlatformError> {
+            Ok(self.text.clone())
+        }
+
+        fn write(&self, _text: &str) -> Result<(), PlatformError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_backend_read() {
+        let clipboard = SystemClipboard::with_backend(Box::new(FakeClipboard {
+            text: "x".repeat(MAX_CLIPBOARD_BYTES + 1),
+        }));
+
+        assert_eq!(
+            clipboard.read(),
+            Err(PlatformError::InvalidInput(
+                "clipboard payload exceeds limit".into()
+            ))
+        );
+    }
 }
