@@ -1,6 +1,5 @@
 mod cli;
 mod notify;
-mod workspace;
 
 fn main() {
     clawcode::core::init_tracing();
