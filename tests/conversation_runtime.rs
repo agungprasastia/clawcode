@@ -88,6 +88,15 @@ fn provider_error_is_terminal_event() {
 }
 
 #[test]
+fn provider_cancellation_is_cancelled_terminal_event() {
+    let runtime = ConversationRuntime::new(FakeProvider {
+        result: Err(ProviderError::Cancelled),
+    });
+
+    assert_eq!(runtime.events(&request()), vec![ConversationEvent::Cancelled]);
+}
+
+#[test]
 fn events_preserves_cancelled_as_terminal_event() {
     let runtime = ConversationRuntime::new(FakeProvider {
         result: Ok(StreamResponse {

@@ -147,6 +147,7 @@ impl ConversationRuntime {
                 }
                 events
             }
+            Err(ProviderError::Cancelled) => vec![ConversationEvent::Cancelled],
             Err(error) => vec![ConversationEvent::Error(error.to_string())],
         }
     }
