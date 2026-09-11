@@ -200,7 +200,10 @@ impl<F: FileSystem> Workspace<F> {
                                 Err(error)
                             }
                         },
-                        Err(error) => Err(error),
+                        Err(error) => {
+                            let _ = self.filesystem.remove_file(&temporary);
+                            Err(error)
+                        }
                     }
                 }
             };

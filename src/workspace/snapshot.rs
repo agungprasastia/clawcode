@@ -146,6 +146,7 @@ impl SnapshotStore {
                         diagnostic("create snapshot temporary path", &snapshot.path, error)
                     })?;
                 if let Err(error) = filesystem.write_new(&temporary, bytes) {
+                    let _ = filesystem.remove_file(&temporary);
                     return Err(diagnostic("write snapshot temporary", &temporary, error));
                 }
                 if let Err(error) = filesystem.replace(&temporary, &snapshot.path) {

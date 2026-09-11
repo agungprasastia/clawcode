@@ -59,6 +59,13 @@ impl CollidingTemporaryFileSystem {
     fn bytes(&self, path: &Path) -> Option<Vec<u8>> {
         self.files.lock().unwrap().get(path).cloned()
     }
+
+    fn has_temporary_file(&self) -> bool {
+        self.files.lock().unwrap().keys().any(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".tmp"))
+        })
+    }
 }
 
 impl FileSystem for CollidingTemporaryFileSystem {
@@ -660,6 +667,7 @@ fn colliding_temporary_file_is_not_overwritten() {
 
     assert_eq!(error.category(), ErrorCategory::Workspace);
     assert_eq!(filesystem.bytes(&path), Some(b"before".to_vec()));
+    assert!(!filesystem.has_temporary_file());
 }
 
 #[test]
