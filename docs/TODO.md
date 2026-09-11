@@ -24,11 +24,11 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 
 ## P0 — Provider dan streaming
 
-- [ ] `P0-M4-01` Definisikan normalized event enum dan finish/usage types.
-- [ ] `P0-M4-02` Implement bounded stream channel dan delta coalescing.
-- [ ] `P0-M4-03` Implement priority cancellation dan terminal `Cancelled`.
-- [ ] `P0-M4-04` Implement incremental tool argument assembler dengan size cap.
-- [ ] `P0-M4-05` Implement provider trait, registry, capability flags, metrics.
+- [x] `P0-M4-01` Definisikan normalized event enum dan finish/usage types.
+- [x] `P0-M4-02` Implement bounded stream channel dan delta coalescing.
+- [x] `P0-M4-03` Implement priority cancellation dan terminal `Cancelled`.
+- [x] `P0-M4-04` Implement incremental tool argument assembler dengan size cap.
+- [x] `P0-M4-05` Implement provider trait, registry, capability flags, metrics.
 - [ ] `P0-M5-01` Implement OpenAI-compatible adapter dan custom endpoint.
 - [ ] `P0-M5-02` Implement native Anthropic adapter.
 - [ ] `P0-M5-03` Implement native Ollama adapter.
