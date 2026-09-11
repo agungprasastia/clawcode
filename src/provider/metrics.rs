@@ -5,7 +5,6 @@ use std::time::Duration;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnMetrics {
-    pub ttft: Option<Duration>,
     pub duration: Duration,
     pub usage: Option<Usage>,
     pub finish_reason: Option<FinishReason>,
@@ -14,9 +13,6 @@ pub struct TurnMetrics {
 }
 
 impl TurnMetrics {
-    pub fn ttft(&self) -> Option<Duration> {
-        self.ttft
-    }
     pub fn duration(&self) -> Option<Duration> {
         Some(self.duration)
     }

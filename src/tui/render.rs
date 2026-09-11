@@ -22,8 +22,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     let quiet = Style::default().fg(Color::DarkGray);
     let metrics = app.metrics().map_or_else(String::new, |metrics| {
         format!(
-            "  /  ttft {:?}  /  duration {:?}  /  usage {:?}  /  finish {:?}",
-            metrics.ttft(),
+            "  /  duration {:?}  /  usage {:?}  /  finish {:?}",
             metrics.duration(),
             metrics.usage(),
             metrics.finish_reason()

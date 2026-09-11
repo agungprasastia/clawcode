@@ -55,7 +55,6 @@ fn records_bounded_metrics_identity_usage_and_finish() {
     });
     let turn = runtime.run(&request()).unwrap();
     let metrics = turn.metrics();
-    assert!(metrics.ttft().is_some());
     assert!(metrics.duration().is_some());
     assert_eq!(
         metrics.usage(),
@@ -124,4 +123,32 @@ fn does_not_persist_without_terminal_success() {
         .unwrap();
     let db = writer.shutdown();
     assert!(db.messages(session.id).unwrap().is_empty());
+}
+
+#[test]
+fn does_not_persist_error_finish_or_cancellation() {
+    for events in [
+        vec![
+            StreamEvent::TextDelta("partial".into()),
+            StreamEvent::Finish {
+                reason: FinishReason::Error,
+            },
+        ],
+        vec![
+            StreamEvent::TextDelta("partial".into()),
+            StreamEvent::Cancelled,
+        ],
+    ] {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("test").unwrap();
+        let writer = WriterHandle::spawn(db);
+        let runtime = ConversationRuntime::new(FakeProvider {
+            response: StreamResponse { events },
+        });
+        runtime
+            .run_and_persist(&request(), &writer, session.id)
+            .unwrap();
+        let db = writer.shutdown();
+        assert!(db.messages(session.id).unwrap().is_empty());
+    }
 }

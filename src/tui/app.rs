@@ -165,6 +165,7 @@ impl App {
                 }
             }
             ConversationEvent::Usage(_) => {}
+            ConversationEvent::Metrics(metrics) => self.metrics = Some(metrics),
         }
     }
 

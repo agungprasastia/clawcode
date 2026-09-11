@@ -9,6 +9,7 @@ use std::time::Instant;
 pub mod tools;
 
 pub const DEFAULT_TEXT_LIMIT: usize = 256 * 1024;
+const MAX_IDENTITY_BYTES: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationEvent {
@@ -19,6 +20,7 @@ pub enum ConversationEvent {
     },
     TextDelta(String),
     Usage(Usage),
+    Metrics(TurnMetrics),
     Finished(FinishReason),
     Error(String),
     Cancelled,
@@ -40,7 +42,6 @@ impl TurnState {
             usage: None,
             finish_reason: None,
             metrics: TurnMetrics {
-                ttft: None,
                 duration: std::time::Duration::ZERO,
                 usage: None,
                 finish_reason: None,
@@ -124,12 +125,11 @@ impl ConversationRuntime {
             .expect("provider runtime has provider")
             .send(request)?;
         let mut state = TurnState::from_events(response.events, self.text_limit);
-        state.metrics.provider = provider;
-        state.metrics.model = request.model.clone();
+        state.metrics.provider = bounded_identity(provider);
+        state.metrics.model = bounded_identity(request.model.clone());
         state.metrics.duration = started.elapsed();
         state.metrics.usage = state.usage;
         state.metrics.finish_reason = state.finish_reason;
-        state.metrics.ttft = (!state.output.is_empty()).then_some(state.metrics.duration);
         Ok(state)
     }
 
@@ -140,7 +140,10 @@ impl ConversationRuntime {
         session_id: i64,
     ) -> Result<TurnState, ProviderError> {
         let state = self.run(request)?;
-        if state.finish_reason.is_some() {
+        if matches!(
+            state.finish_reason,
+            Some(FinishReason::Stop | FinishReason::Length | FinishReason::ToolCall)
+        ) {
             writer
                 .try_append(session_id, "assistant", &state.output)
                 .map_err(ProviderError::Protocol)?;
@@ -148,6 +151,14 @@ impl ConversationRuntime {
         Ok(state)
     }
     pub fn events(&self, request: &StreamRequest) -> Vec<ConversationEvent> {
+        let started = Instant::now();
+        let provider = bounded_identity(
+            self.provider
+                .as_ref()
+                .expect("provider runtime has provider")
+                .id()
+                .to_string(),
+        );
         match self
             .provider
             .as_ref()
@@ -155,8 +166,10 @@ impl ConversationRuntime {
             .send(request)
         {
             Ok(response) => {
+                let state = TurnState::from_events(response.events.clone(), self.text_limit);
                 let mut events = Vec::new();
                 let mut collected_text = 0;
+                let mut cancelled = false;
                 for event in response.events {
                     match event {
                         StreamEvent::TextDelta(delta) => {
@@ -179,6 +192,7 @@ impl ConversationRuntime {
                         }
                         StreamEvent::Cancelled => {
                             events.push(ConversationEvent::Cancelled);
+                            cancelled = true;
                             break;
                         }
                         StreamEvent::Error(message) => {
@@ -189,12 +203,22 @@ impl ConversationRuntime {
                         }
                     }
                 }
+                if !cancelled {
+                    let mut metrics = state.metrics;
+                    metrics.provider = provider;
+                    metrics.model = bounded_identity(request.model.clone());
+                    metrics.duration = started.elapsed();
+                    metrics.usage = state.usage;
+                    metrics.finish_reason = state.finish_reason;
+                    events.push(ConversationEvent::Metrics(metrics));
+                }
                 events
             }
             Err(ProviderError::Cancelled) => vec![ConversationEvent::Cancelled],
             Err(error) => vec![ConversationEvent::Error(error.to_string())],
         }
     }
+
     pub fn cancel(&self) {
         if let Some(stream) = self
             .stream
@@ -236,4 +260,16 @@ impl ConversationRuntime {
             )
             .collect()
     }
+}
+
+fn bounded_identity(mut value: String) -> String {
+    let end = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(value.len()))
+        .take_while(|index| *index <= MAX_IDENTITY_BYTES)
+        .last()
+        .unwrap_or(0);
+    value.truncate(end);
+    value
 }

@@ -1,6 +1,6 @@
 use clawcode::{
     conversation::ConversationEvent,
-    provider::FinishReason,
+    provider::{FinishReason, TurnMetrics},
     tui::{App, ConversationMode, ConversationStatus},
 };
 
@@ -24,6 +24,20 @@ fn conversation_events_update_turn_and_diagnostic_state() {
         ConversationStatus::Finished(FinishReason::Stop)
     );
     assert_eq!(app.transcript(), "hai");
+}
+
+#[test]
+fn app_receives_runtime_metrics_through_conversation_events() {
+    let mut app = App::default();
+    let metrics = TurnMetrics {
+        duration: std::time::Duration::from_millis(4),
+        usage: None,
+        finish_reason: Some(FinishReason::Stop),
+        provider: "provider".into(),
+        model: "model".into(),
+    };
+    app.apply_conversation(ConversationEvent::Metrics(metrics.clone()));
+    assert_eq!(app.metrics(), Some(&metrics));
 }
 
 #[test]
