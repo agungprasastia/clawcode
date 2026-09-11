@@ -838,6 +838,97 @@ fn snapshot_ids_remain_restorable_after_later_builds() {
 }
 
 #[test]
+fn undo_and_redo_restore_all_transaction_entries() {
+    let root = test_directory();
+    let changed = root.path().join("changed.txt");
+    let removed = root.path().join("removed.txt");
+    fs::write(&changed, b"before").unwrap();
+    fs::write(&removed, b"remove me").unwrap();
+    let workspace = Workspace::open(root.path()).unwrap();
+
+    workspace
+        .build(
+            Mode::Build,
+            vec![
+                Mutation::Write {
+                    path: "changed.txt".into(),
+                    bytes: b"after".to_vec(),
+                },
+                Mutation::Delete {
+                    path: "removed.txt".into(),
+                },
+                Mutation::Write {
+                    path: "created.txt".into(),
+                    bytes: b"created".to_vec(),
+                },
+            ],
+            true,
+        )
+        .unwrap();
+
+    workspace.undo().unwrap();
+    assert_eq!(fs::read(&changed).unwrap(), b"before");
+    assert_eq!(fs::read(&removed).unwrap(), b"remove me");
+    assert!(!root.path().join("created.txt").exists());
+
+    workspace.redo().unwrap();
+    assert_eq!(fs::read(&changed).unwrap(), b"after");
+    assert!(!removed.exists());
+    assert_eq!(
+        fs::read(root.path().join("created.txt")).unwrap(),
+        b"created"
+    );
+}
+
+#[test]
+fn successful_build_clears_redo_history() {
+    let root = test_directory();
+    let workspace = Workspace::open(root.path()).unwrap();
+
+    workspace
+        .build(
+            Mode::Build,
+            vec![Mutation::Write {
+                path: "first.txt".into(),
+                bytes: b"first".to_vec(),
+            }],
+            true,
+        )
+        .unwrap();
+    workspace.undo().unwrap();
+    workspace
+        .build(
+            Mode::Build,
+            vec![Mutation::Write {
+                path: "second.txt".into(),
+                bytes: b"second".to_vec(),
+            }],
+            true,
+        )
+        .unwrap();
+
+    let error = workspace.redo().unwrap_err();
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    assert!(error.message().contains("redo"));
+    assert!(!root.path().join("first.txt").exists());
+    assert_eq!(fs::read(root.path().join("second.txt")).unwrap(), b"second");
+}
+
+#[test]
+fn undo_and_redo_report_empty_history() {
+    let root = test_directory();
+    let workspace = Workspace::open(root.path()).unwrap();
+
+    let undo_error = workspace.undo().unwrap_err();
+    let redo_error = workspace.redo().unwrap_err();
+
+    assert_eq!(undo_error.category(), ErrorCategory::Workspace);
+    assert!(undo_error.message().contains("undo"));
+    assert_eq!(redo_error.category(), ErrorCategory::Workspace);
+    assert!(redo_error.message().contains("redo"));
+}
+
+#[test]
 fn restore_before_replaces_current_file() {
     let root = test_directory();
     let path = root.path().join("note.txt");

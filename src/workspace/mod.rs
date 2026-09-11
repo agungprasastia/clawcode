@@ -41,7 +41,13 @@ pub struct ReadResult {
 pub struct Workspace<F: FileSystem = RealFileSystem> {
     root: WorkspaceRoot,
     filesystem: F,
-    snapshots: Mutex<SnapshotStore>,
+    history: Mutex<WorkspaceHistory>,
+}
+
+struct WorkspaceHistory {
+    snapshots: SnapshotStore,
+    undo: Vec<Vec<SnapshotId>>,
+    redo: Vec<Vec<SnapshotId>>,
 }
 
 impl Workspace<RealFileSystem> {
@@ -55,7 +61,11 @@ impl<F: FileSystem> Workspace<F> {
         Ok(Self {
             root: WorkspaceRoot::open(root)?,
             filesystem,
-            snapshots: Mutex::new(SnapshotStore::new()),
+            history: Mutex::new(WorkspaceHistory {
+                snapshots: SnapshotStore::new(),
+                undo: Vec::new(),
+                redo: Vec::new(),
+            }),
         })
     }
 
@@ -134,9 +144,10 @@ impl<F: FileSystem> Workspace<F> {
             prepared.push((path, before, after, operation));
         }
 
-        let mut snapshots = self.snapshots.lock().map_err(|_| {
+        let mut history = self.history.lock().map_err(|_| {
             Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned")
         })?;
+        let snapshots = &mut history.snapshots;
         let checkpoint = snapshots.checkpoint();
         let mut entries = Vec::with_capacity(prepared.len());
         for (path, before, after, operation) in prepared {
@@ -226,25 +237,102 @@ impl<F: FileSystem> Workspace<F> {
             }
             applied.push(*id);
         }
+        let snapshot_ids = entries.iter().map(|entry| entry.0).collect::<Vec<_>>();
+        if !snapshot_ids.is_empty() {
+            history.undo.push(snapshot_ids.clone());
+        }
+        history.redo.clear();
         Ok(TransactionResult {
-            snapshot_ids: entries.iter().map(|entry| entry.0).collect(),
+            snapshot_ids,
             diffs,
         })
     }
 
+    pub fn undo(&self) -> Result<(), Diagnostic> {
+        let mut history = self.history.lock().map_err(|_| {
+            Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned")
+        })?;
+        let transaction = history.undo.pop().ok_or_else(|| {
+            Diagnostic::new(ErrorCategory::Workspace, "no workspace transaction to undo")
+        })?;
+        if let Err(error) =
+            restore_transaction_before(&history.snapshots, &transaction, &self.filesystem)
+        {
+            history.undo.push(transaction);
+            return Err(error);
+        }
+        history.redo.push(transaction);
+        Ok(())
+    }
+
+    pub fn redo(&self) -> Result<(), Diagnostic> {
+        let mut history = self.history.lock().map_err(|_| {
+            Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned")
+        })?;
+        let transaction = history.redo.pop().ok_or_else(|| {
+            Diagnostic::new(ErrorCategory::Workspace, "no workspace transaction to redo")
+        })?;
+        if let Err(error) =
+            restore_transaction_after(&history.snapshots, &transaction, &self.filesystem)
+        {
+            history.redo.push(transaction);
+            return Err(error);
+        }
+        history.undo.push(transaction);
+        Ok(())
+    }
+
     pub fn restore_before(&self, id: SnapshotId) -> Result<(), Diagnostic> {
-        self.snapshots
+        self.history
             .lock()
             .map_err(|_| Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned"))?
+            .snapshots
             .restore_before(id, &self.filesystem)
     }
 
     pub fn restore_after(&self, id: SnapshotId) -> Result<(), Diagnostic> {
-        self.snapshots
+        self.history
             .lock()
             .map_err(|_| Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned"))?
+            .snapshots
             .restore_after(id, &self.filesystem)
     }
+}
+
+fn restore_transaction_before(
+    snapshots: &SnapshotStore,
+    transaction: &[SnapshotId],
+    filesystem: &dyn FileSystem,
+) -> Result<(), Diagnostic> {
+    let mut restored = Vec::with_capacity(transaction.len());
+    for id in transaction.iter().rev() {
+        if let Err(error) = snapshots.restore_before(*id, filesystem) {
+            for restored_id in restored.iter().rev() {
+                let _ = snapshots.restore_after(*restored_id, filesystem);
+            }
+            return Err(error);
+        }
+        restored.push(*id);
+    }
+    Ok(())
+}
+
+fn restore_transaction_after(
+    snapshots: &SnapshotStore,
+    transaction: &[SnapshotId],
+    filesystem: &dyn FileSystem,
+) -> Result<(), Diagnostic> {
+    let mut restored = Vec::with_capacity(transaction.len());
+    for id in transaction {
+        if let Err(error) = snapshots.restore_after(*id, filesystem) {
+            for restored_id in restored.iter().rev() {
+                let _ = snapshots.restore_before(*restored_id, filesystem);
+            }
+            return Err(error);
+        }
+        restored.push(*id);
+    }
+    Ok(())
 }
 
 fn diagnostic(action: &str, path: &Path, error: std::io::Error) -> Diagnostic {

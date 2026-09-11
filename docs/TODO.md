@@ -37,12 +37,12 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 
 ## P0 — Workspace dan agent modes
 
-- [ ] `P0-M6-01` Detect project root dan canonical path boundary.
-- [ ] `P0-M6-02` Implement read tools dengan output limit.
-- [ ] `P0-M6-03` Implement transactional edit: validate → snapshot → diff → policy → apply.
-- [ ] `P0-M6-04` Implement shell risk classification dan project boundary.
-- [ ] `P0-M6-05` Implement approval, atomic restore, checksum, undo/redo.
-- [ ] `P0-M6-06` Enforce PLAN read-only; gate forbidden mutation tests.
+- [x] `P0-M6-01` Detect project root dan canonical path boundary.
+- [x] `P0-M6-02` Implement read tools dengan output limit.
+- [x] `P0-M6-03` Implement transactional edit: validate → snapshot → diff → policy → apply.
+- [x] `P0-M6-04` Implement shell risk classification dan project boundary.
+- [x] `P0-M6-05` Implement approval, atomic restore, checksum, undo/redo.
+- [x] `P0-M6-06` Enforce PLAN read-only; gate forbidden mutation tests.
 - [ ] `P0-M7-01` Hubungkan conversation, tool lifecycle, diff review, metrics.
 - [ ] `P0-M7-02` Implement `/new`, `/sessions`, `/exit`, mode switch, model/session picker.
 - [ ] `P0-M7-03` Load OpenCode-style agents, commands, permissions, themes; gate compatibility fixtures.
