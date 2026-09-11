@@ -117,14 +117,14 @@ impl SnapshotStore {
                     temporary_sibling(&snapshot.path, &id.0.to_string()).map_err(|error| {
                         diagnostic("create snapshot temporary path", &snapshot.path, error)
                     })?;
-                filesystem
-                    .write(&temporary, bytes)
-                    .map_err(|error| diagnostic("write snapshot temporary", &temporary, error))?;
-                filesystem
-                    .rename(&temporary, &snapshot.path)
-                    .map_err(|error| {
-                        diagnostic("replace snapshot target", &snapshot.path, error)
-                    })?;
+                if let Err(error) = filesystem.write(&temporary, bytes) {
+                    let _ = filesystem.remove_file(&temporary);
+                    return Err(diagnostic("write snapshot temporary", &temporary, error));
+                }
+                if let Err(error) = filesystem.replace(&temporary, &snapshot.path) {
+                    let _ = filesystem.remove_file(&temporary);
+                    return Err(diagnostic("replace snapshot target", &snapshot.path, error));
+                }
             }
         }
         Ok(())

@@ -1,10 +1,13 @@
 use clawcode::core::error::ErrorCategory;
 use clawcode::workspace::{
-    FileState, Mode, Operation, Policy, PolicyDecision, ReadResult, RealFileSystem, Risk,
-    SnapshotStore, Workspace, WorkspaceRoot, classify_shell,
+    FileState, FileSystem, Mode, Operation, Policy, PolicyDecision, ReadResult, RealFileSystem,
+    Risk, SnapshotStore, Workspace, WorkspaceRoot, classify_shell,
 };
+use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,6 +36,65 @@ fn test_directory() -> TestDirectory {
     let path = std::env::temp_dir().join(format!("clawcode-workspace-{unique}-{sequence}"));
     fs::create_dir(&path).unwrap();
     TestDirectory(path)
+}
+
+#[derive(Clone, Copy)]
+enum RestoreFailure {
+    Write,
+    Rename,
+}
+
+struct FailingFileSystem {
+    failure: RestoreFailure,
+    files: Mutex<HashMap<PathBuf, Vec<u8>>>,
+}
+
+impl FailingFileSystem {
+    fn new(failure: RestoreFailure) -> Self {
+        Self {
+            failure,
+            files: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl FileSystem for FailingFileSystem {
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.files
+            .lock()
+            .unwrap()
+            .get(path)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing file"))
+    }
+
+    fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.files
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), bytes.to_vec());
+        match self.failure {
+            RestoreFailure::Write => Err(io::Error::other("write failed")),
+            RestoreFailure::Rename => Ok(()),
+        }
+    }
+
+    fn replace(&self, _from: &Path, _to: &Path) -> io::Result<()> {
+        Err(io::Error::other("rename failed"))
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.files.lock().unwrap().remove(path);
+        Ok(())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        self.files.lock().unwrap().contains_key(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        Ok(path.to_path_buf())
+    }
 }
 
 fn create_directory_symlink(link: &Path, target: &Path) -> bool {
@@ -289,6 +351,30 @@ fn restore_before_replaces_current_file() {
     snapshots.restore_before(id, &RealFileSystem).unwrap();
 
     assert_eq!(fs::read(path).unwrap(), b"before");
+}
+
+#[test]
+fn failed_restore_removes_temporary_sibling_file() {
+    let root = test_directory();
+    let path = root.path().join("note.txt");
+    let temporary = root.path().join(".note.txt.0.tmp");
+    let mut snapshots = SnapshotStore::new();
+    let id = snapshots
+        .capture(
+            path.clone(),
+            FileState::present(b"before".to_vec()),
+            FileState::Missing,
+        )
+        .unwrap();
+
+    for failure in [RestoreFailure::Write, RestoreFailure::Rename] {
+        let filesystem = FailingFileSystem::new(failure);
+
+        let error = snapshots.restore_before(id, &filesystem).unwrap_err();
+
+        assert_eq!(error.category(), ErrorCategory::Workspace);
+        assert!(!filesystem.exists(&temporary));
+    }
 }
 
 #[test]
