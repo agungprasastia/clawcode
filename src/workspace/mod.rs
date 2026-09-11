@@ -194,11 +194,12 @@ impl<F: FileSystem> Workspace<F> {
             ));
         }
         if decisions.contains(&PolicyDecision::ApprovalRequired) && !approved {
+            let transaction = TransactionResult {
+                snapshot_ids: Vec::new(),
+                diffs: diffs.clone(),
+            };
             snapshots.discard(checkpoint);
-            return Err(Diagnostic::new(
-                ErrorCategory::Workspace,
-                "workspace mutation requires approval",
-            ));
+            return Ok(transaction);
         }
 
         let mut applied = Vec::new();
