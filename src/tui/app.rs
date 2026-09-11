@@ -208,10 +208,12 @@ impl App {
         let Ok(notification) = Notification::new(kind, title, body) else {
             return;
         };
-        let report = BestEffortNotifier.notify(&notification);
-        for failure in report.failures {
-            tracing::debug!(%failure, "notification backend failed");
-        }
+        std::thread::spawn(move || {
+            let report = BestEffortNotifier.notify(&notification);
+            for failure in report.failures {
+                tracing::debug!(%failure, "notification backend failed");
+            }
+        });
     }
 
     pub fn set_mode(&mut self, mode: ConversationMode) {

@@ -46,7 +46,7 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 - [x] `P0-M7-01` Hubungkan conversation, tool lifecycle, diff review, metrics.
 - [x] `P0-M7-02` Implement `/new`, `/sessions`, `/exit`, mode switch, model/session picker; gate scripted runtime flow in `tests/conversation_flow.rs`.
 - [x] `P0-M7-03` Load OpenCode-style agents, commands, permissions, themes; gate compatibility fixtures in `tests/compat_config.rs`.
-- [ ] `P0-M8-01` Implement terminal/desktop notification dan sound best-effort; terminal/sound fallback and failure isolation implemented; desktop toast adapter remains.
+- [x] `P0-M8-01` Implement terminal/desktop notification dan sound best-effort; Windows Runtime toast, async dispatch, terminal/sound fallback, dan failure isolation tervalidasi.
 - [x] `P0-M8-02` Add clipboard/shell discovery/credential-store OS adapters dengan portable fallback; gate OS adapter tests.
 
 ## P1 — Release hardening sebelum MVP release

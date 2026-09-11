@@ -12,8 +12,13 @@ pub fn terminal_bell() -> Result<(), String> {
 pub fn desktop(notification: &Notification) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("msg.exe")
-            .args(["*", "/TIME:5", &notification.title, &notification.body])
+        let script = format!(
+            "$ErrorActionPreference='Stop'; [Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]$xml=New-Object Windows.Data.Xml.Dom.XmlDocument; $xml.LoadXml(\"<toast><visual><binding template='ToastGeneric'><text>{}</text><text>{}</text></binding></visual></toast>\"); $toast=[Windows.UI.Notifications.ToastNotification,Windows,ContentType=WindowsRuntime]::new($xml); [Windows.UI.Notifications.ToastNotificationManager,Windows,ContentType=WindowsRuntime]::CreateToastNotifier('Clawcode').Show($toast)",
+            xml_escape(&notification.title),
+            xml_escape(&notification.body)
+        );
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .spawn()
             .map(|_| ())
             .map_err(|error| format!("desktop notification unavailable: {error}"))
@@ -49,6 +54,16 @@ pub fn desktop(notification: &Notification) -> Result<(), String> {
             Err("desktop notification unavailable on this platform".into())
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(target_os = "macos")]
