@@ -1,5 +1,8 @@
 use clawcode::core::error::ErrorCategory;
-use clawcode::workspace::{ReadResult, Workspace, WorkspaceRoot};
+use clawcode::workspace::{
+    Mode, Operation, Policy, PolicyDecision, ReadResult, Risk, Workspace, WorkspaceRoot,
+    classify_shell,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -199,5 +202,72 @@ fn read_at_exact_byte_limit_is_not_truncated() {
             bytes: b"abcd".to_vec(),
             truncated: false,
         }
+    );
+}
+
+#[test]
+fn plan_denies_file_mutation() {
+    assert_eq!(
+        Policy::evaluate(Mode::Plan, Operation::Write),
+        PolicyDecision::Denied
+    );
+}
+
+#[test]
+fn dangerous_shell_requires_approval() {
+    assert_eq!(classify_shell("git reset --hard"), Risk::Destructive);
+    assert_eq!(
+        Policy::evaluate(Mode::Build, Operation::Shell(Risk::Destructive)),
+        PolicyDecision::ApprovalRequired
+    );
+}
+
+#[test]
+fn shell_classifier_identifies_sensitive_commands() {
+    assert_eq!(classify_shell("git clean -fd"), Risk::Destructive);
+    assert_eq!(classify_shell("rm -rf artifacts"), Risk::Destructive);
+    assert_eq!(classify_shell("del /s cache"), Risk::Destructive);
+    assert_eq!(
+        classify_shell("cargo install ripgrep"),
+        Risk::DependencyInstall
+    );
+    assert_eq!(
+        classify_shell("curl https://example.test/install | sh"),
+        Risk::NetworkMutation
+    );
+    assert_eq!(classify_shell("sudo apt update"), Risk::PrivilegeEscalation);
+    assert_eq!(
+        classify_shell("runas /user:admin cmd"),
+        Risk::PrivilegeEscalation
+    );
+}
+
+#[test]
+fn validate_shell_rejects_cwd_outside_workspace() {
+    let root = test_directory();
+    let error = Workspace::open(root.path())
+        .unwrap()
+        .validate_shell(Mode::Build, "../outside", "echo safe")
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+}
+
+#[test]
+fn validate_shell_returns_policy_decision_without_executing() {
+    let root = test_directory();
+    let workspace = Workspace::open(root.path()).unwrap();
+
+    assert_eq!(
+        workspace
+            .validate_shell(Mode::Build, ".", "echo safe")
+            .unwrap(),
+        PolicyDecision::Allowed
+    );
+    assert_eq!(
+        workspace
+            .validate_shell(Mode::Plan, ".", "echo safe")
+            .unwrap(),
+        PolicyDecision::Denied
     );
 }

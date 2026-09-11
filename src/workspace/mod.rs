@@ -1,11 +1,15 @@
 mod files;
+mod policy;
 mod root;
+mod shell;
 
 use crate::core::error::{Diagnostic, ErrorCategory};
 use std::path::Path;
 
 pub use files::{FileSystem, RealFileSystem};
+pub use policy::{Mode, Operation, Policy, PolicyDecision, Risk};
 pub use root::WorkspaceRoot;
+pub use shell::classify_shell;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ReadResult {
@@ -41,5 +45,18 @@ impl Workspace {
         let truncated = bytes.len() > max_bytes;
         bytes.truncate(max_bytes);
         Ok(ReadResult { bytes, truncated })
+    }
+
+    pub fn validate_shell(
+        &self,
+        mode: Mode,
+        relative_cwd: impl AsRef<Path>,
+        command: &str,
+    ) -> Result<PolicyDecision, Diagnostic> {
+        self.root.resolve(relative_cwd)?;
+        Ok(Policy::evaluate(
+            mode,
+            Operation::Shell(classify_shell(command)),
+        ))
     }
 }
