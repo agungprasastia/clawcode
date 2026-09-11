@@ -3,6 +3,8 @@ use crate::provider::{
 };
 use std::sync::{Arc, Mutex};
 
+pub mod tools;
+
 pub const DEFAULT_TEXT_LIMIT: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
