@@ -81,7 +81,7 @@ impl StreamSender {
             return Ok(());
         }
         match event {
-            StreamEvent::Delta(delta) => {
+            StreamEvent::TextDelta(delta) => {
                 self.state
                     .pending_delta
                     .lock()
@@ -112,7 +112,7 @@ impl StreamSender {
         if delta.is_empty() {
             return Ok(());
         }
-        self.sender.send(StreamEvent::Delta(delta))
+        self.sender.send(StreamEvent::TextDelta(delta))
     }
 }
 
@@ -123,8 +123,8 @@ mod tests {
     #[test]
     fn coalesces_deltas_and_prioritizes_cancellation() {
         let (sender, mut stream) = ProviderStream::channel(1);
-        sender.send(StreamEvent::Delta("a".into())).unwrap();
-        sender.send(StreamEvent::Delta("b".into())).unwrap();
+        sender.send(StreamEvent::TextDelta("a".into())).unwrap();
+        sender.send(StreamEvent::TextDelta("b".into())).unwrap();
         sender.flush().unwrap();
         stream.cancel();
         assert!(matches!(stream.next(), Some(StreamEvent::Cancelled)));

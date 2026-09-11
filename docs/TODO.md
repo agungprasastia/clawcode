@@ -29,11 +29,11 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 - [x] `P0-M4-03` Implement priority cancellation dan terminal `Cancelled`.
 - [x] `P0-M4-04` Implement incremental tool argument assembler dengan size cap.
 - [x] `P0-M4-05` Implement provider trait, registry, capability flags, metrics.
-- [ ] `P0-M5-01` Implement OpenAI-compatible adapter dan custom endpoint.
-- [ ] `P0-M5-02` Implement native Anthropic adapter.
-- [ ] `P0-M5-03` Implement native Ollama adapter.
-- [ ] `P0-M5-04` Implement cached stale-while-revalidate discovery, TTL/backoff, timeout.
-- [ ] `P0-M5-05` Tambah `/connect`, `/models`, `/models refresh`; gate mocked provider tests.
+- [x] `P0-M5-01` Implement OpenAI-compatible adapter dan custom endpoint.
+- [x] `P0-M5-02` Implement native Anthropic adapter.
+- [x] `P0-M5-03` Implement native Ollama adapter.
+- [x] `P0-M5-04` Implement cached stale-while-revalidate discovery, TTL/backoff, timeout.
+- [x] `P0-M5-05` Tambah `/connect`, `/models`, `/models refresh`; gate mocked provider tests.
 
 ## P0 — Workspace dan agent modes
 

@@ -25,7 +25,7 @@ impl StreamResponse {
         self.events
             .iter()
             .filter_map(|event| match event {
-                StreamEvent::Delta(delta) => Some(delta.as_str()),
+                StreamEvent::TextDelta(delta) => Some(delta.as_str()),
                 _ => None,
             })
             .collect()
@@ -34,7 +34,7 @@ impl StreamResponse {
     /// Final usage, if the stream finished normally.
     pub fn usage(&self) -> Option<Usage> {
         self.events.iter().find_map(|event| match event {
-            StreamEvent::Finished { usage, .. } => Some(*usage),
+            StreamEvent::Usage(usage) => Some(*usage),
             _ => None,
         })
     }
@@ -42,7 +42,7 @@ impl StreamResponse {
     /// Finish reason, if the stream finished.
     pub fn finish_reason(&self) -> Option<FinishReason> {
         self.events.iter().find_map(|event| match event {
-            StreamEvent::Finished { reason, .. } => Some(*reason),
+            StreamEvent::Finish { reason } => Some(*reason),
             _ => None,
         })
     }

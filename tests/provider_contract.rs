@@ -16,27 +16,31 @@ fn request() -> StreamRequest {
 #[test]
 fn event_variants_cover_stream_lifecycle() {
     let events = [
-        StreamEvent::Delta("hel".into()),
-        StreamEvent::Delta("lo".into()),
-        StreamEvent::ToolCall {
+        StreamEvent::TextDelta("hel".into()),
+        StreamEvent::TextDelta("lo".into()),
+        StreamEvent::ToolCallStart {
             id: "t1".into(),
             name: "read_file".into(),
+        },
+        StreamEvent::ToolCallDelta {
+            id: "t1".into(),
             arguments: "{}".into(),
         },
-        StreamEvent::Finished {
+        StreamEvent::ToolCallEnd { id: "t1".into() },
+        StreamEvent::Usage(Usage {
+            input_tokens: 3,
+            output_tokens: 2,
+        }),
+        StreamEvent::Finish {
             reason: FinishReason::Stop,
-            usage: Usage {
-                input_tokens: 3,
-                output_tokens: 2,
-            },
         },
     ];
     let mut text = String::new();
     for event in &events {
         match event {
-            StreamEvent::Delta(delta) => text.push_str(delta),
-            StreamEvent::ToolCall { name, .. } => text.push_str(name),
-            StreamEvent::Finished { .. } | StreamEvent::Cancelled => {}
+            StreamEvent::TextDelta(delta) => text.push_str(delta),
+            StreamEvent::ToolCallStart { name, .. } => text.push_str(name),
+            _ => {}
         }
     }
     assert_eq!(text, "helloread_file");
@@ -61,13 +65,15 @@ fn assembler_completes_valid_json() {
 #[test]
 fn cancellation_is_terminal_and_priority() {
     let (sender, receiver) = mpsc::sync_channel::<StreamEvent>(8);
-    sender.send(StreamEvent::Delta("partial".into())).unwrap();
+    sender
+        .send(StreamEvent::TextDelta("partial".into()))
+        .unwrap();
     sender.send(StreamEvent::Cancelled).unwrap();
     drop(sender);
     let mut cancelled = false;
     for event in receiver {
         if cancelled {
-            assert!(!matches!(event, StreamEvent::Delta(_)));
+            assert!(!matches!(event, StreamEvent::TextDelta(_)));
         }
         cancelled |= matches!(event, StreamEvent::Cancelled);
     }
@@ -97,14 +103,14 @@ fn fake_provider_streams_and_finishes_with_usage() {
         .events
         .iter()
         .filter_map(|event| match event {
-            StreamEvent::Delta(delta) => Some(delta.as_str()),
+            StreamEvent::TextDelta(delta) => Some(delta.as_str()),
             _ => None,
         })
         .collect::<String>();
     assert_eq!(text, "hello");
     assert!(matches!(
         response.events.last(),
-        Some(StreamEvent::Finished { .. })
+        Some(StreamEvent::Finish { .. })
     ));
 }
 
@@ -129,28 +135,22 @@ fn provider_error_carries_category_and_message() {
 #[test]
 fn bounded_stream_coalesces_deltas_and_emits_terminal_cancel() {
     let (sender, mut stream) = ProviderStream::channel(1);
-    sender.send(StreamEvent::Delta("a".into())).unwrap();
-    sender.send(StreamEvent::Delta("b".into())).unwrap();
+    sender.send(StreamEvent::TextDelta("a".into())).unwrap();
+    sender.send(StreamEvent::TextDelta("b".into())).unwrap();
     sender.flush().unwrap();
-    assert_eq!(stream.next(), Some(StreamEvent::Delta("ab".into())));
+    assert_eq!(stream.next(), Some(StreamEvent::TextDelta("ab".into())));
     sender
-        .send(StreamEvent::Finished {
-            reason: FinishReason::Stop,
-            usage: Usage {
-                input_tokens: 1,
-                output_tokens: 2,
-            },
-        })
+        .send(StreamEvent::Usage(Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+        }))
         .unwrap();
     assert_eq!(
         stream.next(),
-        Some(StreamEvent::Finished {
-            reason: FinishReason::Stop,
-            usage: Usage {
-                input_tokens: 1,
-                output_tokens: 2,
-            },
-        })
+        Some(StreamEvent::Usage(Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+        }))
     );
     stream.cancel();
     assert_eq!(stream.next(), Some(StreamEvent::Cancelled));
@@ -190,13 +190,13 @@ impl clawcode::provider::Provider for FakeProvider {
     fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
         Ok(StreamResponse {
             events: vec![
-                StreamEvent::Delta(request.prompt.clone()),
-                StreamEvent::Finished {
+                StreamEvent::TextDelta(request.prompt.clone()),
+                StreamEvent::Usage(Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                }),
+                StreamEvent::Finish {
                     reason: FinishReason::Stop,
-                    usage: Usage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                    },
                 },
             ],
         })

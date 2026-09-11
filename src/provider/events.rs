@@ -23,16 +23,15 @@ pub const MAX_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
 /// Normalized streaming event. `Cancelled` is terminal: nothing may follow.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamEvent {
-    Delta(String),
-    ToolCall {
-        id: String,
-        name: String,
-        arguments: String,
-    },
-    Finished {
-        reason: FinishReason,
-        usage: Usage,
-    },
+    TextDelta(String),
+    ReasoningDelta(String),
+    ToolCallStart { id: String, name: String },
+    ToolCallDelta { id: String, arguments: String },
+    ToolCallEnd { id: String },
+    ToolResult { id: String, result: String },
+    Usage(Usage),
+    Finish { reason: FinishReason },
+    Error(String),
     Cancelled,
 }
 

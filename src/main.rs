@@ -1,4 +1,3 @@
-mod adapters;
 mod cli;
 mod notify;
 mod workspace;
