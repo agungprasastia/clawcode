@@ -29,6 +29,45 @@ fn build_diff_precedes_approval_and_rejection_preserves_workspace() {
 }
 
 #[test]
+fn approval_requires_review_of_current_pending_build() {
+    let (root, workspace) = workspace("approval-gate");
+    fs::write(root.join("file.txt"), "before").unwrap();
+    let mut tools = ToolLifecycle::new(&workspace, Mode::Build);
+    tools.request(ToolRequest::Build {
+        mutations: vec![Mutation::Write {
+            path: "file.txt".into(),
+            bytes: b"after".to_vec(),
+        }],
+    });
+
+    assert!(matches!(tools.approve(true).status, ToolStatus::Failed(_)));
+    assert_eq!(fs::read_to_string(root.join("file.txt")).unwrap(), "before");
+}
+
+#[test]
+fn replacing_pending_build_clears_previous_review() {
+    let (root, workspace) = workspace("replacement");
+    fs::write(root.join("file.txt"), "before").unwrap();
+    let mut tools = ToolLifecycle::new(&workspace, Mode::Build);
+    tools.request(ToolRequest::Build {
+        mutations: vec![Mutation::Write {
+            path: "file.txt".into(),
+            bytes: b"first".to_vec(),
+        }],
+    });
+    assert_eq!(tools.review().status, ToolStatus::AwaitingApproval);
+
+    tools.request(ToolRequest::Build {
+        mutations: vec![Mutation::Write {
+            path: "file.txt".into(),
+            bytes: b"second".to_vec(),
+        }],
+    });
+    assert!(matches!(tools.approve(true).status, ToolStatus::Failed(_)));
+    assert_eq!(fs::read_to_string(root.join("file.txt")).unwrap(), "before");
+}
+
+#[test]
 fn plan_read_only_and_cancellation_are_isolated() {
     let (root, workspace) = workspace("plan");
     fs::write(root.join("file.txt"), "safe").unwrap();

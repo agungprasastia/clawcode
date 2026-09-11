@@ -35,6 +35,7 @@ pub struct ToolLifecycle<'a, F: crate::workspace::FileSystem> {
     pending: Option<Vec<Mutation>>,
     diff: Option<TransactionResult>,
     preview: Option<WorkspacePreview>,
+    awaiting_approval: bool,
 }
 
 impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
@@ -46,6 +47,7 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
             pending: None,
             diff: None,
             preview: None,
+            awaiting_approval: false,
         }
     }
     pub fn cancel(&mut self) {
@@ -74,6 +76,8 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
                 }
                 self.pending = Some(mutations);
                 self.diff = None;
+                self.preview = None;
+                self.awaiting_approval = false;
                 ToolResult {
                     status: ToolStatus::Requested,
                     read: None,
@@ -125,6 +129,7 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
                         }
                     };
                 }
+                self.awaiting_approval = true;
                 ToolResult {
                     status: ToolStatus::AwaitingApproval,
                     read: None,
@@ -145,6 +150,10 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
         let Some(mutations) = self.pending.take() else {
             return self.failed("no pending build".into());
         };
+        if !self.awaiting_approval {
+            self.clear_pending();
+            return self.failed("build requires review before approval".into());
+        }
         if !approved {
             self.diff = None;
             self.preview = None;
@@ -188,6 +197,7 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
         self.pending = None;
         self.diff = None;
         self.preview = None;
+        self.awaiting_approval = false;
     }
     fn failed(&mut self, message: String) -> ToolResult {
         self.clear_pending();
