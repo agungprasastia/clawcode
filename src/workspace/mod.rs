@@ -134,37 +134,6 @@ impl<F: FileSystem> Workspace<F> {
             prepared.push((path, before, after, operation));
         }
 
-        let mut diffs: Vec<_> = prepared
-            .iter()
-            .map(|(path, before, after, _)| Diff {
-                path: path.clone(),
-                before: before.clone(),
-                after: after.clone(),
-            })
-            .collect();
-        diffs.sort_by(|left, right| left.path.cmp(&right.path));
-        let decisions: Vec<_> = prepared
-            .iter()
-            .map(|(_, _, _, operation)| Policy::evaluate(mode, *operation))
-            .collect();
-        if decisions.contains(&PolicyDecision::Denied) {
-            return Err(Diagnostic::new(
-                ErrorCategory::Workspace,
-                "workspace mutation denied by policy",
-            ));
-        }
-        if prepared
-            .iter()
-            .zip(&decisions)
-            .any(|(_, decision)| *decision == PolicyDecision::ApprovalRequired)
-            && !approved
-        {
-            return Err(Diagnostic::new(
-                ErrorCategory::Workspace,
-                "workspace mutation requires approval",
-            ));
-        }
-
         let mut snapshots = self.snapshots.lock().map_err(|_| {
             Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned")
         })?;
@@ -179,6 +148,34 @@ impl<F: FileSystem> Workspace<F> {
                 }
             };
             entries.push((id, path, before, after, operation));
+        }
+
+        let mut diffs: Vec<_> = entries
+            .iter()
+            .map(|(_, path, before, after, _)| Diff {
+                path: path.clone(),
+                before: before.clone(),
+                after: after.clone(),
+            })
+            .collect();
+        diffs.sort_by(|left, right| left.path.cmp(&right.path));
+        let decisions: Vec<_> = entries
+            .iter()
+            .map(|(_, _, _, _, operation)| Policy::evaluate(mode, *operation))
+            .collect();
+        if decisions.contains(&PolicyDecision::Denied) {
+            snapshots.discard(checkpoint);
+            return Err(Diagnostic::new(
+                ErrorCategory::Workspace,
+                "workspace mutation denied by policy",
+            ));
+        }
+        if decisions.contains(&PolicyDecision::ApprovalRequired) && !approved {
+            snapshots.discard(checkpoint);
+            return Err(Diagnostic::new(
+                ErrorCategory::Workspace,
+                "workspace mutation requires approval",
+            ));
         }
 
         let mut applied = Vec::new();

@@ -576,6 +576,26 @@ fn denied_build_does_not_consume_snapshot_quota() {
 }
 
 #[test]
+fn plan_mutation_captures_snapshot_before_policy_denial() {
+    let root = test_directory();
+    let error = Workspace::open(root.path())
+        .unwrap()
+        .build(
+            Mode::Plan,
+            vec![Mutation::Write {
+                path: "oversized.bin".into(),
+                bytes: vec![0; SnapshotStore::MAX_BYTES + 1],
+            }],
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    assert_eq!(error.message(), "snapshot storage limit exceeded");
+    assert!(!root.path().join("oversized.bin").exists());
+}
+
+#[test]
 fn missing_approval_does_not_consume_snapshot_quota() {
     let root = test_directory();
     let path = root.path().join("existing.bin");
