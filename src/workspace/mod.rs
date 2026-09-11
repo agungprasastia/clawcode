@@ -32,6 +32,12 @@ pub struct TransactionResult {
     pub diffs: Vec<Diff>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspacePreview {
+    pub diffs: Vec<Diff>,
+    pub decisions: Vec<PolicyDecision>,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct ReadResult {
     pub bytes: Vec<u8>,
@@ -100,6 +106,28 @@ impl<F: FileSystem> Workspace<F> {
             mode,
             Operation::Shell(classify_shell(command)),
         ))
+    }
+
+    pub fn preview(
+        &self,
+        mode: Mode,
+        mutations: &[Mutation],
+    ) -> Result<WorkspacePreview, Diagnostic> {
+        let prepared = self.prepare_mutations(mutations)?;
+        let mut diffs: Vec<_> = prepared
+            .iter()
+            .map(|(path, before, after, _)| Diff {
+                path: path.clone(),
+                before: before.clone(),
+                after: after.clone(),
+            })
+            .collect();
+        diffs.sort_by(|left, right| left.path.cmp(&right.path));
+        let decisions = prepared
+            .iter()
+            .map(|(_, _, _, operation)| Policy::evaluate(mode, *operation))
+            .collect();
+        Ok(WorkspacePreview { diffs, decisions })
     }
 
     pub fn build(
@@ -258,6 +286,55 @@ impl<F: FileSystem> Workspace<F> {
             snapshot_ids,
             diffs,
         })
+    }
+
+    fn prepare_mutations(
+        &self,
+        mutations: &[Mutation],
+    ) -> Result<Vec<(std::path::PathBuf, FileState, FileState, Operation)>, Diagnostic> {
+        let mut paths = HashSet::new();
+        let mut prepared = Vec::with_capacity(mutations.len());
+        for mutation in mutations.iter().cloned() {
+            let (relative, after, operation) = match mutation {
+                Mutation::Write { path, bytes } => {
+                    (path, FileState::present(bytes), Operation::Write)
+                }
+                Mutation::Delete { path } => (path, FileState::Missing, Operation::Delete),
+            };
+            let path = self.root.resolve(&relative)?;
+            if self.filesystem.is_dir(&path) {
+                return Err(Diagnostic::new(
+                    ErrorCategory::Workspace,
+                    format!(
+                        "workspace mutation target is a directory: {}",
+                        path.display()
+                    ),
+                ));
+            }
+            if !paths.insert(path.clone()) {
+                return Err(Diagnostic::new(
+                    ErrorCategory::Workspace,
+                    format!("duplicate mutation path: {}", path.display()),
+                ));
+            }
+            let before = if self.filesystem.exists(&path) {
+                FileState::present(
+                    self.filesystem
+                        .read(&path)
+                        .map_err(|error| diagnostic("read mutation target", &path, error))?,
+                )
+            } else {
+                FileState::Missing
+            };
+            let operation =
+                if matches!(operation, Operation::Write) && !matches!(before, FileState::Missing) {
+                    Operation::SensitiveWrite
+                } else {
+                    operation
+                };
+            prepared.push((path, before, after, operation));
+        }
+        Ok(prepared)
     }
 
     pub fn undo(&self) -> Result<(), Diagnostic> {
