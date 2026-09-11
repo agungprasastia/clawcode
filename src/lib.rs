@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod config;
+pub mod conversation;
 pub mod core;
 pub mod persistence;
 pub mod provider;
