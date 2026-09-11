@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,6 +48,114 @@ enum RestoreFailure {
 struct FailingFileSystem {
     failure: RestoreFailure,
     files: Mutex<HashMap<PathBuf, Vec<u8>>>,
+}
+
+#[derive(Clone)]
+struct FaultInjectingFileSystem {
+    state: Arc<FaultInjectingState>,
+}
+
+struct FaultInjectingState {
+    files: Mutex<HashMap<PathBuf, Vec<u8>>>,
+    replace_count: AtomicUsize,
+    fail_replace_at: usize,
+}
+
+struct ReadTrackingFileSystem {
+    reads: Arc<AtomicUsize>,
+}
+
+impl FileSystem for ReadTrackingFileSystem {
+    fn read(&self, _path: &Path) -> io::Result<Vec<u8>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        Ok(Vec::new())
+    }
+
+    fn write(&self, _path: &Path, _bytes: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn replace(&self, _from: &Path, _to: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn remove_file(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn exists(&self, _path: &Path) -> bool {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        false
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        Ok(path.to_path_buf())
+    }
+}
+
+impl FaultInjectingFileSystem {
+    fn with_file(path: PathBuf, bytes: Vec<u8>, fail_replace_at: usize) -> Self {
+        Self {
+            state: Arc::new(FaultInjectingState {
+                files: Mutex::new(HashMap::from([(path, bytes)])),
+                replace_count: AtomicUsize::new(0),
+                fail_replace_at,
+            }),
+        }
+    }
+
+    fn bytes(&self, path: &Path) -> Option<Vec<u8>> {
+        self.state.files.lock().unwrap().get(path).cloned()
+    }
+}
+
+impl FileSystem for FaultInjectingFileSystem {
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.bytes(path)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing file"))
+    }
+
+    fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.state
+            .files
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), bytes.to_vec());
+        Ok(())
+    }
+
+    fn replace(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let replace_number = self.state.replace_count.fetch_add(1, Ordering::Relaxed) + 1;
+        if replace_number == self.state.fail_replace_at {
+            return Err(io::Error::other("injected replacement failure"));
+        }
+        let bytes = self
+            .state
+            .files
+            .lock()
+            .unwrap()
+            .remove(from)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing temporary file"))?;
+        self.state
+            .files
+            .lock()
+            .unwrap()
+            .insert(to.to_path_buf(), bytes);
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.state.files.lock().unwrap().remove(path);
+        Ok(())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        self.state.files.lock().unwrap().contains_key(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        Ok(path.to_path_buf())
+    }
 }
 
 impl FailingFileSystem {
@@ -376,6 +485,36 @@ fn approval_required_mutation_is_atomic() {
 }
 
 #[test]
+fn invalid_later_mutation_does_not_read_any_file_state() {
+    let root = test_directory();
+    let filesystem = ReadTrackingFileSystem {
+        reads: Arc::new(AtomicUsize::new(0)),
+    };
+    let reads = Arc::clone(&filesystem.reads);
+    let workspace = Workspace::with_filesystem(root.path(), filesystem).unwrap();
+
+    let error = workspace
+        .build(
+            Mode::Build,
+            vec![
+                Mutation::Write {
+                    path: "valid.txt".into(),
+                    bytes: b"valid".to_vec(),
+                },
+                Mutation::Write {
+                    path: "../invalid.txt".into(),
+                    bytes: b"invalid".to_vec(),
+                },
+            ],
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    assert_eq!(reads.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn build_applies_write_and_delete() {
     let root = test_directory();
     fs::write(root.path().join("old.txt"), b"old").unwrap();
@@ -430,6 +569,66 @@ fn failed_second_apply_rolls_back_first_apply() {
     assert_eq!(error.category(), ErrorCategory::Workspace);
     assert_eq!(fs::read(first).unwrap(), b"before");
     assert!(directory.is_dir());
+}
+
+#[test]
+fn injected_second_replacement_restores_first_file() {
+    let root = test_directory();
+    let first = root.path().join("first.txt");
+    let filesystem = FaultInjectingFileSystem::with_file(first.clone(), b"before".to_vec(), 2);
+    let workspace = Workspace::with_filesystem(root.path(), filesystem.clone()).unwrap();
+
+    let error = workspace
+        .build(
+            Mode::Build,
+            vec![
+                Mutation::Write {
+                    path: "first.txt".into(),
+                    bytes: b"changed".to_vec(),
+                },
+                Mutation::Write {
+                    path: "second.txt".into(),
+                    bytes: b"new".to_vec(),
+                },
+            ],
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    assert_eq!(filesystem.bytes(&first), Some(b"before".to_vec()));
+}
+
+#[test]
+fn snapshot_ids_remain_restorable_after_later_builds() {
+    let root = test_directory();
+    let path = root.path().join("note.txt");
+    fs::write(&path, b"before").unwrap();
+    let workspace = Workspace::open(root.path()).unwrap();
+    let first = workspace
+        .build(
+            Mode::Build,
+            vec![Mutation::Write {
+                path: "note.txt".into(),
+                bytes: b"after".to_vec(),
+            }],
+            true,
+        )
+        .unwrap();
+    workspace
+        .build(
+            Mode::Build,
+            vec![Mutation::Write {
+                path: "other.txt".into(),
+                bytes: b"other".to_vec(),
+            }],
+            true,
+        )
+        .unwrap();
+
+    workspace.restore_before(first.snapshot_ids[0]).unwrap();
+
+    assert_eq!(fs::read(path).unwrap(), b"before");
 }
 
 #[test]

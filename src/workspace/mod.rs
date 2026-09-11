@@ -7,6 +7,7 @@ mod snapshot;
 use crate::core::error::{Diagnostic, ErrorCategory};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex;
 
 pub use files::{FileSystem, RealFileSystem};
 pub use policy::{Mode, Operation, Policy, PolicyDecision, Risk};
@@ -37,16 +38,24 @@ pub struct ReadResult {
     pub truncated: bool,
 }
 
-pub struct Workspace {
+pub struct Workspace<F: FileSystem = RealFileSystem> {
     root: WorkspaceRoot,
-    filesystem: RealFileSystem,
+    filesystem: F,
+    snapshots: Mutex<SnapshotStore>,
 }
 
-impl Workspace {
+impl Workspace<RealFileSystem> {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Diagnostic> {
+        Self::with_filesystem(path, RealFileSystem)
+    }
+}
+
+impl<F: FileSystem> Workspace<F> {
+    pub fn with_filesystem(root: impl AsRef<Path>, filesystem: F) -> Result<Self, Diagnostic> {
         Ok(Self {
-            root: WorkspaceRoot::open(path)?,
-            filesystem: RealFileSystem,
+            root: WorkspaceRoot::open(root)?,
+            filesystem,
+            snapshots: Mutex::new(SnapshotStore::new()),
         })
     }
 
@@ -86,7 +95,7 @@ impl Workspace {
         mutations: Vec<Mutation>,
         approved: bool,
     ) -> Result<TransactionResult, Diagnostic> {
-        let mut prepared = Vec::with_capacity(mutations.len());
+        let mut resolved = Vec::with_capacity(mutations.len());
         let mut paths = HashSet::new();
         for mutation in mutations {
             let (relative, after, operation) = match mutation {
@@ -102,6 +111,11 @@ impl Workspace {
                     format!("duplicate mutation path: {}", path.display()),
                 ));
             }
+            resolved.push((path, after, operation));
+        }
+
+        let mut prepared = Vec::with_capacity(resolved.len());
+        for (path, after, operation) in resolved {
             let before = if self.filesystem.exists(&path) {
                 FileState::present(
                     self.filesystem
@@ -120,7 +134,9 @@ impl Workspace {
             prepared.push((path, before, after, operation));
         }
 
-        let mut snapshots = SnapshotStore::new();
+        let mut snapshots = self.snapshots.lock().map_err(|_| {
+            Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned")
+        })?;
         let mut entries = Vec::with_capacity(prepared.len());
         for (path, before, after, operation) in prepared {
             let id = snapshots.capture(path.clone(), before.clone(), after.clone())?;
@@ -203,6 +219,20 @@ impl Workspace {
             snapshot_ids: entries.iter().map(|entry| entry.0).collect(),
             diffs,
         })
+    }
+
+    pub fn restore_before(&self, id: SnapshotId) -> Result<(), Diagnostic> {
+        self.snapshots
+            .lock()
+            .map_err(|_| Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned"))?
+            .restore_before(id, &self.filesystem)
+    }
+
+    pub fn restore_after(&self, id: SnapshotId) -> Result<(), Diagnostic> {
+        self.snapshots
+            .lock()
+            .map_err(|_| Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned"))?
+            .restore_after(id, &self.filesystem)
     }
 }
 

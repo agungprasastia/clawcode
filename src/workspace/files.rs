@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub trait FileSystem {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
@@ -12,13 +13,18 @@ pub trait FileSystem {
 }
 
 pub(crate) fn temporary_sibling(path: &Path, suffix: &str) -> io::Result<PathBuf> {
+    static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
     let name = path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "snapshot target has no file name",
         )
     })?;
-    Ok(path.with_file_name(format!(".{}.{suffix}.tmp", name.to_string_lossy())))
+    let operation_id = NEXT_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+    Ok(path.with_file_name(format!(
+        ".{}.{suffix}.{operation_id}.tmp",
+        name.to_string_lossy()
+    )))
 }
 
 pub struct RealFileSystem;
