@@ -78,10 +78,13 @@ impl ConversationRuntime {
         }
     }
     pub fn from_stream(stream: ProviderStream) -> Self {
+        Self::from_stream_with_text_limit(stream, DEFAULT_TEXT_LIMIT)
+    }
+    pub fn from_stream_with_text_limit(stream: ProviderStream, text_limit: usize) -> Self {
         Self {
             provider: None,
             stream: Arc::new(Mutex::new(Some(stream))),
-            text_limit: DEFAULT_TEXT_LIMIT,
+            text_limit,
         }
     }
     pub fn run(&self, request: &StreamRequest) -> Result<TurnState, ProviderError> {
@@ -129,9 +132,21 @@ impl ConversationRuntime {
         let Some(stream) = stream.as_mut() else {
             return Vec::new();
         };
+        let mut collected_text = 0;
         stream
             .map(|event| match event {
-                StreamEvent::TextDelta(delta) => ConversationEvent::TextDelta(delta),
+                StreamEvent::TextDelta(delta) => {
+                    let remaining = self.text_limit.saturating_sub(collected_text);
+                    let end = delta
+                        .char_indices()
+                        .map(|(index, _)| index)
+                        .chain(std::iter::once(delta.len()))
+                        .take_while(|&index| index <= remaining)
+                        .last()
+                        .unwrap_or(0);
+                    collected_text += end;
+                    ConversationEvent::TextDelta(delta[..end].to_owned())
+                }
                 StreamEvent::Usage(usage) => ConversationEvent::Usage(usage),
                 StreamEvent::Finish { reason } => ConversationEvent::Finished(reason),
                 StreamEvent::Error(message) => ConversationEvent::Error(message),

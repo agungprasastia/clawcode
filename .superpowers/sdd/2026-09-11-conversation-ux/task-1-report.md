@@ -32,3 +32,5 @@ All passed.
 ## Review Finding Resolution
 - Fixed bounded text handling: truncation now stops at the last valid UTF-8 character boundary when `text_limit` falls inside a multibyte character.
 - Added regression test `text_limit_inside_multibyte_character_does_not_panic_or_split_utf8`.
+- Fixed `ConversationRuntime::collect_events()` to enforce configured text bounds across streamed deltas at UTF-8 boundaries while preserving terminal events.
+- Added regression test `collected_stream_text_respects_configured_utf8_safe_limit`.

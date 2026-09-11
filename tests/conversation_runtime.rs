@@ -117,3 +117,26 @@ fn text_limit_inside_multibyte_character_does_not_panic_or_split_utf8() {
 
     assert_eq!(turn.assistant_output(), "a");
 }
+
+#[test]
+fn collected_stream_text_respects_configured_utf8_safe_limit() {
+    let (sender, stream) = ProviderStream::channel(4);
+    sender.send(StreamEvent::TextDelta("aé漢".into())).unwrap();
+    sender
+        .send(StreamEvent::Finish {
+            reason: FinishReason::Stop,
+        })
+        .unwrap();
+    drop(sender);
+    let runtime = ConversationRuntime::from_stream_with_text_limit(stream, 2);
+
+    let events = runtime.collect_events();
+
+    assert_eq!(
+        events,
+        vec![
+            ConversationEvent::TextDelta("a".into()),
+            ConversationEvent::Finished(FinishReason::Stop),
+        ]
+    );
+}
