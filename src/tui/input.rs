@@ -14,6 +14,7 @@ pub fn translate(event: Event) -> Option<UiEvent> {
 
 fn translate_key(key: KeyEvent) -> Option<Input> {
     match key.code {
+        KeyCode::Enter => Some(Input::Submit),
         KeyCode::Esc | KeyCode::Char('q') if key.modifiers.is_empty() => Some(Input::Quit),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Cancel),
         KeyCode::Char(character)

@@ -18,17 +18,17 @@ impl DiscoverySource for Source {
 fn parses_session_and_mode_commands() {
     assert_eq!(
         parse_command("/new planning"),
-        Some(Command::New("planning".into()))
+        Ok(Command::New("planning".into()))
     );
-    assert_eq!(parse_command("/sessions"), Some(Command::Sessions));
-    assert_eq!(parse_command("/exit"), Some(Command::Exit));
+    assert_eq!(parse_command("/sessions"), Ok(Command::Sessions));
+    assert_eq!(parse_command("/exit"), Ok(Command::Exit));
     assert_eq!(
         parse_command("/plan"),
-        Some(Command::Mode(ConversationMode::Plan))
+        Ok(Command::Mode(ConversationMode::Plan))
     );
     assert_eq!(
         parse_command("/build"),
-        Some(Command::Mode(ConversationMode::Build))
+        Ok(Command::Mode(ConversationMode::Build))
     );
 }
 
@@ -67,5 +67,18 @@ fn mode_switch_and_refresh_are_non_blocking() {
 
 #[test]
 fn unknown_command_has_actionable_diagnostic() {
-    assert_eq!(parse_command("/wat"), None);
+    assert!(parse_command("/wat").unwrap_err().contains("try /plan"));
+}
+
+#[test]
+fn empty_title_is_rejected_and_utf8_bound_is_safe() {
+    assert!(parse_command("/new   ").is_err());
+    let title = "é".repeat(100);
+    let command = parse_command(&format!("/new {title}")).unwrap();
+    let db = Db::open_in_memory().unwrap();
+    let mut service = CommandService::with_db(Source, db);
+    let output = service.execute(command).unwrap();
+    assert!(
+        matches!(output, CommandOutput::SessionCreated(session) if session.title.len() <= 80 && session.title.is_char_boundary(session.title.len()))
+    );
 }

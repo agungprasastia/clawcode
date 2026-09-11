@@ -126,6 +126,22 @@ fn text_input_and_backspace_edit_prompt() {
 }
 
 #[test]
+fn submit_executes_slash_command_in_tui_app() {
+    let mut app = App::default();
+    app.apply_batch([
+        UiEvent::Input(Input::Character('/')),
+        UiEvent::Input(Input::Character('b')),
+        UiEvent::Input(Input::Character('u')),
+        UiEvent::Input(Input::Character('i')),
+        UiEvent::Input(Input::Character('l')),
+        UiEvent::Input(Input::Character('d')),
+        UiEvent::Input(Input::Submit),
+    ]);
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Build);
+    assert!(app.prompt().is_empty());
+}
+
+#[test]
 fn retained_transcript_is_bounded_with_visible_truncation_marker() {
     let mut app = App::default();
 

@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
 use crate::conversation::ConversationEvent;
 use crate::provider::FinishReason;
 
@@ -28,6 +29,7 @@ pub enum Input {
     Cancel,
     Character(char),
     Backspace,
+    Submit,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -37,7 +39,6 @@ pub enum UiEvent {
     StreamDelta(String),
 }
 
-#[derive(Debug)]
 pub struct App {
     running: bool,
     cancellation_pending: bool,
@@ -48,10 +49,17 @@ pub struct App {
     provider: String,
     model: String,
     diagnostic: String,
+    command_service: crate::cli::CommandService<cli::CliDiscovery>,
 }
 
 impl Default for App {
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl App {
+    pub fn new() -> Self {
         Self {
             running: true,
             cancellation_pending: false,
@@ -62,11 +70,10 @@ impl Default for App {
             provider: String::new(),
             model: String::new(),
             diagnostic: String::new(),
+            command_service: cli::runtime_service().expect("in-memory runtime database"),
         }
     }
-}
 
-impl App {
     pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
     pub const TRUNCATION_MARKER: &str = "[earlier transcript truncated]\n";
 
@@ -78,6 +85,7 @@ impl App {
             UiEvent::Input(Input::Backspace) => {
                 self.prompt.pop();
             }
+            UiEvent::Input(Input::Submit) => self.submit_prompt(),
             UiEvent::Resize { .. } => {}
             UiEvent::StreamDelta(delta) => {
                 self.transcript.push_str(&delta);
@@ -187,6 +195,42 @@ impl App {
 
     pub fn prompt(&self) -> &str {
         &self.prompt
+    }
+
+    fn submit_prompt(&mut self) {
+        let input = std::mem::take(&mut self.prompt);
+        let command = match cli::parse_command(&input) {
+            Ok(command) => command,
+            Err(error) => {
+                self.diagnostic = error;
+                return;
+            }
+        };
+        match self.command_service.execute(command) {
+            Ok(CommandOutput::Mode(mode)) => self.set_mode(match mode {
+                CommandMode::Plan => ConversationMode::Plan,
+                CommandMode::Build => ConversationMode::Build,
+            }),
+            Ok(CommandOutput::Exit) => self.running = false,
+            Ok(CommandOutput::SessionCreated(session)) => {
+                self.diagnostic = format!("session created: {}", session.title)
+            }
+            Ok(CommandOutput::Sessions(sessions)) => {
+                self.diagnostic = format!("{} session(s)", sessions.len())
+            }
+            Ok(CommandOutput::Connected(provider)) => {
+                self.provider = provider.to_string();
+                self.diagnostic = "provider connected".into();
+            }
+            Ok(CommandOutput::Models(models)) => {
+                self.diagnostic = format!("{} model(s)", models.len())
+            }
+            Ok(CommandOutput::RefreshStarted) => self.diagnostic = "model refresh started".into(),
+            Err(error) => self.diagnostic = error.to_string(),
+        }
+        if let Some(error) = self.command_service.take_diagnostic() {
+            self.diagnostic = error;
+        }
     }
 
     pub fn transcript(&self) -> &str {

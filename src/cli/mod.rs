@@ -23,17 +23,28 @@ pub enum ConversationMode {
     Build,
 }
 
-pub fn parse_command(input: &str) -> Option<Command> {
+pub fn parse_command(input: &str) -> Result<Command, String> {
     match input.trim() {
-        "/sessions" => Some(Command::Sessions),
-        "/exit" => Some(Command::Exit),
-        "/plan" => Some(Command::Mode(ConversationMode::Plan)),
-        "/build" => Some(Command::Mode(ConversationMode::Build)),
-        "/connect" => Some(Command::Connect),
-        "/models" => Some(Command::Models),
-        "/models refresh" => Some(Command::ModelsRefresh),
-        value if value.starts_with("/new ") => Some(Command::New(value[5..].trim().to_owned())),
-        _ => None,
+        "/sessions" => Ok(Command::Sessions),
+        "/exit" => Ok(Command::Exit),
+        "/plan" => Ok(Command::Mode(ConversationMode::Plan)),
+        "/build" => Ok(Command::Mode(ConversationMode::Build)),
+        "/connect" => Ok(Command::Connect),
+        "/models" => Ok(Command::Models),
+        "/models refresh" => Ok(Command::ModelsRefresh),
+        "/new" => Err("usage: /new <title>".into()),
+        value if value.starts_with("/new ") => {
+            let title = value[5..].trim();
+            if title.is_empty() {
+                Err("usage: /new <title>; title cannot be empty".into())
+            } else {
+                Ok(Command::New(title.to_owned()))
+            }
+        }
+        "" => Err("enter a command; try /plan, /build, /new <title>, /sessions, or /exit".into()),
+        value => Err(format!(
+            "unknown command `{value}`; try /plan, /build, /new <title>, /sessions, or /exit"
+        )),
     }
 }
 
@@ -55,10 +66,15 @@ pub struct CommandService<D> {
     discovery: DiscoveryService,
     source: D,
     pending_refresh: Option<PendingRefresh>,
+    diagnostic: Option<String>,
 }
 
 #[derive(Clone, Debug)]
-struct CliDiscovery;
+pub struct CliDiscovery;
+
+pub fn runtime_service() -> Result<CommandService<CliDiscovery>, rusqlite::Error> {
+    Ok(CommandService::with_db(CliDiscovery, Db::open_in_memory()?))
+}
 
 impl DiscoverySource for CliDiscovery {
     fn discover(&self, _provider: &ProviderId) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -77,6 +93,7 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
             discovery: DiscoveryService::new(Duration::from_secs(300), Duration::from_secs(5)),
             source,
             pending_refresh: None,
+            diagnostic: None,
         }
     }
 
@@ -145,17 +162,25 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
             return;
         };
         match receiver.try_recv() {
-            Ok(result) => self.discovery.apply(provider, result),
+            Ok(result) => {
+                if let Err(error) = &result {
+                    self.diagnostic = Some(format!("model refresh failed: {error}"));
+                }
+                self.discovery.apply(provider, result)
+            }
             Err(TryRecvError::Empty) => {
                 self.pending_refresh = Some((provider, receiver));
             }
-            Err(TryRecvError::Disconnected) => self.discovery.apply(
-                provider,
-                Err(ProviderError::Network(
-                    "model discovery worker stopped".into(),
-                )),
-            ),
+            Err(TryRecvError::Disconnected) => {
+                let error = ProviderError::Network("model discovery worker stopped".into());
+                self.diagnostic = Some(format!("model refresh failed: {error}"));
+                self.discovery.apply(provider, Err(error));
+            }
         }
+    }
+
+    pub fn take_diagnostic(&mut self) -> Option<String> {
+        self.diagnostic.take()
     }
 
     pub fn models(&mut self) -> Result<Vec<ModelInfo>, ProviderError> {
@@ -187,7 +212,8 @@ pub fn run() -> std::io::Result<()> {
         println!("clawcode {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if let Some(command) = parse_command(&arguments.join(" ")) {
+    if !arguments.is_empty() {
+        let command = parse_command(&arguments.join(" ")).map_err(std::io::Error::other)?;
         let mut service = CommandService::new(CliDiscovery);
         let output = service
             .execute(command)
@@ -217,12 +243,9 @@ mod tests {
 
     #[test]
     fn parses_provider_commands() {
-        assert_eq!(parse_command("/connect"), Some(Command::Connect));
-        assert_eq!(parse_command("/models"), Some(Command::Models));
-        assert_eq!(
-            parse_command("/models refresh"),
-            Some(Command::ModelsRefresh)
-        );
+        assert_eq!(parse_command("/connect"), Ok(Command::Connect));
+        assert_eq!(parse_command("/models"), Ok(Command::Models));
+        assert_eq!(parse_command("/models refresh"), Ok(Command::ModelsRefresh));
     }
 
     #[test]
