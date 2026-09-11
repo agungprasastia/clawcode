@@ -13,6 +13,7 @@ Implemented bounded turn metrics and persistence integration:
 - Exposed cached metrics through `App`; render formats cached values only. No DB/provider work in render.
 - Added regression tests for error finish, cancellation, and App metrics propagation.
 - TurnState now gives Error and Cancelled terminal precedence over later Finish events; added TextDelta+Error+Finish and TextDelta+Cancelled+Finish persistence regressions.
+- Fixed remaining review finding: `App` now bounds/sanitizes provider and model identities when receiving `ConversationEvent::Metrics`, with UTF-8-safe truncation and unchanged duration, usage, and finish values. Added direct UI regression coverage.
 
 Gates passed:
 

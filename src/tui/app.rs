@@ -165,7 +165,11 @@ impl App {
                 }
             }
             ConversationEvent::Usage(_) => {}
-            ConversationEvent::Metrics(metrics) => self.metrics = Some(metrics),
+            ConversationEvent::Metrics(mut metrics) => {
+                metrics.provider = bounded(metrics.provider, MAX_IDENTITY_BYTES);
+                metrics.model = bounded(metrics.model, MAX_IDENTITY_BYTES);
+                self.metrics = Some(metrics);
+            }
         }
     }
 
