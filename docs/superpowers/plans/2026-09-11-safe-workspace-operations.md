@@ -17,6 +17,9 @@
 - No `#[allow(...)]` warning suppression.
 - Shell has no rollback claim.
 - All workspace failures surface as `Diagnostic` category `Workspace`.
+- Path validation is not race-resistant against concurrent symlink replacement.
+- Each file replacement is atomic; multi-file rollback is best-effort.
+- M6 exposes shell validation only. Shell execution belongs to a later workflow.
 
 ---
 

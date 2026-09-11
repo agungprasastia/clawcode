@@ -126,6 +126,41 @@ struct ReadTrackingFileSystem {
     reads: Arc<AtomicUsize>,
 }
 
+struct BoundedReadTrackingFileSystem {
+    requested_limit: Arc<AtomicUsize>,
+}
+
+impl FileSystem for BoundedReadTrackingFileSystem {
+    fn read(&self, _path: &Path) -> io::Result<Vec<u8>> {
+        panic!("Workspace::read must use bounded reads")
+    }
+
+    fn read_bounded(&self, _path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+        self.requested_limit.store(limit, Ordering::Relaxed);
+        Ok(b"abcde".to_vec())
+    }
+
+    fn write(&self, _path: &Path, _bytes: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn replace(&self, _from: &Path, _to: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn remove_file(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn exists(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        Ok(path.to_path_buf())
+    }
+}
+
 impl FileSystem for ReadTrackingFileSystem {
     fn read(&self, _path: &Path) -> io::Result<Vec<u8>> {
         self.reads.fetch_add(1, Ordering::Relaxed);
@@ -313,6 +348,28 @@ fn read_truncates_at_requested_limit() {
             truncated: true,
         }
     );
+}
+
+#[test]
+fn read_requests_one_extra_byte_to_detect_truncation() {
+    let root = test_directory();
+    let requested_limit = Arc::new(AtomicUsize::new(0));
+    let workspace = Workspace::with_filesystem(
+        root.path(),
+        BoundedReadTrackingFileSystem {
+            requested_limit: Arc::clone(&requested_limit),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        workspace.read("note.txt", 4).unwrap(),
+        ReadResult {
+            bytes: b"abcd".to_vec(),
+            truncated: true,
+        }
+    );
+    assert_eq!(requested_limit.load(Ordering::Relaxed), 5);
 }
 
 #[test]
@@ -774,6 +831,27 @@ fn failed_second_apply_rolls_back_first_apply() {
 
     assert_eq!(error.category(), ErrorCategory::Workspace);
     assert_eq!(fs::read(first).unwrap(), b"before");
+    assert!(directory.is_dir());
+}
+
+#[test]
+fn build_rejects_directory_mutation_target_before_apply() {
+    let root = test_directory();
+    let directory = root.path().join("directory");
+    fs::create_dir(&directory).unwrap();
+    let workspace = Workspace::open(root.path()).unwrap();
+
+    let error = workspace
+        .build(
+            Mode::Build,
+            vec![Mutation::Delete {
+                path: "directory".into(),
+            }],
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
     assert!(directory.is_dir());
 }
 

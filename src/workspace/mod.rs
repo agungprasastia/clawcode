@@ -75,12 +75,15 @@ impl<F: FileSystem> Workspace<F> {
         max_bytes: usize,
     ) -> Result<ReadResult, Diagnostic> {
         let path = self.root.resolve(relative)?;
-        let mut bytes = self.filesystem.read(&path).map_err(|error| {
-            Diagnostic::new(
-                ErrorCategory::Workspace,
-                format!("failed to read {}: {error}", path.display()),
-            )
-        })?;
+        let mut bytes = self
+            .filesystem
+            .read_bounded(&path, max_bytes.saturating_add(1))
+            .map_err(|error| {
+                Diagnostic::new(
+                    ErrorCategory::Workspace,
+                    format!("failed to read {}: {error}", path.display()),
+                )
+            })?;
         let truncated = bytes.len() > max_bytes;
         bytes.truncate(max_bytes);
         Ok(ReadResult { bytes, truncated })
@@ -115,6 +118,15 @@ impl<F: FileSystem> Workspace<F> {
                 Mutation::Delete { path } => (path, FileState::Missing, Operation::Delete),
             };
             let path = self.root.resolve(&relative)?;
+            if self.filesystem.is_dir(&path) {
+                return Err(Diagnostic::new(
+                    ErrorCategory::Workspace,
+                    format!(
+                        "workspace mutation target is a directory: {}",
+                        path.display()
+                    ),
+                ));
+            }
             if !paths.insert(path.clone()) {
                 return Err(Diagnostic::new(
                     ErrorCategory::Workspace,

@@ -1,10 +1,15 @@
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub trait FileSystem {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+    fn read_bounded(&self, path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+        let mut bytes = self.read(path)?;
+        bytes.truncate(limit);
+        Ok(bytes)
+    }
     fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         if self.exists(path) {
@@ -18,6 +23,9 @@ pub trait FileSystem {
     fn replace(&self, from: &Path, to: &Path) -> io::Result<()>;
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
+    fn is_dir(&self, path: &Path) -> bool {
+        path.is_dir()
+    }
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
 }
 
@@ -41,6 +49,14 @@ pub struct RealFileSystem;
 impl FileSystem for RealFileSystem {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         fs::read(path)
+    }
+
+    fn read_bounded(&self, path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        fs::File::open(path)?
+            .take(limit as u64)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
     }
 
     fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
