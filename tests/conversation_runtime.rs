@@ -110,3 +110,10 @@ fn event_queue_is_bounded_by_text_limit() {
     );
     assert_eq!(turn.assistant_output(), "12345");
 }
+
+#[test]
+fn text_limit_inside_multibyte_character_does_not_panic_or_split_utf8() {
+    let turn = TurnState::from_events([StreamEvent::TextDelta("aé".into())], 2);
+
+    assert_eq!(turn.assistant_output(), "a");
+}

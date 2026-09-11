@@ -37,7 +37,14 @@ impl TurnState {
         match event {
             StreamEvent::TextDelta(delta) => {
                 let remaining = text_limit.saturating_sub(self.output.len());
-                self.output.push_str(&delta[..delta.len().min(remaining)]);
+                let end = delta
+                    .char_indices()
+                    .map(|(index, _)| index)
+                    .chain(std::iter::once(delta.len()))
+                    .take_while(|&index| index <= remaining)
+                    .last()
+                    .unwrap_or(0);
+                self.output.push_str(&delta[..end]);
             }
             StreamEvent::Usage(usage) => self.usage = Some(usage),
             StreamEvent::Finish { reason } => self.finish_reason = Some(reason),

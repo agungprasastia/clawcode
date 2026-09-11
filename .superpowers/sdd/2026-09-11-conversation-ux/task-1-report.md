@@ -23,8 +23,12 @@
 All passed.
 
 ## Commit
-- Pending at report creation; commit after validation.
+- Fix commit: `2114d6eeb9bb4544e10fb4b84bfefe7badcf7697`.
 
 ## Concerns
 - Runtime currently consumes existing synchronous `Provider::send`; asynchronous provider/network isolation is outside Task 1's existing trait contract.
 - Unsupported tool/reasoning events from direct stream collection become diagnostic errors; later task can add dedicated conversation event variants.
+
+## Review Finding Resolution
+- Fixed bounded text handling: truncation now stops at the last valid UTF-8 character boundary when `text_limit` falls inside a multibyte character.
+- Added regression test `text_limit_inside_multibyte_character_does_not_panic_or_split_utf8`.
