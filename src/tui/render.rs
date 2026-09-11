@@ -20,6 +20,15 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .areas(frame.area());
 
     let quiet = Style::default().fg(Color::DarkGray);
+    let metrics = app.metrics().map_or_else(String::new, |metrics| {
+        format!(
+            "  /  ttft {:?}  /  duration {:?}  /  usage {:?}  /  finish {:?}",
+            metrics.ttft(),
+            metrics.duration(),
+            metrics.usage(),
+            metrics.finish_reason()
+        )
+    });
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("CLAW", Style::default().add_modifier(Modifier::BOLD)),
@@ -53,8 +62,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "{}  ·  Esc / q quit  ·  Ctrl-C cancel",
-            app.diagnostic()
+            "{}{}  ·  Esc / q quit  ·  Ctrl-C cancel",
+            app.diagnostic(),
+            metrics
         ))
         .style(quiet),
         footer,

@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
 use crate::conversation::ConversationEvent;
 use crate::provider::FinishReason;
+use crate::provider::TurnMetrics;
 
 const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 const MAX_IDENTITY_BYTES: usize = 256;
@@ -49,6 +50,7 @@ pub struct App {
     provider: String,
     model: String,
     diagnostic: String,
+    metrics: Option<TurnMetrics>,
     command_service: crate::cli::CommandService<cli::CliDiscovery>,
 }
 
@@ -70,6 +72,7 @@ impl App {
             provider: String::new(),
             model: String::new(),
             diagnostic: String::new(),
+            metrics: None,
             command_service: cli::runtime_service().expect("in-memory runtime database"),
         }
     }
@@ -182,6 +185,10 @@ impl App {
     }
     pub fn diagnostic(&self) -> &str {
         &self.diagnostic
+    }
+
+    pub fn metrics(&self) -> Option<&TurnMetrics> {
+        self.metrics.as_ref()
     }
 
     pub fn is_running(&self) -> bool {

@@ -1,7 +1,10 @@
+use crate::persistence::WriterHandle;
+use crate::provider::TurnMetrics;
 use crate::provider::{
     FinishReason, Provider, ProviderError, ProviderStream, StreamEvent, StreamRequest, Usage,
 };
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub mod tools;
 
@@ -27,6 +30,7 @@ pub struct TurnState {
     output: String,
     usage: Option<Usage>,
     finish_reason: Option<FinishReason>,
+    metrics: TurnMetrics,
 }
 
 impl TurnState {
@@ -35,6 +39,14 @@ impl TurnState {
             output: String::new(),
             usage: None,
             finish_reason: None,
+            metrics: TurnMetrics {
+                ttft: None,
+                duration: std::time::Duration::ZERO,
+                usage: None,
+                finish_reason: None,
+                provider: String::new(),
+                model: String::new(),
+            },
         };
         for event in events {
             state.apply(event, text_limit);
@@ -68,6 +80,9 @@ impl TurnState {
     pub fn finish_reason(&self) -> Option<FinishReason> {
         self.finish_reason
     }
+    pub fn metrics(&self) -> &TurnMetrics {
+        &self.metrics
+    }
 }
 
 #[derive(Debug)]
@@ -96,14 +111,41 @@ impl ConversationRuntime {
         }
     }
     pub fn run(&self, request: &StreamRequest) -> Result<TurnState, ProviderError> {
-        Ok(TurnState::from_events(
-            self.provider
-                .as_ref()
-                .expect("provider runtime has provider")
-                .send(request)?
-                .events,
-            self.text_limit,
-        ))
+        let started = Instant::now();
+        let provider = self
+            .provider
+            .as_ref()
+            .expect("provider runtime has provider")
+            .id()
+            .to_string();
+        let response = self
+            .provider
+            .as_ref()
+            .expect("provider runtime has provider")
+            .send(request)?;
+        let mut state = TurnState::from_events(response.events, self.text_limit);
+        state.metrics.provider = provider;
+        state.metrics.model = request.model.clone();
+        state.metrics.duration = started.elapsed();
+        state.metrics.usage = state.usage;
+        state.metrics.finish_reason = state.finish_reason;
+        state.metrics.ttft = (!state.output.is_empty()).then_some(state.metrics.duration);
+        Ok(state)
+    }
+
+    pub fn run_and_persist(
+        &self,
+        request: &StreamRequest,
+        writer: &WriterHandle,
+        session_id: i64,
+    ) -> Result<TurnState, ProviderError> {
+        let state = self.run(request)?;
+        if state.finish_reason.is_some() {
+            writer
+                .try_append(session_id, "assistant", &state.output)
+                .map_err(ProviderError::Protocol)?;
+        }
+        Ok(state)
     }
     pub fn events(&self, request: &StreamRequest) -> Vec<ConversationEvent> {
         match self

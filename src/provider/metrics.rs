@@ -1,4 +1,38 @@
-//! Per-provider counters for the status bar and diagnostics.
+//! Per-provider counters and bounded per-turn timing data.
+
+use super::events::{FinishReason, Usage};
+use std::time::Duration;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnMetrics {
+    pub ttft: Option<Duration>,
+    pub duration: Duration,
+    pub usage: Option<Usage>,
+    pub finish_reason: Option<FinishReason>,
+    pub provider: String,
+    pub model: String,
+}
+
+impl TurnMetrics {
+    pub fn ttft(&self) -> Option<Duration> {
+        self.ttft
+    }
+    pub fn duration(&self) -> Option<Duration> {
+        Some(self.duration)
+    }
+    pub fn usage(&self) -> Option<Usage> {
+        self.usage
+    }
+    pub fn finish_reason(&self) -> Option<FinishReason> {
+        self.finish_reason
+    }
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
 
 /// Counters accumulated across requests. All fields saturate.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

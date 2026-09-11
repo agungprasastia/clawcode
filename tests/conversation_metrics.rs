@@ -1,0 +1,127 @@
+use clawcode::conversation::ConversationRuntime;
+use clawcode::persistence::{Db, WriterHandle};
+use clawcode::provider::{
+    FinishReason, ModelInfo, Provider, ProviderCapabilities, ProviderError, ProviderId,
+    StreamEvent, StreamRequest, StreamResponse, Usage,
+};
+
+#[derive(Debug)]
+struct FakeProvider {
+    response: StreamResponse,
+}
+
+impl Provider for FakeProvider {
+    fn id(&self) -> &ProviderId {
+        static ID: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
+        ID.get_or_init(|| ProviderId::new("fake"))
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tools: false,
+        }
+    }
+    fn models(&self) -> Vec<ModelInfo> {
+        Vec::new()
+    }
+    fn send(&self, _: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+        Ok(self.response.clone())
+    }
+}
+
+fn request() -> StreamRequest {
+    StreamRequest {
+        model: "model-a".into(),
+        prompt: "hello".into(),
+        max_output_tokens: 16,
+    }
+}
+
+#[test]
+fn records_bounded_metrics_identity_usage_and_finish() {
+    let runtime = ConversationRuntime::new(FakeProvider {
+        response: StreamResponse {
+            events: vec![
+                StreamEvent::TextDelta("hello".into()),
+                StreamEvent::Usage(Usage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                }),
+                StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                },
+            ],
+        },
+    });
+    let turn = runtime.run(&request()).unwrap();
+    let metrics = turn.metrics();
+    assert!(metrics.ttft().is_some());
+    assert!(metrics.duration().is_some());
+    assert_eq!(
+        metrics.usage(),
+        Some(Usage {
+            input_tokens: 2,
+            output_tokens: 1
+        })
+    );
+    assert_eq!(metrics.finish_reason(), Some(FinishReason::Stop));
+    assert_eq!(metrics.provider(), "fake");
+    assert_eq!(metrics.model(), "model-a");
+}
+
+#[test]
+fn missing_usage_stays_absent() {
+    let runtime = ConversationRuntime::new(FakeProvider {
+        response: StreamResponse {
+            events: vec![StreamEvent::Finish {
+                reason: FinishReason::Length,
+            }],
+        },
+    });
+    assert_eq!(runtime.run(&request()).unwrap().metrics().usage(), None);
+}
+
+#[test]
+fn persists_one_assembled_assistant_message_only_after_terminal_success() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("test").unwrap();
+    let writer = WriterHandle::spawn(db);
+    let runtime = ConversationRuntime::new(FakeProvider {
+        response: StreamResponse {
+            events: vec![
+                StreamEvent::TextDelta("hello".into()),
+                StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                },
+            ],
+        },
+    });
+    runtime
+        .run_and_persist(&request(), &writer, session.id)
+        .unwrap();
+    let db = writer.shutdown();
+    let messages = db.messages(session.id).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, "assistant");
+    assert_eq!(messages[0].content, "hello");
+}
+
+#[test]
+fn does_not_persist_without_terminal_success() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("test").unwrap();
+    let writer = WriterHandle::spawn(db);
+    let runtime = ConversationRuntime::new(FakeProvider {
+        response: StreamResponse {
+            events: vec![
+                StreamEvent::TextDelta("partial".into()),
+                StreamEvent::Error("boom".into()),
+            ],
+        },
+    });
+    runtime
+        .run_and_persist(&request(), &writer, session.id)
+        .unwrap();
+    let db = writer.shutdown();
+    assert!(db.messages(session.id).unwrap().is_empty());
+}
