@@ -1,7 +1,9 @@
+use clawcode::platform::PathShellDiscovery;
 use clawcode::platform::{
     Clipboard, CredentialStore, MAX_CLIPBOARD_BYTES, PlatformError, ShellDiscovery,
     UnsupportedCredentialStore,
 };
+use std::fs;
 use std::path::PathBuf;
 
 struct FakeClipboard {
@@ -89,4 +91,51 @@ fn credential_lookup_is_explicitly_unsupported() {
         store.get("token"),
         Err(PlatformError::Unsupported(_))
     ));
+}
+
+#[test]
+fn shell_discovery_finds_regular_file_without_executing_it() {
+    let directory = temp_directory("find");
+    let marker = directory.join("marker");
+    fs::write(&marker, b"marker content").unwrap();
+
+    let discovery = PathShellDiscovery::new([directory.clone()]);
+    assert_eq!(discovery.find("marker").unwrap(), marker);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn shell_discovery_reports_missing_name() {
+    let directory = temp_directory("missing");
+    let discovery = PathShellDiscovery::new([directory.clone()]);
+
+    assert!(matches!(
+        discovery.find("missing"),
+        Err(PlatformError::NotFound(_))
+    ));
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn shell_discovery_rejects_empty_and_path_separator_names() {
+    let discovery = PathShellDiscovery::new(std::iter::empty::<PathBuf>());
+
+    assert!(matches!(
+        discovery.find(""),
+        Err(PlatformError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        discovery.find("nested/name"),
+        Err(PlatformError::InvalidInput(_))
+    ));
+}
+
+fn temp_directory(label: &str) -> PathBuf {
+    let directory =
+        std::env::temp_dir().join(format!("clawcode-platform-{label}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    directory
 }

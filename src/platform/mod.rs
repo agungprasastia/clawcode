@@ -1,6 +1,10 @@
 use std::fmt;
 use std::path::PathBuf;
 
+mod shell;
+
+pub use shell::PathShellDiscovery;
+
 pub const MAX_CLIPBOARD_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
