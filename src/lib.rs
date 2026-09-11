@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod conversation;
 pub mod core;
+pub mod notify;
 pub mod persistence;
 pub mod provider;
 pub mod tui;

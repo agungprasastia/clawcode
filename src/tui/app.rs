@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
 use crate::conversation::ConversationEvent;
+use crate::notify::{BestEffortNotifier, Notification, NotificationKind, Notifier};
 use crate::provider::FinishReason;
 use crate::provider::TurnMetrics;
 
@@ -147,15 +148,32 @@ impl App {
             ConversationEvent::Finished(reason) => {
                 if self.status == ConversationStatus::Active {
                     self.status = ConversationStatus::Finished(reason);
+                    self.notify(
+                        NotificationKind::Success,
+                        "Turn complete",
+                        "Conversation finished",
+                    );
                 }
             }
             ConversationEvent::Error(message) => {
                 if self.status == ConversationStatus::Active {
                     self.status = ConversationStatus::Error;
                     self.diagnostic = bounded(message, MAX_DIAGNOSTIC_BYTES);
+                    self.notify(
+                        NotificationKind::Error,
+                        "Turn failed",
+                        &self.diagnostic.clone(),
+                    );
                 }
             }
-            ConversationEvent::Cancelled => self.status = ConversationStatus::Cancelled,
+            ConversationEvent::Cancelled => {
+                self.status = ConversationStatus::Cancelled;
+                self.notify(
+                    NotificationKind::Cancelled,
+                    "Turn cancelled",
+                    "Conversation cancelled",
+                );
+            }
             ConversationEvent::MutationRequested(operation) => {
                 if self.mode == ConversationMode::Plan {
                     self.status = ConversationStatus::Rejected;
@@ -183,6 +201,16 @@ impl App {
                     self.metrics = Some(metrics);
                 }
             }
+        }
+    }
+
+    fn notify(&self, kind: NotificationKind, title: &str, body: &str) {
+        let Ok(notification) = Notification::new(kind, title, body) else {
+            return;
+        };
+        let report = BestEffortNotifier.notify(&notification);
+        for failure in report.failures {
+            tracing::debug!(%failure, "notification backend failed");
         }
     }
 

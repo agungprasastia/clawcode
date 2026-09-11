@@ -1,5 +1,3 @@
-mod notify;
-
 fn main() {
     clawcode::core::init_tracing();
     if let Err(error) = clawcode::cli::run() {
