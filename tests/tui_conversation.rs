@@ -30,6 +30,12 @@ fn conversation_events_update_turn_and_diagnostic_state() {
 #[test]
 fn app_receives_runtime_metrics_through_conversation_events() {
     let mut app = App::default();
+    app.apply_conversation(ConversationEvent::PromptSubmitted {
+        prompt: "hello".into(),
+        provider: "p".into(),
+        model: "m".into(),
+    });
+    app.apply_conversation(ConversationEvent::Finished(FinishReason::Stop));
     let metrics = TurnMetrics {
         duration: std::time::Duration::from_millis(4),
         usage: None,
@@ -44,6 +50,12 @@ fn app_receives_runtime_metrics_through_conversation_events() {
 #[test]
 fn app_bounds_metrics_identity_without_changing_other_values() {
     let mut app = App::default();
+    app.apply_conversation(ConversationEvent::PromptSubmitted {
+        prompt: "hello".into(),
+        provider: "p".into(),
+        model: "m".into(),
+    });
+    app.apply_conversation(ConversationEvent::Finished(FinishReason::Length));
     let provider = format!("{}終", "p".repeat(255));
     let model = format!("{}界", "m".repeat(255));
     let metrics = TurnMetrics {
@@ -101,6 +113,32 @@ fn app_does_not_store_metrics_for_error_turn() {
     }));
 
     assert_eq!(app.metrics(), None);
+}
+
+#[test]
+fn app_does_not_store_metrics_before_successful_finish() {
+    for status_event in [
+        None,
+        Some(ConversationEvent::PromptSubmitted {
+            prompt: "hello".into(),
+            provider: "p".into(),
+            model: "m".into(),
+        }),
+        Some(ConversationEvent::MutationRequested("write file".into())),
+    ] {
+        let mut app = App::default();
+        if let Some(event) = status_event {
+            app.apply_conversation(event);
+        }
+        app.apply_conversation(ConversationEvent::Metrics(TurnMetrics {
+            duration: std::time::Duration::from_millis(1),
+            usage: None,
+            finish_reason: Some(FinishReason::Stop),
+            provider: "p".into(),
+            model: "m".into(),
+        }));
+        assert_eq!(app.metrics(), None);
+    }
 }
 
 #[test]

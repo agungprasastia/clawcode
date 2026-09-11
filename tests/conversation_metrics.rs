@@ -54,7 +54,7 @@ fn records_bounded_metrics_identity_usage_and_finish() {
         },
     });
     let turn = runtime.run(&request()).unwrap();
-    let metrics = turn.metrics();
+    let metrics = turn.metrics().expect("successful turn metrics");
     assert!(metrics.duration().is_some());
     assert_eq!(
         metrics.usage(),
@@ -77,7 +77,32 @@ fn missing_usage_stays_absent() {
             }],
         },
     });
-    assert_eq!(runtime.run(&request()).unwrap().metrics().usage(), None);
+    assert_eq!(
+        runtime
+            .run(&request())
+            .unwrap()
+            .metrics()
+            .expect("successful turn metrics")
+            .usage(),
+        None
+    );
+}
+
+#[test]
+fn failed_run_does_not_expose_success_metrics() {
+    for events in [
+        vec![StreamEvent::Error("boom".into())],
+        vec![StreamEvent::Cancelled],
+        vec![StreamEvent::TextDelta("partial".into())],
+        vec![StreamEvent::Finish {
+            reason: FinishReason::Error,
+        }],
+    ] {
+        let runtime = ConversationRuntime::new(FakeProvider {
+            response: StreamResponse { events },
+        });
+        assert_eq!(runtime.run(&request()).unwrap().metrics(), None);
+    }
 }
 
 #[test]
@@ -215,8 +240,16 @@ fn events_do_not_emit_metrics_after_stream_error() {
 
     let events = runtime.events(&request());
 
-    assert!(events.iter().any(|event| matches!(event, ConversationEvent::Error(_))));
-    assert!(!events.iter().any(|event| matches!(event, ConversationEvent::Metrics(_))));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ConversationEvent::Error(_)))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ConversationEvent::Metrics(_)))
+    );
 }
 
 #[test]

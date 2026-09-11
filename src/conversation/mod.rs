@@ -33,7 +33,7 @@ pub struct TurnState {
     usage: Option<Usage>,
     finish_reason: Option<FinishReason>,
     terminal_failure: bool,
-    metrics: TurnMetrics,
+    metrics: Option<TurnMetrics>,
 }
 
 impl TurnState {
@@ -43,13 +43,7 @@ impl TurnState {
             usage: None,
             finish_reason: None,
             terminal_failure: false,
-            metrics: TurnMetrics {
-                duration: std::time::Duration::ZERO,
-                usage: None,
-                finish_reason: None,
-                provider: String::new(),
-                model: String::new(),
-            },
+            metrics: None,
         };
         for event in events {
             state.apply(event, text_limit);
@@ -92,8 +86,8 @@ impl TurnState {
     pub fn finish_reason(&self) -> Option<FinishReason> {
         self.finish_reason
     }
-    pub fn metrics(&self) -> &TurnMetrics {
-        &self.metrics
+    pub fn metrics(&self) -> Option<&TurnMetrics> {
+        self.metrics.as_ref()
     }
 }
 
@@ -136,11 +130,20 @@ impl ConversationRuntime {
             .expect("provider runtime has provider")
             .send(request)?;
         let mut state = TurnState::from_events(response.events, self.text_limit);
-        state.metrics.provider = bounded_identity(provider);
-        state.metrics.model = bounded_identity(request.model.clone());
-        state.metrics.duration = started.elapsed();
-        state.metrics.usage = state.usage;
-        state.metrics.finish_reason = state.finish_reason;
+        if !state.terminal_failure
+            && matches!(
+                state.finish_reason,
+                Some(FinishReason::Stop | FinishReason::Length | FinishReason::ToolCall)
+            )
+        {
+            state.metrics = Some(TurnMetrics {
+                duration: started.elapsed(),
+                usage: state.usage,
+                finish_reason: state.finish_reason,
+                provider: bounded_identity(provider),
+                model: bounded_identity(request.model.clone()),
+            });
+        }
         Ok(state)
     }
 
@@ -220,13 +223,13 @@ impl ConversationRuntime {
                         Some(FinishReason::Stop | FinishReason::Length | FinishReason::ToolCall)
                     )
                 {
-                    let mut metrics = state.metrics;
-                    metrics.provider = provider;
-                    metrics.model = bounded_identity(request.model.clone());
-                    metrics.duration = started.elapsed();
-                    metrics.usage = state.usage;
-                    metrics.finish_reason = state.finish_reason;
-                    events.push(ConversationEvent::Metrics(metrics));
+                    events.push(ConversationEvent::Metrics(TurnMetrics {
+                        provider,
+                        model: bounded_identity(request.model.clone()),
+                        duration: started.elapsed(),
+                        usage: state.usage,
+                        finish_reason: state.finish_reason,
+                    }));
                 }
                 events
             }

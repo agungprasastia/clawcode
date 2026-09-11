@@ -167,10 +167,16 @@ impl App {
             }
             ConversationEvent::Usage(_) => {}
             ConversationEvent::Metrics(mut metrics) => {
-                if !matches!(
+                if matches!(
                     self.status,
-                    ConversationStatus::Error | ConversationStatus::Cancelled
-                ) && metrics.finish_reason != Some(FinishReason::Error)
+                    ConversationStatus::Finished(
+                        FinishReason::Stop | FinishReason::Length | FinishReason::ToolCall
+                    )
+                ) && metrics.finish_reason
+                    == Some(match self.status {
+                        ConversationStatus::Finished(reason) => reason,
+                        _ => unreachable!(),
+                    })
                 {
                     metrics.provider = bounded(metrics.provider, MAX_IDENTITY_BYTES);
                     metrics.model = bounded(metrics.model, MAX_IDENTITY_BYTES);

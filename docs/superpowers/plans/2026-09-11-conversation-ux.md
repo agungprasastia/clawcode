@@ -116,8 +116,11 @@
 
 Task 5 follow-up (2026-09-11): runtime metrics now emit only after successful terminal
 finish (`Stop`, `Length`, or `ToolCall`); error/cancelled streams emit no metrics. New
-prompt submission clears previous UI metrics. Persistence success/error/cancellation
-behavior remains covered by `tests/conversation_metrics.rs`.
+prompt submission clears previous UI metrics. `TurnState::metrics()` is optional and
+returns no metrics for failed, cancelled, or incomplete runs. `App` stores metrics only
+for matching successful `Finished` status. Persistence success/error/cancellation
+behavior remains covered by `tests/conversation_metrics.rs`; UI status gating is covered
+by `tests/tui_conversation.rs`.
 
 ### Task 6: Scripted UX gate
 
