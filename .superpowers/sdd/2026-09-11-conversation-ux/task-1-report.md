@@ -23,7 +23,7 @@
 All passed.
 
 ## Commit
-- Fix commit: `2114d6eeb9bb4544e10fb4b84bfefe7badcf7697`.
+- Fix commit: `05f7f0841ace2a6ee0817b1806649c077437e409`.
 
 ## Concerns
 - Runtime currently consumes existing synchronous `Provider::send`; asynchronous provider/network isolation is outside Task 1's existing trait contract.
