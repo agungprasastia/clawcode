@@ -134,6 +134,7 @@ impl App {
             } => {
                 self.provider = bounded(provider, MAX_IDENTITY_BYTES);
                 self.model = bounded(model, MAX_IDENTITY_BYTES);
+                self.metrics = None;
                 self.status = ConversationStatus::Active;
                 self.diagnostic.clear();
             }

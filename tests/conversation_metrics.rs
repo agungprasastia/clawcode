@@ -1,4 +1,4 @@
-use clawcode::conversation::ConversationRuntime;
+use clawcode::conversation::{ConversationEvent, ConversationRuntime};
 use clawcode::persistence::{Db, WriterHandle};
 use clawcode::provider::{
     FinishReason, ModelInfo, Provider, ProviderCapabilities, ProviderError, ProviderId,
@@ -197,4 +197,42 @@ fn does_not_persist_when_cancellation_precedes_finish() {
         .unwrap();
     let db = writer.shutdown();
     assert!(db.messages(session.id).unwrap().is_empty());
+}
+
+#[test]
+fn events_do_not_emit_metrics_after_stream_error() {
+    let runtime = ConversationRuntime::new(FakeProvider {
+        response: StreamResponse {
+            events: vec![
+                StreamEvent::TextDelta("partial".into()),
+                StreamEvent::Error("boom".into()),
+                StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                },
+            ],
+        },
+    });
+
+    let events = runtime.events(&request());
+
+    assert!(events.iter().any(|event| matches!(event, ConversationEvent::Error(_))));
+    assert!(!events.iter().any(|event| matches!(event, ConversationEvent::Metrics(_))));
+}
+
+#[test]
+fn events_emit_metrics_only_after_successful_terminal_finish() {
+    let runtime = ConversationRuntime::new(FakeProvider {
+        response: StreamResponse {
+            events: vec![
+                StreamEvent::TextDelta("hello".into()),
+                StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                },
+            ],
+        },
+    });
+
+    let events = runtime.events(&request());
+
+    assert!(matches!(events.last(), Some(ConversationEvent::Metrics(_))));
 }

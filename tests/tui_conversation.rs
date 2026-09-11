@@ -72,7 +72,7 @@ fn app_bounds_metrics_identity_without_changing_other_values() {
 #[test]
 fn app_bounds_connected_provider_identity_without_panicking_on_utf8() {
     let mut app = App::default();
-    let provider = ProviderId::new(&format!("{}界", "p".repeat(255)));
+    let provider = ProviderId::new(format!("{}界", "p".repeat(255)));
 
     app.apply_command_output(CommandOutput::Connected(provider));
 
@@ -99,6 +99,33 @@ fn app_does_not_store_metrics_for_error_turn() {
         provider: "p".into(),
         model: "m".into(),
     }));
+
+    assert_eq!(app.metrics(), None);
+}
+
+#[test]
+fn new_prompt_clears_metrics_from_previous_turn() {
+    let mut app = App::default();
+    app.apply_conversation(ConversationEvent::PromptSubmitted {
+        prompt: "first".into(),
+        provider: "p".into(),
+        model: "m".into(),
+    });
+    app.apply_conversation(ConversationEvent::Finished(FinishReason::Stop));
+    app.apply_conversation(ConversationEvent::Metrics(TurnMetrics {
+        duration: std::time::Duration::from_millis(1),
+        usage: None,
+        finish_reason: Some(FinishReason::Stop),
+        provider: "p".into(),
+        model: "m".into(),
+    }));
+    assert!(app.metrics().is_some());
+
+    app.apply_conversation(ConversationEvent::PromptSubmitted {
+        prompt: "second".into(),
+        provider: "p".into(),
+        model: "m".into(),
+    });
 
     assert_eq!(app.metrics(), None);
 }

@@ -182,7 +182,6 @@ impl ConversationRuntime {
                 let state = TurnState::from_events(response.events.clone(), self.text_limit);
                 let mut events = Vec::new();
                 let mut collected_text = 0;
-                let mut cancelled = false;
                 for event in response.events {
                     match event {
                         StreamEvent::TextDelta(delta) => {
@@ -205,7 +204,6 @@ impl ConversationRuntime {
                         }
                         StreamEvent::Cancelled => {
                             events.push(ConversationEvent::Cancelled);
-                            cancelled = true;
                             break;
                         }
                         StreamEvent::Error(message) => {
@@ -216,7 +214,12 @@ impl ConversationRuntime {
                         }
                     }
                 }
-                if !cancelled {
+                if !state.terminal_failure
+                    && matches!(
+                        state.finish_reason,
+                        Some(FinishReason::Stop | FinishReason::Length | FinishReason::ToolCall)
+                    )
+                {
                     let mut metrics = state.metrics;
                     metrics.provider = provider;
                     metrics.model = bounded_identity(request.model.clone());
