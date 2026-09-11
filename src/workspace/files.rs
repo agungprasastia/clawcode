@@ -11,6 +11,16 @@ pub trait FileSystem {
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
 }
 
+pub(crate) fn temporary_sibling(path: &Path, suffix: &str) -> io::Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "snapshot target has no file name",
+        )
+    })?;
+    Ok(path.with_file_name(format!(".{}.{suffix}.tmp", name.to_string_lossy())))
+}
+
 pub struct RealFileSystem;
 
 impl FileSystem for RealFileSystem {

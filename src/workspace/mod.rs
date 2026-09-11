@@ -2,6 +2,7 @@ mod files;
 mod policy;
 mod root;
 mod shell;
+mod snapshot;
 
 use crate::core::error::{Diagnostic, ErrorCategory};
 use std::path::Path;
@@ -10,6 +11,7 @@ pub use files::{FileSystem, RealFileSystem};
 pub use policy::{Mode, Operation, Policy, PolicyDecision, Risk};
 pub use root::WorkspaceRoot;
 pub use shell::classify_shell;
+pub use snapshot::{FileState, Snapshot, SnapshotId, SnapshotStore};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ReadResult {

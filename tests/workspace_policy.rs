@@ -1,7 +1,7 @@
 use clawcode::core::error::ErrorCategory;
 use clawcode::workspace::{
-    Mode, Operation, Policy, PolicyDecision, ReadResult, Risk, Workspace, WorkspaceRoot,
-    classify_shell,
+    FileState, Mode, Operation, Policy, PolicyDecision, ReadResult, RealFileSystem, Risk,
+    SnapshotStore, Workspace, WorkspaceRoot, classify_shell,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -270,4 +270,78 @@ fn validate_shell_returns_policy_decision_without_executing() {
             .unwrap(),
         PolicyDecision::Denied
     );
+}
+
+#[test]
+fn restore_before_replaces_current_file() {
+    let root = test_directory();
+    let path = root.path().join("note.txt");
+    fs::write(&path, b"current").unwrap();
+    let mut snapshots = SnapshotStore::new();
+    let id = snapshots
+        .capture(
+            path.clone(),
+            FileState::present(b"before".to_vec()),
+            FileState::present(b"after".to_vec()),
+        )
+        .unwrap();
+
+    snapshots.restore_before(id, &RealFileSystem).unwrap();
+
+    assert_eq!(fs::read(path).unwrap(), b"before");
+}
+
+#[test]
+fn restore_after_writes_captured_after_state() {
+    let root = test_directory();
+    let path = root.path().join("note.txt");
+    fs::write(&path, b"current").unwrap();
+    let mut snapshots = SnapshotStore::new();
+    let id = snapshots
+        .capture(
+            path.clone(),
+            FileState::present(b"before".to_vec()),
+            FileState::present(b"after".to_vec()),
+        )
+        .unwrap();
+
+    snapshots.restore_after(id, &RealFileSystem).unwrap();
+
+    assert_eq!(fs::read(path).unwrap(), b"after");
+}
+
+#[test]
+fn restore_missing_state_removes_current_file() {
+    let root = test_directory();
+    let path = root.path().join("new.txt");
+    fs::write(&path, b"current").unwrap();
+    let mut snapshots = SnapshotStore::new();
+    let id = snapshots
+        .capture(
+            path.clone(),
+            FileState::Missing,
+            FileState::present(b"after".to_vec()),
+        )
+        .unwrap();
+
+    snapshots.restore_before(id, &RealFileSystem).unwrap();
+
+    assert!(!path.exists());
+}
+
+#[test]
+fn capture_rejects_states_larger_than_snapshot_limit() {
+    let root = test_directory();
+    let mut snapshots = SnapshotStore::new();
+    let bytes = vec![0; SnapshotStore::MAX_BYTES + 1];
+
+    let error = snapshots
+        .capture(
+            root.path().join("large.bin"),
+            FileState::present(bytes),
+            FileState::Missing,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
 }
