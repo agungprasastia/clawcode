@@ -1,7 +1,6 @@
 mod adapters;
 mod cli;
 mod notify;
-mod provider;
 mod workspace;
 
 fn main() {
