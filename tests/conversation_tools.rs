@@ -58,3 +58,66 @@ fn plan_read_only_and_cancellation_are_isolated() {
         ToolStatus::Cancelled
     );
 }
+
+#[test]
+fn allowed_write_applies_after_exposing_diff_without_approval() {
+    let (root, workspace) = workspace("allowed-write");
+    let mut tools = ToolLifecycle::new(&workspace, Mode::Build);
+    assert_eq!(
+        tools
+            .request(ToolRequest::Build {
+                mutations: vec![Mutation::Write {
+                    path: "new.txt".into(),
+                    bytes: b"ok".to_vec()
+                }],
+            })
+            .status,
+        ToolStatus::Requested
+    );
+    let reviewed = tools.review();
+    assert_eq!(reviewed.status, ToolStatus::Completed);
+    assert!(reviewed.transaction.is_some());
+    assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"ok");
+}
+
+#[test]
+fn failed_review_and_apply_clear_pending_diff_and_preview() {
+    let (_root, workspace) = workspace("cleanup");
+    let mut tools = ToolLifecycle::new(&workspace, Mode::Build);
+    tools.request(ToolRequest::Build {
+        mutations: vec![Mutation::Write {
+            path: "new.txt".into(),
+            bytes: b"ok".to_vec(),
+        }],
+    });
+    assert_eq!(tools.review().status, ToolStatus::Completed);
+    assert!(tools.diff().is_none());
+    assert!(matches!(tools.approve(true).status, ToolStatus::Failed(_)));
+    assert!(tools.diff().is_none());
+}
+
+#[test]
+fn tool_layer_enforces_read_and_mutation_bounds() {
+    let (_root, workspace) = workspace("bounds");
+    let mut tools = ToolLifecycle::new(&workspace, Mode::Build);
+    assert!(matches!(
+        tools
+            .request(ToolRequest::Read {
+                path: "missing".into(),
+                max_bytes: usize::MAX
+            })
+            .status,
+        ToolStatus::Failed(_)
+    ));
+    assert!(matches!(
+        tools
+            .request(ToolRequest::Build {
+                mutations: vec![Mutation::Write {
+                    path: "big".into(),
+                    bytes: vec![0; 1024 * 1024 + 1]
+                }]
+            })
+            .status,
+        ToolStatus::Failed(_)
+    ));
+}

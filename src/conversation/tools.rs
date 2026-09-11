@@ -1,6 +1,9 @@
 use crate::workspace::{Mode, Mutation, TransactionResult, Workspace, WorkspacePreview};
 use std::path::PathBuf;
 
+pub const TOOL_READ_MAX_BYTES: usize = 256 * 1024;
+pub const TOOL_MUTATION_MAX_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolRequest {
     Read { path: PathBuf, max_bytes: usize },
@@ -53,7 +56,10 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
             return self.cancelled_result();
         }
         match request {
-            ToolRequest::Read { path, max_bytes } => match self.workspace.read(path, max_bytes) {
+            ToolRequest::Read { path, max_bytes } => match self
+                .workspace
+                .read(path, max_bytes.min(TOOL_READ_MAX_BYTES))
+            {
                 Ok(read) => ToolResult {
                     status: ToolStatus::Completed,
                     read: Some(read),
@@ -63,6 +69,9 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
                 Err(error) => self.failed(error.to_string()),
             },
             ToolRequest::Build { mutations } => {
+                if mutations.iter().any(|mutation| matches!(mutation, Mutation::Write { bytes, .. } if bytes.len() > TOOL_MUTATION_MAX_BYTES)) {
+                    return self.failed("workspace mutation exceeds tool byte limit".into());
+                }
                 self.pending = Some(mutations);
                 self.diff = None;
                 ToolResult {
@@ -87,14 +96,35 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
                     .decisions
                     .contains(&crate::workspace::PolicyDecision::Denied)
                 {
+                    self.clear_pending();
                     return self.failed("workspace mutation denied by policy".into());
                 }
+                let requires_approval = preview
+                    .decisions
+                    .contains(&crate::workspace::PolicyDecision::ApprovalRequired);
                 let transaction = TransactionResult {
                     snapshot_ids: Vec::new(),
                     diffs: preview.diffs.clone(),
                 };
                 self.diff = Some(transaction.clone());
                 self.preview = Some(preview.clone());
+                if !requires_approval {
+                    return match self.workspace.build(self.mode, mutations, true) {
+                        Ok(applied) => {
+                            self.clear_pending();
+                            ToolResult {
+                                status: ToolStatus::Completed,
+                                read: None,
+                                transaction: Some(applied),
+                                preview: Some(preview),
+                            }
+                        }
+                        Err(error) => {
+                            self.clear_pending();
+                            self.failed(error.to_string())
+                        }
+                    };
+                }
                 ToolResult {
                     status: ToolStatus::AwaitingApproval,
                     read: None,
@@ -102,7 +132,10 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
                     preview: Some(preview),
                 }
             }
-            Err(error) => self.failed(error.to_string()),
+            Err(error) => {
+                self.clear_pending();
+                self.failed(error.to_string())
+            }
         }
     }
     pub fn approve(&mut self, approved: bool) -> ToolResult {
@@ -133,16 +166,17 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
                     preview: None,
                 }
             }
-            Err(error) => self.failed(error.to_string()),
+            Err(error) => {
+                self.clear_pending();
+                self.failed(error.to_string())
+            }
         }
     }
     pub fn diff(&self) -> Option<&TransactionResult> {
         self.diff.as_ref()
     }
     fn cancelled_result(&mut self) -> ToolResult {
-        self.pending = None;
-        self.diff = None;
-        self.preview = None;
+        self.clear_pending();
         ToolResult {
             status: ToolStatus::Cancelled,
             read: None,
@@ -150,7 +184,13 @@ impl<'a, F: crate::workspace::FileSystem> ToolLifecycle<'a, F> {
             preview: None,
         }
     }
-    fn failed(&self, message: String) -> ToolResult {
+    fn clear_pending(&mut self) {
+        self.pending = None;
+        self.diff = None;
+        self.preview = None;
+    }
+    fn failed(&mut self, message: String) -> ToolResult {
+        self.clear_pending();
         ToolResult {
             status: ToolStatus::Failed(message),
             read: None,
