@@ -79,6 +79,21 @@ impl SnapshotStore {
         Ok(id)
     }
 
+    pub(crate) fn checkpoint(&self) -> usize {
+        self.snapshots.len()
+    }
+
+    pub(crate) fn discard(&mut self, checkpoint: usize) {
+        let discarded_bytes = self.snapshots[checkpoint..]
+            .iter()
+            .map(|snapshot| {
+                state_size(&snapshot.before).saturating_add(state_size(&snapshot.after))
+            })
+            .sum::<usize>();
+        self.snapshots.truncate(checkpoint);
+        self.bytes = self.bytes.saturating_sub(discarded_bytes);
+    }
+
     pub fn restore_before(
         &self,
         id: SnapshotId,
@@ -130,8 +145,7 @@ impl SnapshotStore {
                     temporary_sibling(&snapshot.path, &id.0.to_string()).map_err(|error| {
                         diagnostic("create snapshot temporary path", &snapshot.path, error)
                     })?;
-                if let Err(error) = filesystem.write(&temporary, bytes) {
-                    let _ = filesystem.remove_file(&temporary);
+                if let Err(error) = filesystem.write_new(&temporary, bytes) {
                     return Err(diagnostic("write snapshot temporary", &temporary, error));
                 }
                 if let Err(error) = filesystem.replace(&temporary, &snapshot.path) {

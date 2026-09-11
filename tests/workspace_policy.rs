@@ -51,6 +51,60 @@ struct FailingFileSystem {
 }
 
 #[derive(Clone)]
+struct CollidingTemporaryFileSystem {
+    files: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
+}
+
+impl CollidingTemporaryFileSystem {
+    fn bytes(&self, path: &Path) -> Option<Vec<u8>> {
+        self.files.lock().unwrap().get(path).cloned()
+    }
+}
+
+impl FileSystem for CollidingTemporaryFileSystem {
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.bytes(path)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing file"))
+    }
+
+    fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.files
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), bytes.to_vec());
+        Ok(())
+    }
+
+    fn write_new(&self, path: &Path, _bytes: &[u8]) -> io::Result<()> {
+        self.files
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), b"stale".to_vec());
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "temporary file already exists",
+        ))
+    }
+
+    fn replace(&self, _from: &Path, _to: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.files.lock().unwrap().remove(path);
+        Ok(())
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        self.files.lock().unwrap().contains_key(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        Ok(path.to_path_buf())
+    }
+}
+
+#[derive(Clone)]
 struct FaultInjectingFileSystem {
     state: Arc<FaultInjectingState>,
 }
@@ -482,6 +536,130 @@ fn approval_required_mutation_is_atomic() {
 
     assert_eq!(error.category(), ErrorCategory::Workspace);
     assert_eq!(fs::read(path).unwrap(), b"before");
+}
+
+#[test]
+fn denied_build_does_not_consume_snapshot_quota() {
+    let root = test_directory();
+    let workspace = Workspace::open(root.path()).unwrap();
+    let bytes = vec![0; SnapshotStore::MAX_BYTES];
+
+    let error = workspace
+        .build(
+            Mode::Plan,
+            vec![Mutation::Write {
+                path: "denied.bin".into(),
+                bytes: bytes.clone(),
+            }],
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    workspace
+        .build(
+            Mode::Build,
+            vec![Mutation::Write {
+                path: "accepted.bin".into(),
+                bytes,
+            }],
+            true,
+        )
+        .unwrap();
+}
+
+#[test]
+fn missing_approval_does_not_consume_snapshot_quota() {
+    let root = test_directory();
+    let path = root.path().join("existing.bin");
+    fs::write(&path, vec![0; SnapshotStore::MAX_BYTES]).unwrap();
+    let workspace = Workspace::open(root.path()).unwrap();
+
+    let error = workspace
+        .build(
+            Mode::Build,
+            vec![Mutation::Delete {
+                path: "existing.bin".into(),
+            }],
+            false,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    workspace
+        .build(
+            Mode::Build,
+            vec![Mutation::Write {
+                path: "accepted.bin".into(),
+                bytes: vec![0; SnapshotStore::MAX_BYTES],
+            }],
+            true,
+        )
+        .unwrap();
+}
+
+#[test]
+fn failed_apply_does_not_consume_snapshot_quota() {
+    let root = test_directory();
+    let first = root.path().join("first.bin");
+    let filesystem = FaultInjectingFileSystem::with_file(first, Vec::new(), 2);
+    let workspace = Workspace::with_filesystem(root.path(), filesystem).unwrap();
+
+    let error = workspace
+        .build(
+            Mode::Build,
+            vec![
+                Mutation::Write {
+                    path: "first.bin".into(),
+                    bytes: vec![0; SnapshotStore::MAX_BYTES],
+                },
+                Mutation::Write {
+                    path: "second.bin".into(),
+                    bytes: Vec::new(),
+                },
+            ],
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    workspace
+        .build(
+            Mode::Build,
+            vec![Mutation::Write {
+                path: "accepted.bin".into(),
+                bytes: vec![0; SnapshotStore::MAX_BYTES],
+            }],
+            true,
+        )
+        .unwrap();
+}
+
+#[test]
+fn colliding_temporary_file_is_not_overwritten() {
+    let root = test_directory();
+    let path = root.path().join("note.txt");
+    let filesystem = CollidingTemporaryFileSystem {
+        files: Arc::new(Mutex::new(HashMap::from([(
+            path.clone(),
+            b"before".to_vec(),
+        )]))),
+    };
+    let workspace = Workspace::with_filesystem(root.path(), filesystem.clone()).unwrap();
+
+    let error = workspace
+        .build(
+            Mode::Build,
+            vec![Mutation::Write {
+                path: "note.txt".into(),
+                bytes: b"after".to_vec(),
+            }],
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    assert_eq!(filesystem.bytes(&path), Some(b"before".to_vec()));
 }
 
 #[test]

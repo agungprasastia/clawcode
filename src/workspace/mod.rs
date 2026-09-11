@@ -134,26 +134,18 @@ impl<F: FileSystem> Workspace<F> {
             prepared.push((path, before, after, operation));
         }
 
-        let mut snapshots = self.snapshots.lock().map_err(|_| {
-            Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned")
-        })?;
-        let mut entries = Vec::with_capacity(prepared.len());
-        for (path, before, after, operation) in prepared {
-            let id = snapshots.capture(path.clone(), before.clone(), after.clone())?;
-            entries.push((id, path, before, after, operation));
-        }
-        let mut diffs: Vec<_> = entries
+        let mut diffs: Vec<_> = prepared
             .iter()
-            .map(|(_, path, before, after, _)| Diff {
+            .map(|(path, before, after, _)| Diff {
                 path: path.clone(),
                 before: before.clone(),
                 after: after.clone(),
             })
             .collect();
         diffs.sort_by(|left, right| left.path.cmp(&right.path));
-        let decisions: Vec<_> = entries
+        let decisions: Vec<_> = prepared
             .iter()
-            .map(|(_, _, _, _, operation)| Policy::evaluate(mode, *operation))
+            .map(|(_, _, _, operation)| Policy::evaluate(mode, *operation))
             .collect();
         if decisions.contains(&PolicyDecision::Denied) {
             return Err(Diagnostic::new(
@@ -161,7 +153,7 @@ impl<F: FileSystem> Workspace<F> {
                 "workspace mutation denied by policy",
             ));
         }
-        if entries
+        if prepared
             .iter()
             .zip(&decisions)
             .any(|(_, decision)| *decision == PolicyDecision::ApprovalRequired)
@@ -171,6 +163,22 @@ impl<F: FileSystem> Workspace<F> {
                 ErrorCategory::Workspace,
                 "workspace mutation requires approval",
             ));
+        }
+
+        let mut snapshots = self.snapshots.lock().map_err(|_| {
+            Diagnostic::new(ErrorCategory::Workspace, "snapshot store lock poisoned")
+        })?;
+        let checkpoint = snapshots.checkpoint();
+        let mut entries = Vec::with_capacity(prepared.len());
+        for (path, before, after, operation) in prepared {
+            let id = match snapshots.capture(path.clone(), before.clone(), after.clone()) {
+                Ok(id) => id,
+                Err(error) => {
+                    snapshots.discard(checkpoint);
+                    return Err(error);
+                }
+            };
+            entries.push((id, path, before, after, operation));
         }
 
         let mut applied = Vec::new();
@@ -184,14 +192,16 @@ impl<F: FileSystem> Workspace<F> {
                     let temporary =
                         crate::workspace::files::temporary_sibling(path, &id.value().to_string())
                             .map_err(|error| diagnostic("create mutation temporary", path, error))?;
-                    let result = self
-                        .filesystem
-                        .write(&temporary, bytes)
-                        .and_then(|_| self.filesystem.replace(&temporary, path));
-                    if result.is_err() {
-                        let _ = self.filesystem.remove_file(&temporary);
+                    match self.filesystem.write_new(&temporary, bytes) {
+                        Ok(()) => match self.filesystem.replace(&temporary, path) {
+                            Ok(()) => Ok(()),
+                            Err(error) => {
+                                let _ = self.filesystem.remove_file(&temporary);
+                                Err(error)
+                            }
+                        },
+                        Err(error) => Err(error),
                     }
-                    result
                 }
             };
             if let Err(error) = result {
@@ -211,6 +221,7 @@ impl<F: FileSystem> Workspace<F> {
                         format!("{diagnostic}; rollback failed: {rollback_failure}"),
                     );
                 }
+                snapshots.discard(checkpoint);
                 return Err(diagnostic);
             }
             applied.push(*id);

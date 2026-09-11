@@ -6,6 +6,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub trait FileSystem {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
     fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
+    fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        if self.exists(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "temporary file already exists",
+            ));
+        }
+        self.write(path, bytes)
+    }
     fn replace(&self, from: &Path, to: &Path) -> io::Result<()>;
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
@@ -36,6 +45,16 @@ impl FileSystem for RealFileSystem {
 
     fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         fs::write(path, bytes)
+    }
+
+    fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?
+            .write_all(bytes)
     }
 
     fn replace(&self, from: &Path, to: &Path) -> io::Result<()> {
