@@ -23,7 +23,16 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("CLAW", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled("CODE  /  quiet workspace", quiet),
+            Span::styled(
+                format!(
+                    "CODE  /  {:?}  /  {:?}  /  {}:{}",
+                    app.mode(),
+                    app.conversation_status(),
+                    app.selected_provider(),
+                    app.selected_model()
+                ),
+                quiet,
+            ),
         ]))
         .block(Block::default().borders(Borders::BOTTOM)),
         header,
@@ -43,7 +52,11 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         composer,
     );
     frame.render_widget(
-        Paragraph::new("Esc / q quit  ·  Ctrl-C cancel").style(quiet),
+        Paragraph::new(format!(
+            "{}  ·  Esc / q quit  ·  Ctrl-C cancel",
+            app.diagnostic()
+        ))
+        .style(quiet),
         footer,
     );
 }

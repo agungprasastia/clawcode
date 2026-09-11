@@ -7,11 +7,17 @@ pub const DEFAULT_TEXT_LIMIT: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationEvent {
+    PromptSubmitted {
+        prompt: String,
+        provider: String,
+        model: String,
+    },
     TextDelta(String),
     Usage(Usage),
     Finished(FinishReason),
     Error(String),
     Cancelled,
+    MutationRequested(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1,5 +1,27 @@
 use std::collections::VecDeque;
 
+use crate::conversation::ConversationEvent;
+use crate::provider::FinishReason;
+
+const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
+const MAX_IDENTITY_BYTES: usize = 256;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ConversationMode {
+    Plan,
+    Build,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ConversationStatus {
+    Idle,
+    Active,
+    Finished(FinishReason),
+    Error,
+    Cancelled,
+    Rejected,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Input {
     Quit,
@@ -21,6 +43,11 @@ pub struct App {
     cancellation_pending: bool,
     prompt: String,
     transcript: String,
+    mode: ConversationMode,
+    status: ConversationStatus,
+    provider: String,
+    model: String,
+    diagnostic: String,
 }
 
 impl Default for App {
@@ -30,6 +57,11 @@ impl Default for App {
             cancellation_pending: false,
             prompt: String::new(),
             transcript: String::new(),
+            mode: ConversationMode::Plan,
+            status: ConversationStatus::Idle,
+            provider: String::new(),
+            model: String::new(),
+            diagnostic: String::new(),
         }
     }
 }
@@ -81,6 +113,71 @@ impl App {
         }
     }
 
+    pub fn apply_conversation(&mut self, event: ConversationEvent) {
+        if matches!(self.status, ConversationStatus::Cancelled)
+            && !matches!(event, ConversationEvent::PromptSubmitted { .. })
+        {
+            return;
+        }
+        match event {
+            ConversationEvent::PromptSubmitted {
+                provider, model, ..
+            } => {
+                self.provider = bounded(provider, MAX_IDENTITY_BYTES);
+                self.model = bounded(model, MAX_IDENTITY_BYTES);
+                self.status = ConversationStatus::Active;
+                self.diagnostic.clear();
+            }
+            ConversationEvent::TextDelta(delta) => {
+                if self.status == ConversationStatus::Active {
+                    self.transcript.push_str(&delta);
+                    self.truncate_transcript();
+                }
+            }
+            ConversationEvent::Finished(reason) => {
+                if self.status == ConversationStatus::Active {
+                    self.status = ConversationStatus::Finished(reason);
+                }
+            }
+            ConversationEvent::Error(message) => {
+                if self.status == ConversationStatus::Active {
+                    self.status = ConversationStatus::Error;
+                    self.diagnostic = bounded(message, MAX_DIAGNOSTIC_BYTES);
+                }
+            }
+            ConversationEvent::Cancelled => self.status = ConversationStatus::Cancelled,
+            ConversationEvent::MutationRequested(operation) => {
+                if self.mode == ConversationMode::Plan {
+                    self.status = ConversationStatus::Rejected;
+                    self.diagnostic = bounded(
+                        format!("PLAN mode rejects mutation: {operation}"),
+                        MAX_DIAGNOSTIC_BYTES,
+                    );
+                }
+            }
+            ConversationEvent::Usage(_) => {}
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: ConversationMode) {
+        self.mode = mode;
+    }
+    pub fn mode(&self) -> ConversationMode {
+        self.mode
+    }
+    pub fn conversation_status(&self) -> ConversationStatus {
+        self.status
+    }
+    pub fn selected_provider(&self) -> &str {
+        &self.provider
+    }
+    pub fn selected_model(&self) -> &str {
+        &self.model
+    }
+    pub fn diagnostic(&self) -> &str {
+        &self.diagnostic
+    }
+
     pub fn is_running(&self) -> bool {
         self.running
     }
@@ -111,6 +208,12 @@ impl App {
         self.transcript
             .replace_range(..start, Self::TRUNCATION_MARKER);
     }
+}
+
+fn bounded(mut value: String, limit: usize) -> String {
+    let end = floor_char_boundary(&value, limit.min(value.len()));
+    value.truncate(end);
+    value
 }
 
 #[derive(Debug)]

@@ -10,7 +10,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-pub use app::{App, Input, UiEvent, UiEventQueue};
+pub use app::{App, ConversationMode, ConversationStatus, Input, UiEvent, UiEventQueue};
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const UI_EVENT_QUEUE_CAPACITY: usize = 64;
