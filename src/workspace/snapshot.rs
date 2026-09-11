@@ -7,6 +7,12 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SnapshotId(u64);
 
+impl SnapshotId {
+    pub(crate) fn value(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileState {
     Missing,
@@ -23,6 +29,13 @@ impl FileState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Snapshot {
     pub id: SnapshotId,
+    pub path: PathBuf,
+    pub before: FileState,
+    pub after: FileState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Diff {
     pub path: PathBuf,
     pub before: FileState,
     pub after: FileState,

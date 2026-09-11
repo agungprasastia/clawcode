@@ -1,7 +1,7 @@
 use clawcode::core::error::ErrorCategory;
 use clawcode::workspace::{
-    FileState, FileSystem, Mode, Operation, Policy, PolicyDecision, ReadResult, RealFileSystem,
-    Risk, SnapshotStore, Workspace, WorkspaceRoot, classify_shell,
+    FileState, FileSystem, Mode, Mutation, Operation, Policy, PolicyDecision, ReadResult,
+    RealFileSystem, Risk, SnapshotStore, Workspace, WorkspaceRoot, classify_shell,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -332,6 +332,104 @@ fn validate_shell_returns_policy_decision_without_executing() {
             .unwrap(),
         PolicyDecision::Denied
     );
+}
+
+#[test]
+fn plan_mutation_is_denied_without_change() {
+    let root = test_directory();
+    let path = root.path().join("note.txt");
+    fs::write(&path, b"before").unwrap();
+    let error = Workspace::open(root.path())
+        .unwrap()
+        .build(
+            Mode::Plan,
+            vec![Mutation::Write {
+                path: "note.txt".into(),
+                bytes: b"after".to_vec(),
+            }],
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    assert_eq!(fs::read(path).unwrap(), b"before");
+}
+
+#[test]
+fn approval_required_mutation_is_atomic() {
+    let root = test_directory();
+    let path = root.path().join("note.txt");
+    fs::write(&path, b"before").unwrap();
+    let error = Workspace::open(root.path())
+        .unwrap()
+        .build(
+            Mode::Build,
+            vec![Mutation::Delete {
+                path: "note.txt".into(),
+            }],
+            false,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    assert_eq!(fs::read(path).unwrap(), b"before");
+}
+
+#[test]
+fn build_applies_write_and_delete() {
+    let root = test_directory();
+    fs::write(root.path().join("old.txt"), b"old").unwrap();
+    let result = Workspace::open(root.path())
+        .unwrap()
+        .build(
+            Mode::Build,
+            vec![
+                Mutation::Write {
+                    path: "new.txt".into(),
+                    bytes: b"new".to_vec(),
+                },
+                Mutation::Delete {
+                    path: "old.txt".into(),
+                },
+            ],
+            true,
+        )
+        .unwrap();
+
+    assert_eq!(fs::read(root.path().join("new.txt")).unwrap(), b"new");
+    assert!(!root.path().join("old.txt").exists());
+    assert_eq!(result.snapshot_ids.len(), 2);
+    assert_eq!(result.diffs.len(), 2);
+}
+
+#[test]
+fn failed_second_apply_rolls_back_first_apply() {
+    let root = test_directory();
+    let first = root.path().join("first.txt");
+    let directory = root.path().join("directory");
+    fs::write(&first, b"before").unwrap();
+    fs::create_dir(&directory).unwrap();
+
+    let error = Workspace::open(root.path())
+        .unwrap()
+        .build(
+            Mode::Build,
+            vec![
+                Mutation::Write {
+                    path: "first.txt".into(),
+                    bytes: b"changed".to_vec(),
+                },
+                Mutation::Delete {
+                    path: "directory".into(),
+                },
+            ],
+            true,
+        )
+        .unwrap_err();
+
+    assert_eq!(error.category(), ErrorCategory::Workspace);
+    assert_eq!(fs::read(first).unwrap(), b"before");
+    assert!(directory.is_dir());
 }
 
 #[test]

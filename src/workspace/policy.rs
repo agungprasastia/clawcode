@@ -16,6 +16,7 @@ pub enum Risk {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Operation {
     Write,
+    SensitiveWrite,
     Delete,
     Shell(Risk),
 }
@@ -36,7 +37,7 @@ impl Policy {
             (Mode::Build, Operation::Write) | (Mode::Build, Operation::Shell(Risk::Safe)) => {
                 PolicyDecision::Allowed
             }
-            (Mode::Build, Operation::Delete | Operation::Shell(_)) => {
+            (Mode::Build, Operation::SensitiveWrite | Operation::Delete | Operation::Shell(_)) => {
                 PolicyDecision::ApprovalRequired
             }
         }
