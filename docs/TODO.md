@@ -45,7 +45,7 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 - [x] `P0-M6-06` Enforce PLAN read-only; gate forbidden mutation tests.
 - [x] `P0-M7-01` Hubungkan conversation, tool lifecycle, diff review, metrics.
 - [x] `P0-M7-02` Implement `/new`, `/sessions`, `/exit`, mode switch, model/session picker; gate scripted runtime flow in `tests/conversation_flow.rs`.
-- [ ] `P0-M7-03` Load OpenCode-style agents, commands, permissions, themes; gate compatibility fixtures.
+- [x] `P0-M7-03` Load OpenCode-style agents, commands, permissions, themes; gate compatibility fixtures in `tests/compat_config.rs`.
 - [ ] `P0-M8-01` Implement terminal/desktop notification dan sound best-effort; gate failure isolation.
 - [ ] `P0-M8-02` Add clipboard/shell discovery/credential-store OS adapters dengan portable fallback; gate OS adapter tests.
 

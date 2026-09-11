@@ -4,6 +4,7 @@
 
 use std::fmt;
 
+pub mod compat;
 pub mod jsonc;
 pub mod secret;
 
