@@ -166,9 +166,15 @@ impl App {
             }
             ConversationEvent::Usage(_) => {}
             ConversationEvent::Metrics(mut metrics) => {
-                metrics.provider = bounded(metrics.provider, MAX_IDENTITY_BYTES);
-                metrics.model = bounded(metrics.model, MAX_IDENTITY_BYTES);
-                self.metrics = Some(metrics);
+                if !matches!(
+                    self.status,
+                    ConversationStatus::Error | ConversationStatus::Cancelled
+                ) && metrics.finish_reason != Some(FinishReason::Error)
+                {
+                    metrics.provider = bounded(metrics.provider, MAX_IDENTITY_BYTES);
+                    metrics.model = bounded(metrics.model, MAX_IDENTITY_BYTES);
+                    self.metrics = Some(metrics);
+                }
             }
         }
     }
@@ -231,8 +237,7 @@ impl App {
                 self.diagnostic = format!("{} session(s)", sessions.len())
             }
             Ok(CommandOutput::Connected(provider)) => {
-                self.provider = provider.to_string();
-                self.diagnostic = "provider connected".into();
+                self.apply_command_output(CommandOutput::Connected(provider));
             }
             Ok(CommandOutput::Models(models)) => {
                 self.diagnostic = format!("{} model(s)", models.len())
@@ -242,6 +247,13 @@ impl App {
         }
         if let Some(error) = self.command_service.take_diagnostic() {
             self.diagnostic = error;
+        }
+    }
+
+    pub fn apply_command_output(&mut self, output: CommandOutput) {
+        if let CommandOutput::Connected(provider) = output {
+            self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
+            self.diagnostic = "provider connected".into();
         }
     }
 

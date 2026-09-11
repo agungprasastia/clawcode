@@ -1,6 +1,7 @@
 use clawcode::{
+    cli::CommandOutput,
     conversation::ConversationEvent,
-    provider::{FinishReason, TurnMetrics},
+    provider::{FinishReason, ProviderId, TurnMetrics},
     tui::{App, ConversationMode, ConversationStatus},
 };
 
@@ -66,6 +67,40 @@ fn app_bounds_metrics_identity_without_changing_other_values() {
     assert_eq!(stored.model, "m".repeat(255));
     assert!(stored.provider.is_char_boundary(stored.provider.len()));
     assert!(stored.model.is_char_boundary(stored.model.len()));
+}
+
+#[test]
+fn app_bounds_connected_provider_identity_without_panicking_on_utf8() {
+    let mut app = App::default();
+    let provider = ProviderId::new(&format!("{}界", "p".repeat(255)));
+
+    app.apply_command_output(CommandOutput::Connected(provider));
+
+    assert_eq!(app.selected_provider(), "p".repeat(255));
+    assert!(
+        app.selected_provider()
+            .is_char_boundary(app.selected_provider().len())
+    );
+}
+
+#[test]
+fn app_does_not_store_metrics_for_error_turn() {
+    let mut app = App::default();
+    app.apply_conversation(ConversationEvent::PromptSubmitted {
+        prompt: "hello".into(),
+        provider: "p".into(),
+        model: "m".into(),
+    });
+    app.apply_conversation(ConversationEvent::Error("boom".into()));
+    app.apply_conversation(ConversationEvent::Metrics(TurnMetrics {
+        duration: std::time::Duration::from_millis(1),
+        usage: None,
+        finish_reason: Some(FinishReason::Error),
+        provider: "p".into(),
+        model: "m".into(),
+    }));
+
+    assert_eq!(app.metrics(), None);
 }
 
 #[test]
