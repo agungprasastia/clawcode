@@ -42,13 +42,17 @@ fn candidates(directory: &Path, name: &str) -> Vec<PathBuf> {
         return vec![directory.join(name)];
     }
 
-    std::env::var_os("PATHEXT")
+    let mut candidates = vec![directory.join(name)];
+    candidates.extend(
+        std::env::var_os("PATHEXT")
         .unwrap_or_default()
         .to_string_lossy()
         .split(';')
         .filter(|extension| !extension.is_empty())
         .map(|extension| directory.join(format!("{name}{extension}")))
-        .collect()
+        .collect::<Vec<_>>(),
+    );
+    candidates
 }
 
 #[cfg(not(windows))]
