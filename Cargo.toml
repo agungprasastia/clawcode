@@ -19,3 +19,7 @@ criterion = "0.7"
 [[bench]]
 name = "first_frame"
 harness = false
+
+[[bench]]
+name = "performance"
+harness = false
