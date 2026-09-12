@@ -56,7 +56,7 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 - [x] `P1-M8-05` Security review trust boundary dan dangerous operations. (Review di `docs/security-review.md`; no high-severity blocker; fmt, strict Clippy, full serial tests, dan diff checks lulus.)
 - [x] `P1-M9-01` Package Windows/Linux/macOS binaries dan reproducible build check. (CI matrix, locked build/test, checksums, local scripts, dan Windows same-environment checksum validation lulus; lihat `docs/reproducible-builds.md`.)
 - [x] `P1-M9-02` Tulis README, config examples, diagnostics, migration docs. (README, valid JSONC examples, diagnostics reference, dan migration notes lulus strict validation serta `cargo run -- --version`.)
-- [ ] `P1-M9-03` Run full PRD acceptance checklist. (Checklist di `docs/prd-acceptance.md`; local Windows evidence lulus, tetapi tetap pending sampai GitHub Actions matrix Windows/Linux/macOS benar-benar berjalan hijau.)
+- [x] `P1-M9-03` Run full PRD acceptance checklist. (Checklist di `docs/prd-acceptance.md`; local Windows evidence dan GitHub Actions matrix Windows/Linux/macOS lulus pada run `34678182340`.)
 
 ## P2 — Sesudah MVP
 

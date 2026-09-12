@@ -15,7 +15,7 @@ Checklist follows `docs/PRD.md` acceptance criteria. An item is complete only wh
 | Config diagnostics identify error location | `tests/config.rs`: malformed and unknown-field location tests; `docs/diagnostics.md` | Pass |
 | Render loop not blocked by SQLite/network/notification | persistence async writer tests, discovery non-blocking tests, notification isolation tests, `benches/performance.rs` | Pass |
 | Retention and size limits tested | `tests/persistence.rs`, `tests/conversation_runtime.rs`, `tests/m8_property.rs`, snapshot limit tests | Pass |
-| Windows/Linux/macOS build/test matrix runs | `.github/workflows/release.yml` | Pass — checksum step uses `sha256sum` or macOS-compatible `shasum -a 256`. |
+| Windows/Linux/macOS build/test matrix runs | `.github/workflows/ci.yml`, `.github/workflows/release.yml` | Pass — CI run `34678182340` passed Ubuntu, Windows, and macOS; checksum step uses `sha256sum` or macOS-compatible `shasum -a 256`. |
 
 ## Required release blockers
 
