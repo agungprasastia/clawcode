@@ -39,7 +39,11 @@ jobs:
         run: |
           mkdir -p dist
           cp "target/release/${{ matrix.binary }}" "dist/${{ matrix.binary }}"
-          sha256sum "dist/${{ matrix.binary }}" > "dist/${{ matrix.binary }}.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${{ matrix.binary }}" > "dist/${{ matrix.binary }}.sha256"
+          else
+            shasum -a 256 "dist/${{ matrix.binary }}" > "dist/${{ matrix.binary }}.sha256"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

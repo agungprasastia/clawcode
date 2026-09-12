@@ -23,6 +23,6 @@ Command: `cargo bench --bench performance -- --noplot`
 
 ## Acceptance Notes
 
-The PRD startup target is ≤100 ms for warm/local startup. This local render benchmark measured 470.4 µs. Criterion output remains the source of truth for startup measurement on each baseline machine. Network discovery is not part of benchmark or startup critical path. Provider and UI delta accumulation both have explicit 64 KiB bounds.
+The PRD startup target is ≤100 ms for warm/local startup. This local render benchmark measured 1.36 ms median. Criterion output remains the source of truth for startup measurement on each baseline machine. Network discovery is not part of benchmark or startup critical path. Provider and UI delta accumulation both have explicit 64 KiB bounds.
 
 Run the benchmark after changes affecting TUI, provider streaming, persistence, or event queues. Compare Criterion reports rather than treating one machine's absolute numbers as portable across operating systems.
