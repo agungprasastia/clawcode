@@ -138,6 +138,11 @@ fn shell_discovery_finds_regular_file_without_executing_it() {
     let directory = temp_directory("find");
     let marker = directory.join("marker");
     fs::write(&marker, b"marker content").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     let discovery = PathShellDiscovery::new([directory.clone()]);
     assert_eq!(discovery.find("marker").unwrap(), marker);
