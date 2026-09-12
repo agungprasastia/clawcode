@@ -1,6 +1,9 @@
 use super::events::StreamEvent;
 use std::sync::{Arc, Mutex, mpsc};
 
+/// Maximum coalesced text held before it is emitted downstream.
+pub const MAX_COALESCED_DELTA_BYTES: usize = 64 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct StreamSender {
     sender: mpsc::SyncSender<StreamEvent>,
@@ -82,11 +85,18 @@ impl StreamSender {
         }
         match event {
             StreamEvent::TextDelta(delta) => {
-                self.state
+                let mut pending = self
+                    .state
                     .pending_delta
                     .lock()
-                    .expect("stream state poisoned")
-                    .push_str(&delta);
+                    .expect("stream state poisoned");
+                if pending.len() + delta.len() > MAX_COALESCED_DELTA_BYTES {
+                    let flushed = std::mem::take(&mut *pending);
+                    if self.sender.send(StreamEvent::TextDelta(flushed)).is_err() {
+                        return Err(mpsc::SendError(StreamEvent::TextDelta(delta)));
+                    }
+                }
+                pending.push_str(&delta);
                 Ok(())
             }
             event => {
@@ -129,5 +139,17 @@ mod tests {
         stream.cancel();
         assert!(matches!(stream.next(), Some(StreamEvent::Cancelled)));
         assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn flushes_coalesced_deltas_at_memory_bound() {
+        let (sender, mut stream) = ProviderStream::channel(2);
+        sender
+            .send(StreamEvent::TextDelta("x".repeat(MAX_COALESCED_DELTA_BYTES)))
+            .unwrap();
+        sender.send(StreamEvent::TextDelta("y".into())).unwrap();
+        assert_eq!(stream.next().unwrap(), StreamEvent::TextDelta("x".repeat(MAX_COALESCED_DELTA_BYTES)));
+        sender.flush().unwrap();
+        assert_eq!(stream.next().unwrap(), StreamEvent::TextDelta("y".into()));
     }
 }
