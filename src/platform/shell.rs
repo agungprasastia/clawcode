@@ -45,12 +45,12 @@ fn candidates(directory: &Path, name: &str) -> Vec<PathBuf> {
     let mut candidates = vec![directory.join(name)];
     candidates.extend(
         std::env::var_os("PATHEXT")
-        .unwrap_or_default()
-        .to_string_lossy()
-        .split(';')
-        .filter(|extension| !extension.is_empty())
-        .map(|extension| directory.join(format!("{name}{extension}")))
-        .collect::<Vec<_>>(),
+            .unwrap_or_default()
+            .to_string_lossy()
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| directory.join(format!("{name}{extension}")))
+            .collect::<Vec<_>>(),
     );
     candidates
 }
