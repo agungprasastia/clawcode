@@ -12,5 +12,5 @@ pub use discovery::{DiscoveryService, DiscoverySource};
 pub use events::{FinishReason, StreamEvent, ToolCallAssembler, Usage};
 pub use metrics::{ProviderMetrics, TurnMetrics};
 pub use registry::{ModelInfo, ProviderId, ProviderRegistry};
-pub use stream::{ProviderStream, StreamSender};
+pub use stream::{MAX_COALESCED_DELTA_BYTES, ProviderStream, StreamSender};
 pub use traits::{Provider, ProviderCapabilities, ProviderError, StreamRequest, StreamResponse};
