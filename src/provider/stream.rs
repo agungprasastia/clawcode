@@ -145,10 +145,15 @@ mod tests {
     fn flushes_coalesced_deltas_at_memory_bound() {
         let (sender, mut stream) = ProviderStream::channel(2);
         sender
-            .send(StreamEvent::TextDelta("x".repeat(MAX_COALESCED_DELTA_BYTES)))
+            .send(StreamEvent::TextDelta(
+                "x".repeat(MAX_COALESCED_DELTA_BYTES),
+            ))
             .unwrap();
         sender.send(StreamEvent::TextDelta("y".into())).unwrap();
-        assert_eq!(stream.next().unwrap(), StreamEvent::TextDelta("x".repeat(MAX_COALESCED_DELTA_BYTES)));
+        assert_eq!(
+            stream.next().unwrap(),
+            StreamEvent::TextDelta("x".repeat(MAX_COALESCED_DELTA_BYTES))
+        );
         sender.flush().unwrap();
         assert_eq!(stream.next().unwrap(), StreamEvent::TextDelta("y".into()));
     }

@@ -52,7 +52,7 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 ## P1 — Release hardening sebelum MVP release
 
 - [x] `P1-M8-03` Profil startup, stream, SQLite, memory, redraw CPU. (Criterion baseline, bounded provider/UI coalescing, and strict validation complete.)
-- [ ] `P1-M8-04` Add fuzz/property tests config, JSONC, event assembler, path policy.
+- [x] `P1-M8-04` Add fuzz/property tests config, JSONC, event assembler, path policy. (Deterministic generated-input tests cover parser safety, assembler limits, stream/UI bounds, and traversal rejection.)
 - [ ] `P1-M8-05` Security review trust boundary dan dangerous operations.
 - [ ] `P1-M9-01` Package Windows/Linux/macOS binaries dan reproducible build check.
 - [ ] `P1-M9-02` Tulis README, config examples, diagnostics, migration docs.
