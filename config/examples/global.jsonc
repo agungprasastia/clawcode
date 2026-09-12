@@ -1,0 +1,7 @@
+{
+  // Shared defaults. Keep secrets outside this file.
+  "schema_version": 1,
+  "model": "local-model",
+  "endpoint": "http://localhost:11434/v1",
+  "api_key": "env:CLAWCODE_API_KEY",
+}

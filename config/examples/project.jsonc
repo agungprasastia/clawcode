@@ -1,0 +1,7 @@
+{
+  // Project values override matching global values.
+  "schema_version": 1,
+  "model": "project-model",
+  "endpoint": "https://provider.example/v1",
+  "api_key": "credential:clawcode-project",
+}

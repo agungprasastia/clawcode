@@ -55,7 +55,7 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 - [x] `P1-M8-04` Add fuzz/property tests config, JSONC, event assembler, path policy. (Deterministic generated-input tests cover parser safety, assembler limits, stream/UI bounds, and traversal rejection.)
 - [x] `P1-M8-05` Security review trust boundary dan dangerous operations. (Review di `docs/security-review.md`; no high-severity blocker; fmt, strict Clippy, full serial tests, dan diff checks lulus.)
 - [x] `P1-M9-01` Package Windows/Linux/macOS binaries dan reproducible build check. (CI matrix, locked build/test, checksums, local scripts, dan Windows same-environment checksum validation lulus; lihat `docs/reproducible-builds.md`.)
-- [ ] `P1-M9-02` Tulis README, config examples, diagnostics, migration docs.
+- [x] `P1-M9-02` Tulis README, config examples, diagnostics, migration docs. (README, valid JSONC examples, diagnostics reference, dan migration notes lulus strict validation serta `cargo run -- --version`.)
 - [ ] `P1-M9-03` Run full PRD acceptance checklist.
 
 ## P2 — Sesudah MVP
