@@ -32,6 +32,7 @@ pub enum Input {
     Character(char),
     Backspace,
     Submit,
+    ToggleMode,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -90,6 +91,7 @@ impl App {
                 self.prompt.pop();
             }
             UiEvent::Input(Input::Submit) => self.submit_prompt(),
+            UiEvent::Input(Input::ToggleMode) => self.toggle_mode(),
             UiEvent::Resize { .. } => {}
             UiEvent::StreamDelta(delta) => {
                 self.transcript.push_str(&delta);
@@ -218,6 +220,21 @@ impl App {
 
     pub fn set_mode(&mut self, mode: ConversationMode) {
         self.mode = mode;
+        let command_mode = match mode {
+            ConversationMode::Plan => CommandMode::Plan,
+            ConversationMode::Build => CommandMode::Build,
+        };
+        let _ = self
+            .command_service
+            .execute(crate::cli::Command::Mode(command_mode));
+    }
+
+    pub fn toggle_mode(&mut self) {
+        let next_mode = match self.mode {
+            ConversationMode::Plan => ConversationMode::Build,
+            ConversationMode::Build => ConversationMode::Plan,
+        };
+        self.set_mode(next_mode);
     }
     pub fn mode(&self) -> ConversationMode {
         self.mode

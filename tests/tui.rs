@@ -189,6 +189,32 @@ fn submit_executes_slash_command_in_tui_app() {
 }
 
 #[test]
+fn tab_key_toggles_mode_between_plan_and_build() {
+    let mut app = App::default();
+    let mut events = UiEventQueue::new(8);
+
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Plan);
+
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Build);
+
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Plan);
+}
+
+#[test]
 fn retained_transcript_is_bounded_with_visible_truncation_marker() {
     let mut app = App::default();
 
