@@ -1,4 +1,4 @@
-use clawcode::tui::{App, Input, UiEvent, UiEventQueue, runtime_step};
+use clawcode::tui::{App, Input, UiEvent, UiEventQueue, render_to_test_backend, runtime_step};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 #[test]
@@ -8,6 +8,53 @@ fn quit_input_stops_app() {
     app.apply(UiEvent::Input(Input::Quit));
 
     assert!(!app.is_running());
+}
+
+#[test]
+fn workbench_layout_renders_at_desktop_and_small_terminal_sizes() {
+    let app = App::default();
+
+    render_to_test_backend(&app, 120, 40).unwrap();
+    render_to_test_backend(&app, 80, 24).unwrap();
+    render_to_test_backend(&app, 40, 12).unwrap();
+
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut rendered_lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        rendered_lines.push(line);
+    }
+    let text = rendered_lines.join("\n");
+    assert!(text.contains("CLAWCODE"));
+    assert!(text.contains("/plan"));
+    assert!(text.contains("/build"));
+    assert!(text.contains("PLAN"));
+    assert!(text.contains("clawcode v0.1.0"));
+
+    let backend_80 = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal_80 = ratatui::Terminal::new(backend_80).unwrap();
+    terminal_80
+        .draw(|f| clawcode::tui::render(f, &app))
+        .unwrap();
+    let buffer_80 = terminal_80.backend().buffer();
+    let mut lines_80 = Vec::new();
+    for y in 0..buffer_80.area.height {
+        let mut line = String::new();
+        for x in 0..buffer_80.area.width {
+            line.push_str(buffer_80[(x, y)].symbol());
+        }
+        lines_80.push(line);
+    }
+    let text_80 = lines_80.join("\n");
+    assert!(text_80.contains("CLAWCODE"));
+    assert!(text_80.contains("/plan"));
+    assert!(text_80.contains("clawcode v0.1.0"));
 }
 
 #[test]
