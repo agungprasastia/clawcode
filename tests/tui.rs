@@ -366,3 +366,91 @@ fn renders_with_command_popup_active_without_panic() {
     assert!(render_to_test_backend(&app, 120, 30).is_ok());
     assert!(render_to_test_backend(&app, 60, 15).is_ok());
 }
+
+#[test]
+fn submitting_non_slash_prompt_adds_to_transcript_and_sets_active_status() {
+    let mut app = App::default();
+    let mut events = UiEventQueue::new(8);
+
+    for c in "explain this code".chars() {
+        runtime_step(
+            &mut app,
+            &mut events,
+            Some(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))),
+            |_| Ok::<_, std::convert::Infallible>(()),
+        )
+        .unwrap();
+    }
+    assert_eq!(app.prompt(), "explain this code");
+
+    // Press Enter to submit freeform user prompt
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+
+    // Prompt input should be cleared
+    assert_eq!(app.prompt(), "");
+    // Transcript should contain the formatted prompt turn
+    assert!(app.transcript().contains("> explain this code"));
+    // Status should be Active
+    assert_eq!(app.conversation_status(), clawcode::tui::ConversationStatus::Active);
+    // Session should be created automatically
+    assert!(app.active_session_id().is_some());
+    // View switches to chat rendering seamlessly
+    assert!(render_to_test_backend(&app, 120, 30).is_ok());
+    assert!(render_to_test_backend(&app, 60, 15).is_ok());
+}
+
+#[test]
+fn multiple_user_prompts_and_stream_deltas_accumulate() {
+    let mut app = App::default();
+    let mut events = UiEventQueue::new(8);
+
+    // Submit prompt 1
+    for c in "first prompt".chars() {
+        runtime_step(
+            &mut app,
+            &mut events,
+            Some(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))),
+            |_| Ok::<_, std::convert::Infallible>(()),
+        )
+        .unwrap();
+    }
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+
+    // Stream response delta
+    events.push(UiEvent::StreamDelta("First answer.".into()));
+    app.apply_pending(&mut events);
+
+    // Submit prompt 2
+    for c in "second prompt".chars() {
+        runtime_step(
+            &mut app,
+            &mut events,
+            Some(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))),
+            |_| Ok::<_, std::convert::Infallible>(()),
+        )
+        .unwrap();
+    }
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+
+    assert!(app.transcript().contains("> first prompt"));
+    assert!(app.transcript().contains("First answer."));
+    assert!(app.transcript().contains("> second prompt"));
+}

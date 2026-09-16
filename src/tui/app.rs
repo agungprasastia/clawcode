@@ -112,6 +112,7 @@ pub struct App {
     metrics: Option<TurnMetrics>,
     command_service: crate::cli::CommandService<cli::CliDiscovery>,
     selected_suggestion: usize,
+    active_session_id: Option<i64>,
 }
 
 impl Default for App {
@@ -135,6 +136,7 @@ impl App {
             metrics: None,
             command_service: cli::runtime_service().expect("in-memory runtime database"),
             selected_suggestion: 0,
+            active_session_id: None,
         }
     }
 
@@ -225,6 +227,13 @@ impl App {
             ConversationEvent::Finished(reason) => {
                 if self.status == ConversationStatus::Active {
                     self.status = ConversationStatus::Finished(reason);
+                    if let Some(session_id) = self.active_session_id {
+                        let _ = self.command_service.append_message(
+                            session_id,
+                            "assistant",
+                            &self.transcript,
+                        );
+                    }
                     self.notify(
                         NotificationKind::Success,
                         "Turn complete",
@@ -399,38 +408,96 @@ impl App {
     fn submit_prompt(&mut self) {
         self.selected_suggestion = 0;
         let input = std::mem::take(&mut self.prompt);
-        let command = match cli::parse_command(&input) {
-            Ok(command) => command,
-            Err(error) => {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        if trimmed.starts_with('/') {
+            let command = match cli::parse_command(trimmed) {
+                Ok(command) => command,
+                Err(error) => {
+                    self.diagnostic = error;
+                    return;
+                }
+            };
+            match self.command_service.execute(command) {
+                Ok(CommandOutput::Mode(mode)) => self.set_mode(match mode {
+                    CommandMode::Plan => ConversationMode::Plan,
+                    CommandMode::Build => ConversationMode::Build,
+                }),
+                Ok(CommandOutput::Exit) => self.running = false,
+                Ok(CommandOutput::SessionCreated(session)) => {
+                    self.active_session_id = Some(session.id);
+                    self.diagnostic = format!("session created: {}", session.title);
+                }
+                Ok(CommandOutput::Sessions(sessions)) => {
+                    self.diagnostic = format!("{} session(s)", sessions.len());
+                }
+                Ok(CommandOutput::Connected(provider)) => {
+                    self.apply_command_output(CommandOutput::Connected(provider));
+                }
+                Ok(CommandOutput::Models(models)) => {
+                    self.diagnostic = format!("{} model(s)", models.len());
+                }
+                Ok(CommandOutput::Help(text)) => self.diagnostic = text,
+                Ok(CommandOutput::RefreshStarted) => {
+                    self.diagnostic = "model refresh started".into();
+                }
+                Err(error) => self.diagnostic = error.to_string(),
+            }
+            if let Some(error) = self.command_service.take_diagnostic() {
                 self.diagnostic = error;
-                return;
             }
+            return;
+        }
+
+        self.submit_user_prompt(trimmed);
+    }
+
+    pub fn submit_user_prompt(&mut self, prompt: &str) {
+        if self.active_session_id.is_none() {
+            if let Ok(session) = self.command_service.create_session(prompt) {
+                self.active_session_id = Some(session.id);
+            }
+        }
+        if let Some(session_id) = self.active_session_id {
+            let _ = self.command_service.append_message(session_id, "user", prompt);
+        }
+
+        if self.transcript.is_empty() {
+            self.transcript.push_str(&format!("> {prompt}\n\n"));
+        } else {
+            self.transcript.push_str(&format!("\n\n> {prompt}\n\n"));
+        }
+        self.truncate_transcript();
+
+        let provider = if self.provider.is_empty() {
+            "anthropic".to_string()
+        } else {
+            self.provider.clone()
         };
-        match self.command_service.execute(command) {
-            Ok(CommandOutput::Mode(mode)) => self.set_mode(match mode {
-                CommandMode::Plan => ConversationMode::Plan,
-                CommandMode::Build => ConversationMode::Build,
-            }),
-            Ok(CommandOutput::Exit) => self.running = false,
-            Ok(CommandOutput::SessionCreated(session)) => {
-                self.diagnostic = format!("session created: {}", session.title)
-            }
-            Ok(CommandOutput::Sessions(sessions)) => {
-                self.diagnostic = format!("{} session(s)", sessions.len())
-            }
-            Ok(CommandOutput::Connected(provider)) => {
-                self.apply_command_output(CommandOutput::Connected(provider));
-            }
-            Ok(CommandOutput::Models(models)) => {
-                self.diagnostic = format!("{} model(s)", models.len())
-            }
-            Ok(CommandOutput::Help(text)) => self.diagnostic = text,
-            Ok(CommandOutput::RefreshStarted) => self.diagnostic = "model refresh started".into(),
-            Err(error) => self.diagnostic = error.to_string(),
+        let model = if self.model.is_empty() {
+            "claude-3-7-sonnet".to_string()
+        } else {
+            self.model.clone()
+        };
+
+        let is_connected = self.command_service.is_connected() || !self.provider.is_empty();
+
+        self.apply_conversation(ConversationEvent::PromptSubmitted {
+            prompt: prompt.to_string(),
+            provider,
+            model,
+        });
+
+        if !is_connected {
+            self.diagnostic = "provider not connected; use /connect".into();
         }
-        if let Some(error) = self.command_service.take_diagnostic() {
-            self.diagnostic = error;
-        }
+    }
+
+    pub fn active_session_id(&self) -> Option<i64> {
+        self.active_session_id
     }
 
     pub fn apply_command_output(&mut self, output: CommandOutput) {

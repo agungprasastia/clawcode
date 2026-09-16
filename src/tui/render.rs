@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
@@ -509,8 +509,15 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         Span::styled(identity_label(app), Style::default().fg(theme.ink)),
     ]);
 
+    let status_color = match app.conversation_status() {
+        super::ConversationStatus::Active => theme.success,
+        super::ConversationStatus::Error => theme.error,
+        super::ConversationStatus::Cancelled => theme.warning,
+        _ => theme.dim,
+    };
+
     let header_line2 = Line::from(vec![
-        Span::styled("● ", Style::default().fg(theme.success)),
+        Span::styled("● ", Style::default().fg(status_color)),
         Span::styled(status_label(app), Style::default().fg(theme.quiet)),
         Span::styled(
             if app.diagnostic().is_empty() {
@@ -531,10 +538,40 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         .borders(Borders::NONE)
         .style(Style::default().bg(theme.bg_element));
 
+    let lines: Vec<Line> = app
+        .transcript()
+        .lines()
+        .map(|line| {
+            if let Some(prompt) = line.strip_prefix("> ") {
+                Line::from(vec![
+                    Span::styled(
+                        "> ",
+                        Style::default()
+                            .fg(theme.amber)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        prompt.to_string(),
+                        Style::default()
+                            .fg(theme.ink)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else {
+                Line::from(Span::styled(line.to_string(), Style::default().fg(theme.ink)))
+            }
+        })
+        .collect();
+
+    let total_lines = lines.len() as u16;
+    let visible_height = chunks[1].height;
+    let scroll_y = total_lines.saturating_sub(visible_height);
+
     frame.render_widget(
-        Paragraph::new(Text::from(app.transcript()))
+        Paragraph::new(lines)
             .style(Style::default().fg(theme.ink))
             .wrap(Wrap { trim: false })
+            .scroll((scroll_y, 0))
             .block(conversation_block),
         chunks[1],
     );

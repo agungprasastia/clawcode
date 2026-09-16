@@ -197,6 +197,41 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
             .ok_or_else(|| ProviderError::Protocol("connect provider first".into()))?;
         Ok(self.discovery.models(provider).unwrap_or(&[]).to_vec())
     }
+
+    pub fn is_connected(&self) -> bool {
+        self.provider.is_some()
+    }
+
+    pub fn provider(&self) -> Option<&ProviderId> {
+        self.provider.as_ref()
+    }
+
+    pub fn create_session(&self, title: &str) -> Result<Session, ProviderError> {
+        let title = bounded_title(title);
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.create_session(&title)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn append_message(
+        &self,
+        session_id: i64,
+        role: &str,
+        content: &str,
+    ) -> Result<(), ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.append_message(session_id, role, content)
+                    .map(|_| ())
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
 }
 
 const MAX_SESSION_TITLE_BYTES: usize = 80;
