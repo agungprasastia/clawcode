@@ -167,32 +167,54 @@ fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         return;
     }
 
-    let show_big_logo = area.height >= 20 && area.width >= 70;
-    let show_cards = area.height >= 22 && area.width >= 70;
-
-    let hero_height = if show_big_logo { 8 } else { 3 };
-    let cards_height = if show_cards { 4 } else { 0 };
     let input_height = 5;
     let hints_height = 1;
 
+    // Match Crabcode dock layout: top canvas stretches, input card & hints dock at bottom
     let home_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(hero_height),
-            Constraint::Length(if show_cards { 1 } else { 0 }),
-            Constraint::Length(cards_height),
-            Constraint::Length(1),
             Constraint::Length(input_height),
             Constraint::Length(hints_height),
-            Constraint::Min(0),
+            Constraint::Length(1),
         ])
         .split(area);
 
-    let hero_area = home_chunks[1];
-    let cards_area = home_chunks[3];
-    let input_area = home_chunks[5];
-    let hints_area = home_chunks[6];
+    let top_canvas = home_chunks[0];
+    let input_area = home_chunks[1];
+    let hints_area = home_chunks[2];
+
+    let show_big_logo = top_canvas.height >= 13 && area.width >= 70;
+    let show_cards = top_canvas.height >= 16 && area.width >= 70;
+
+    let hero_height = if show_big_logo { 8 } else { 3 };
+    let cards_height = if show_cards { 4 } else { 0 };
+    let gap_height = if show_cards { 1 } else { 0 };
+    let content_height = hero_height + gap_height + cards_height;
+
+    // Center logo and quick action cards vertically within the top canvas
+    let v_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(content_height),
+            Constraint::Min(0),
+        ])
+        .split(top_canvas);
+
+    let hero_cards_canvas = v_chunks[1];
+    let inner_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(hero_height),
+            Constraint::Length(gap_height),
+            Constraint::Length(cards_height),
+        ])
+        .split(hero_cards_canvas);
+
+    let hero_area = inner_chunks[0];
+    let cards_area = inner_chunks[2];
 
     let content_width = if area.width >= 106 {
         100
@@ -251,7 +273,7 @@ fn render_compact_home(
         .constraints([
             Constraint::Length(2),
             Constraint::Min(0),
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Length(1),
         ])
         .split(area);
@@ -404,38 +426,68 @@ fn render_input_card(
     theme: &Theme,
     mode_color: Color,
 ) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let border_set = border::Set {
         vertical_left: "┃",
         ..border::PLAIN
     };
 
-    let block = Block::default()
+    let border = Block::default()
         .borders(Borders::LEFT)
         .border_set(border_set)
-        .border_style(Style::default().fg(mode_color))
-        .style(Style::default().bg(theme.bg_element));
+        .border_style(Style::default().fg(mode_color));
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.height == 0 || inner.width == 0 {
+    let inner_area = border.inner(area);
+    if inner_area.height == 0 || inner_area.width == 0 {
+        frame.render_widget(border, area);
         return;
     }
 
-    let prompt_text = if app.prompt().is_empty() {
-        Line::from(vec![
-            Span::styled(" › ", Style::default().fg(mode_color)),
-            Span::styled(app.placeholder(), Style::default().fg(theme.dim)),
-        ])
+    // Fill background of input card excluding the cap row at bottom (if height > 1)
+    let bg_height = if inner_area.height > 1 {
+        inner_area.height.saturating_sub(1)
     } else {
-        Line::from(vec![
-            Span::styled(" › ", Style::default().fg(mode_color)),
-            Span::styled(
-                app.prompt(),
-                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(mode_color)),
+        inner_area.height
+    };
+    let bg_area = Rect {
+        x: inner_area.x,
+        y: inner_area.y,
+        width: inner_area.width,
+        height: bg_height,
+    };
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.bg_element)),
+        bg_area,
+    );
+
+    // Render left border `┃`
+    frame.render_widget(border, area);
+
+    // Two spaces padding from `┃` on the left
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(2),
         ])
+        .split(inner_area);
+
+    let content_area = h_chunks[1];
+
+    let prompt_text = if app.prompt().is_empty() {
+        Line::from(Span::styled(
+            app.placeholder(),
+            Style::default().fg(theme.dim),
+        ))
+    } else {
+        Line::from(Span::styled(
+            app.prompt(),
+            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+        ))
     };
 
     let provider_text = if app.selected_provider().is_empty() {
@@ -451,11 +503,13 @@ fn render_input_card(
 
     let mut meta_spans = vec![
         Span::styled(
-            format!(" [{}] ", mode_label(app)),
+            format!("[{}]", mode_label(app)),
             Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(" {model_text} "), Style::default().fg(theme.ink)),
-        Span::styled(format!(" {provider_text} "), Style::default().fg(theme.dim)),
+        Span::raw("  "),
+        Span::styled(model_text, Style::default().fg(theme.ink)),
+        Span::raw("  "),
+        Span::styled(provider_text, Style::default().fg(theme.quiet)),
     ];
 
     if !matches!(app.conversation_status(), super::ConversationStatus::Idle) {
@@ -465,7 +519,7 @@ fn render_input_card(
             super::ConversationStatus::Cancelled => theme.warning,
             _ => theme.dim,
         };
-        meta_spans.push(Span::styled("  ·  ", Style::default().fg(theme.panel)));
+        meta_spans.push(Span::raw("  ·  "));
         meta_spans.push(Span::styled("● ", Style::default().fg(status_color)));
         meta_spans.push(Span::styled(
             status_label(app),
@@ -473,27 +527,135 @@ fn render_input_card(
         ));
     }
 
-    if inner.height == 1 {
-        frame.render_widget(Paragraph::new(prompt_text), inner);
-    } else if inner.height == 2 {
-        let input_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(1)])
-            .split(inner);
-        frame.render_widget(Paragraph::new(prompt_text), input_chunks[0]);
-        frame.render_widget(Paragraph::new(Line::from(meta_spans)), input_chunks[1]);
-    } else {
-        let input_chunks = Layout::default()
+    if area.height <= 2 {
+        let cursor_x =
+            content_area.x + (app.prompt().len() as u16).min(content_area.width.saturating_sub(1));
+        frame.set_cursor_position((cursor_x, inner_area.y));
+
+        if inner_area.height == 1 {
+            frame.render_widget(Paragraph::new(prompt_text), content_area);
+        } else {
+            let mini_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Length(1)])
+                .split(inner_area);
+            frame.render_widget(
+                Paragraph::new(prompt_text),
+                Rect {
+                    x: content_area.x,
+                    y: mini_chunks[0].y,
+                    width: content_area.width,
+                    height: 1,
+                },
+            );
+            frame.render_widget(
+                Paragraph::new(Line::from(meta_spans)),
+                Rect {
+                    x: content_area.x,
+                    y: mini_chunks[1].y,
+                    width: content_area.width,
+                    height: 1,
+                },
+            );
+        }
+        return;
+    }
+
+    if area.height <= 4 {
+        let mini_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Min(0),
                 Constraint::Length(1),
             ])
-            .split(inner);
-        frame.render_widget(Paragraph::new(prompt_text), input_chunks[0]);
-        frame.render_widget(Paragraph::new(Line::from(meta_spans)), input_chunks[2]);
+            .split(inner_area);
+
+        let cursor_x =
+            content_area.x + (app.prompt().len() as u16).min(content_area.width.saturating_sub(1));
+        frame.set_cursor_position((cursor_x, mini_chunks[0].y));
+
+        frame.render_widget(
+            Paragraph::new(prompt_text),
+            Rect {
+                x: content_area.x,
+                y: mini_chunks[0].y,
+                width: content_area.width,
+                height: 1,
+            },
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(meta_spans)),
+            Rect {
+                x: content_area.x,
+                y: mini_chunks[1].y,
+                width: content_area.width,
+                height: 1,
+            },
+        );
+
+        let cap_fill_width = area.width.saturating_sub(1) as usize;
+        let cap_row = Paragraph::new(Line::from(vec![
+            Span::styled("╹", Style::default().fg(mode_color)),
+            Span::styled(
+                "▀".repeat(cap_fill_width),
+                Style::default().fg(theme.bg_element),
+            ),
+        ]));
+        frame.render_widget(cap_row, Rect::new(area.x, mini_chunks[2].y, area.width, 1));
+        return;
     }
+
+    // Standard 5-row input card layout matching Crabcode
+    let v_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Row 0: Top padding
+            Constraint::Length(1), // Row 1: Prompt / placeholder
+            Constraint::Length(1), // Row 2: Separator padding
+            Constraint::Length(1), // Row 3: Metadata chips ([PLAN] model provider)
+            Constraint::Length(1), // Row 4: Cap row (╹▀▀▀...)
+        ])
+        .split(inner_area);
+
+    // Hardware terminal cursor positioning
+    let cursor_x =
+        content_area.x + (app.prompt().len() as u16).min(content_area.width.saturating_sub(1));
+    let cursor_y = v_chunks[1].y;
+    frame.set_cursor_position((cursor_x, cursor_y));
+
+    // Row 1: Prompt or placeholder
+    frame.render_widget(
+        Paragraph::new(prompt_text),
+        Rect {
+            x: content_area.x,
+            y: v_chunks[1].y,
+            width: content_area.width,
+            height: 1,
+        },
+    );
+
+    // Row 3: Metadata chips
+    frame.render_widget(
+        Paragraph::new(Line::from(meta_spans)),
+        Rect {
+            x: content_area.x,
+            y: v_chunks[3].y,
+            width: content_area.width,
+            height: 1,
+        },
+    );
+
+    // Row 4: Bottom cap row
+    let cap_fill_width = area.width.saturating_sub(1) as usize;
+    let cap_row = Paragraph::new(Line::from(vec![
+        Span::styled("╹", Style::default().fg(mode_color)),
+        Span::styled(
+            "▀".repeat(cap_fill_width),
+            Style::default().fg(theme.bg_element),
+        ),
+    ]));
+    frame.render_widget(cap_row, Rect::new(area.x, v_chunks[4].y, area.width, 1));
 }
 
 fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -823,13 +985,17 @@ fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App, them
         return;
     }
 
-    let max_visible = 6;
-    let visible_count = suggestions.len().min(max_visible);
-    let popup_height = (visible_count as u16) + 2;
-
-    if input_area.y < popup_height {
+    let available_space = input_area.y as usize;
+    if available_space < 3 {
         return;
     }
+    let max_visible = 6.min(available_space - 2);
+    let visible_count = suggestions.len().min(max_visible);
+    if visible_count == 0 {
+        return;
+    }
+    let popup_height = (visible_count as u16) + 2;
+
     let popup_y = input_area.y.saturating_sub(popup_height);
     let popup_width = input_area.width.min(64);
     let popup_x = input_area.x;

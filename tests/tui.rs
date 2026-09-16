@@ -669,6 +669,19 @@ fn status_bar_and_input_card_visual_parity() {
     assert!(text.contains("Ask anything... \"Refactor this function\""));
     // Input card has Plan badge
     assert!(text.contains("[PLAN]"));
+    // Input card has bottom cap
+    assert!(text.contains("╹"));
+    assert!(text.contains("▀"));
+    // No unwanted prompt prefix `› ` in the input box
+    assert!(!text.contains("› Ask anything"));
+
+    // Docking check: in 100x30 terminal, input card is docked at the bottom
+    // Row 23: placeholder, Row 25: [PLAN], Row 26: cap, Row 27: hints, Row 29: status bar
+    assert!(lines[23].contains("Ask anything..."));
+    assert!(lines[25].contains("[PLAN]"));
+    assert!(lines[26].contains("╹"));
+    assert!(lines[27].contains("Enter"));
+    assert!(lines[29].contains(":feature-tui-polish"));
 
     // Toggle mode to Build and check [BUILD]
     app.toggle_mode();
