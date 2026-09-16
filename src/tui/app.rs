@@ -60,11 +60,11 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
     CommandSuggestion {
         name: "/model",
         description: "Select active model",
-        template: "/model ",
+        template: "/model",
     },
     CommandSuggestion {
         name: "/models",
-        description: "List discovered AI models",
+        description: "Interactive model picker",
         template: "/models",
     },
     CommandSuggestion {
@@ -129,6 +129,73 @@ pub enum UiEvent {
     StreamDelta(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelsDialogState {
+    pub items: Vec<crate::provider::ModelInfo>,
+    pub selected: usize,
+    pub filter: String,
+    pub scroll_offset: usize,
+}
+
+impl ModelsDialogState {
+    pub fn new(items: Vec<crate::provider::ModelInfo>, active_model: &str) -> Self {
+        let selected = items.iter().position(|m| m.id == active_model).unwrap_or(0);
+        Self {
+            items,
+            selected,
+            filter: String::new(),
+            scroll_offset: 0,
+        }
+    }
+
+    pub fn filtered_items(&self) -> Vec<&crate::provider::ModelInfo> {
+        if self.filter.is_empty() {
+            self.items.iter().collect()
+        } else {
+            let q = self.filter.to_lowercase();
+            self.items
+                .iter()
+                .filter(|m| m.id.to_lowercase().contains(&q))
+                .collect()
+        }
+    }
+
+    pub fn selected_model(&self) -> Option<&crate::provider::ModelInfo> {
+        let filtered = self.filtered_items();
+        filtered.get(self.selected).copied()
+    }
+
+    pub fn next(&mut self) {
+        let count = self.filtered_items().len();
+        if count > 0 {
+            self.selected = (self.selected + 1) % count;
+        }
+    }
+
+    pub fn previous(&mut self) {
+        let count = self.filtered_items().len();
+        if count > 0 {
+            self.selected = if self.selected == 0 {
+                count - 1
+            } else {
+                self.selected - 1
+            };
+        }
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.filter.push(c);
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+
+    pub fn pop_char(&mut self) {
+        self.filter.pop();
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+}
+
 pub struct App {
     running: bool,
     cancellation_pending: bool,
@@ -149,6 +216,10 @@ pub struct App {
     sessions: std::collections::HashMap<i64, ClientSessionState>,
     /// Snapshot shown by the /sessions panel.
     session_listings: Vec<crate::persistence::Session>,
+    /// Active interactive model selection dialog, if opened.
+    models_dialog: Option<ModelsDialogState>,
+    /// Cached list of discovered models for suggestions and selection.
+    available_models: Vec<crate::provider::ModelInfo>,
     /// Cached git branch of the workspace
     git_branch: Option<String>,
     /// Optional runtime client wiring prompt submissions to generation
@@ -181,7 +252,8 @@ impl App {
     pub fn new() -> Self {
         let config = crate::config::ConfigLoader.load().unwrap_or_default();
         let (initial_p, initial_m) = config.initial_provider_and_model();
-        let command_service = cli::runtime_service_with_config(&config).expect("in-memory runtime database");
+        let mut command_service = cli::runtime_service_with_config(&config).expect("in-memory runtime database");
+        let available_models = command_service.models().unwrap_or_default();
         Self {
             running: true,
             cancellation_pending: false,
@@ -199,6 +271,8 @@ impl App {
             active_session_id: None,
             sessions: std::collections::HashMap::new(),
             session_listings: Vec::new(),
+            models_dialog: None,
+            available_models,
             git_branch: crate::platform::get_current_branch(),
             runtime: None,
             runtime_events: None,
@@ -209,6 +283,55 @@ impl App {
     pub const TRUNCATION_MARKER: &str = "[earlier transcript truncated]\n";
 
     pub fn apply(&mut self, event: UiEvent) {
+        if self.models_dialog.is_some() {
+            match event {
+                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
+                    self.models_dialog = None;
+                }
+                UiEvent::Input(Input::Character(character)) => {
+                    if let Some(dialog) = &mut self.models_dialog {
+                        dialog.push_char(character);
+                    }
+                }
+                UiEvent::Input(Input::Backspace) => {
+                    if let Some(dialog) = &mut self.models_dialog {
+                        dialog.pop_char();
+                    }
+                }
+                UiEvent::Input(Input::Up) => {
+                    if let Some(dialog) = &mut self.models_dialog {
+                        dialog.previous();
+                    }
+                }
+                UiEvent::Input(Input::Down) => {
+                    if let Some(dialog) = &mut self.models_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Input(Input::Submit) => {
+                    if let Some(dialog) = &self.models_dialog {
+                        if let Some(chosen) = dialog.selected_model() {
+                            let chosen_id = chosen.id.clone();
+                            self.model = bounded(chosen_id.clone(), MAX_IDENTITY_BYTES);
+                            self.diagnostic = format!("model switched to: {chosen_id}");
+                        }
+                    }
+                    self.models_dialog = None;
+                }
+                UiEvent::Input(Input::ToggleMode) => {
+                    if let Some(dialog) = &mut self.models_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Resize { .. } => {}
+                UiEvent::StreamDelta(delta) => {
+                    self.transcript.push_str(&delta);
+                    self.truncate_transcript();
+                }
+            }
+            return;
+        }
+
         match event {
             UiEvent::Input(Input::Quit) => {
                 if self.session_listings.is_empty() {
@@ -234,7 +357,7 @@ impl App {
             }
             UiEvent::Input(Input::Submit) => self.submit_prompt(),
             UiEvent::Input(Input::ToggleMode) => {
-                if !self.matching_suggestions().is_empty() {
+                if !self.matching_suggestions().is_empty() || self.prompt.starts_with("/model ") {
                     self.autocomplete_selected_command();
                 } else {
                     self.toggle_mode();
@@ -258,7 +381,9 @@ impl App {
             return true;
         };
 
-        let quitting = event == UiEvent::Input(Input::Quit);
+        let quitting = event == UiEvent::Input(Input::Quit)
+            && self.session_listings.is_empty()
+            && self.models_dialog.is_none();
         self.apply(event);
         if quitting {
             events.clear();
@@ -471,15 +596,47 @@ impl App {
         self.selected_suggestion
     }
 
+    pub fn models_dialog(&self) -> Option<&ModelsDialogState> {
+        self.models_dialog.as_ref()
+    }
+
+    pub fn models_dialog_mut(&mut self) -> Option<&mut ModelsDialogState> {
+        self.models_dialog.as_mut()
+    }
+
+    pub fn available_models(&self) -> &[crate::provider::ModelInfo] {
+        &self.available_models
+    }
+
+    pub fn matching_model_suggestions(&self) -> Vec<String> {
+        if !self.prompt.starts_with("/model ") {
+            return Vec::new();
+        }
+        let query = self.prompt[7..].trim().to_lowercase();
+        self.available_models
+            .iter()
+            .map(|m| m.id.clone())
+            .filter(|id| query.is_empty() || id.to_lowercase().contains(&query))
+            .collect()
+    }
+
+    pub fn suggestion_count(&self) -> usize {
+        if self.prompt.starts_with("/model ") {
+            self.matching_model_suggestions().len()
+        } else {
+            self.matching_suggestions().len()
+        }
+    }
+
     pub fn next_suggestion(&mut self) {
-        let count = self.matching_suggestions().len();
+        let count = self.suggestion_count();
         if count > 0 {
             self.selected_suggestion = (self.selected_suggestion + 1) % count;
         }
     }
 
     pub fn previous_suggestion(&mut self) {
-        let count = self.matching_suggestions().len();
+        let count = self.suggestion_count();
         if count > 0 {
             self.selected_suggestion = if self.selected_suggestion == 0 {
                 count - 1
@@ -490,6 +647,14 @@ impl App {
     }
 
     pub fn autocomplete_selected_command(&mut self) -> bool {
+        if self.prompt.starts_with("/model ") {
+            let model_suggestions = self.matching_model_suggestions();
+            if let Some(first) = model_suggestions.get(self.selected_suggestion) {
+                self.prompt = format!("/model {first}");
+                self.selected_suggestion = 0;
+                return true;
+            }
+        }
         let suggestions = self.matching_suggestions();
         if let Some(suggestion) = suggestions.get(self.selected_suggestion) {
             self.prompt = suggestion.template.to_string();
@@ -517,6 +682,20 @@ impl App {
         self.rotate_placeholder();
 
         if trimmed.starts_with('/') {
+            if trimmed.starts_with("/model ") {
+                let arg = trimmed[7..].trim();
+                if arg.is_empty() {
+                    let model_suggestions = self.matching_model_suggestions();
+                    if let Some(first) = model_suggestions.get(self.selected_suggestion) {
+                        if was_suggestion_focused {
+                            let chosen = first.clone();
+                            self.model = bounded(chosen.clone(), MAX_IDENTITY_BYTES);
+                            self.diagnostic = format!("model switched to: {chosen}");
+                            return;
+                        }
+                    }
+                }
+            }
             let command = match cli::parse_command(trimmed) {
                 Ok(command) => command,
                 Err(error) => {
@@ -736,18 +915,8 @@ impl App {
                 self.diagnostic = format!("model switched to: {model_to_set}");
             }
             CommandOutput::Models(models) => {
-                if !models.is_empty() {
-                    let mut list = String::from("Available models:\n");
-                    for m in &models {
-                        list.push_str(&format!("  • {}\n", m.id));
-                    }
-                    if self.transcript.is_empty() {
-                        self.transcript.push_str(&list);
-                    } else {
-                        self.transcript.push_str(&format!("\n{list}"));
-                    }
-                    self.truncate_transcript();
-                }
+                self.available_models = models.clone();
+                self.models_dialog = Some(ModelsDialogState::new(models.clone(), &self.model));
                 self.diagnostic = format!("{} model(s)", models.len());
             }
             CommandOutput::Sessions(sessions) => {

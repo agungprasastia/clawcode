@@ -762,3 +762,109 @@ fn chat_view_renders_user_accent_border_and_ai_metadata_badge() {
     assert!(text.contains("30t/s"));
     assert!(text.contains("1.5s"));
 }
+
+#[test]
+fn models_dialog_opens_navigates_filters_and_selects_model() {
+    let mut app = App::default();
+
+    // Opening models dialog via /models slash command
+    for ch in "/models".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+
+    assert!(app.models_dialog().is_some());
+    // Typing a filter character filters items
+    app.apply(UiEvent::Input(Input::Character('c')));
+    app.apply(UiEvent::Input(Input::Character('l')));
+    app.apply(UiEvent::Input(Input::Character('a')));
+    app.apply(UiEvent::Input(Input::Character('u')));
+    app.apply(UiEvent::Input(Input::Character('d')));
+    app.apply(UiEvent::Input(Input::Character('e')));
+    assert_eq!(app.models_dialog().unwrap().filter, "claude");
+
+    let filtered = app.models_dialog().unwrap().filtered_items();
+    assert!(!filtered.is_empty());
+    for item in &filtered {
+        assert!(item.id.to_lowercase().contains("claude"));
+    }
+
+    // Enter selects the currently focused model and closes dialog
+    let selected_id = app.models_dialog().unwrap().selected_model().unwrap().id.clone();
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.models_dialog().is_none());
+    assert_eq!(app.selected_model(), selected_id);
+    assert!(app.diagnostic().contains(&selected_id));
+
+    // Reopen and test Esc dismisses without quitting
+    for ch in "/model".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.models_dialog().is_some());
+
+    app.apply(UiEvent::Input(Input::Quit));
+    assert!(app.models_dialog().is_none());
+    assert!(app.is_running());
+}
+
+#[test]
+fn models_dialog_renders_centered_with_selection_indicators() {
+    let mut app = App::default();
+
+    // Trigger dialog
+    for ch in "/models".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.models_dialog().is_some());
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        lines.push(line);
+    }
+    let text = lines.join("\n");
+
+    // Title and count
+    assert!(text.contains("Select Model"));
+    // Search filter bar
+    assert!(text.contains("Search:"));
+    // Active / cursor glyphs
+    assert!(text.contains("›"));
+    assert!(text.contains("●"));
+    // Keybinding hints
+    assert!(text.contains("navigate"));
+    assert!(text.contains("select"));
+    assert!(text.contains("close"));
+    assert!(text.contains("filter"));
+}
+
+#[test]
+fn slash_model_autocompletion_and_popup() {
+    let mut app = App::default();
+
+    // Type /model (with space)
+    for ch in "/model ".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+
+    let model_suggestions = app.matching_model_suggestions();
+    assert!(!model_suggestions.is_empty());
+
+    // Cycle suggestions with Down
+    app.apply(UiEvent::Input(Input::Down));
+    assert_eq!(app.selected_suggestion_index(), 1);
+
+    // Tab autocompletes the selected model
+    app.apply(UiEvent::Input(Input::ToggleMode));
+    assert!(app.prompt().starts_with("/model "));
+    assert_eq!(app.prompt(), format!("/model {}", model_suggestions[1]));
+}

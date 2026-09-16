@@ -37,7 +37,7 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         "/models refresh" => Ok(Command::ModelsRefresh),
         "/help" => Ok(Command::Help),
         "/new" => Err("usage: /new <title>".into()),
-        "/model" => Err("usage: /model <id>".into()),
+        "/model" => Ok(Command::Models),
         value if value.starts_with("/new ") => {
             let title = value[5..].trim();
             if title.is_empty() {
@@ -49,7 +49,7 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         value if value.starts_with("/model ") => {
             let model = value[7..].trim();
             if model.is_empty() {
-                Err("usage: /model <id>; model cannot be empty".into())
+                Ok(Command::Models)
             } else {
                 Ok(Command::Model(model.to_owned()))
             }
