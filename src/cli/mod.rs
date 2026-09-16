@@ -43,9 +43,9 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 Ok(Command::New(title.to_owned()))
             }
         }
-        "" => Err("enter a command; try /plan, /build, or /help".into()),
+        "" => Err("enter a command; try /plan, /build, /connect, or /help".into()),
         value => Err(format!(
-            "unknown command `{value}`; try /plan, /build, or /help"
+            "unknown command `{value}`; try /plan, /build, /connect, or /help"
         )),
     }
 }
@@ -158,7 +158,7 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
                 Ok(CommandOutput::RefreshStarted)
             }
             Command::Help => Ok(CommandOutput::Help(
-                "available commands: /plan, /build, /models, /sessions, /new <title>, /exit".into(),
+                "available commands: /plan, /build, /connect, /models, /sessions, /new <title>, /help, /exit".into(),
             )),
         }
     }

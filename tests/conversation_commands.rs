@@ -38,7 +38,7 @@ fn help_command_returns_available_commands() {
     let mut service = CommandService::new(Source);
     let output = service.execute(Command::Help).unwrap();
     assert!(
-        matches!(output, CommandOutput::Help(text) if text.contains("/plan") && text.contains("/build"))
+        matches!(output, CommandOutput::Help(text) if text.contains("/plan") && text.contains("/build") && text.contains("/connect"))
     );
 }
 

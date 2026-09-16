@@ -441,6 +441,13 @@ impl App {
     }
 
     fn submit_prompt(&mut self) {
+        let suggestions = self.matching_suggestions();
+        let selected_suggestion = if !suggestions.is_empty() {
+            suggestions.get(self.selected_suggestion).copied()
+        } else {
+            None
+        };
+        let was_suggestion_focused = self.selected_suggestion > 0;
         self.selected_suggestion = 0;
         let input = std::mem::take(&mut self.prompt);
         let trimmed = input.trim();
@@ -452,8 +459,23 @@ impl App {
             let command = match cli::parse_command(trimmed) {
                 Ok(command) => command,
                 Err(error) => {
-                    self.diagnostic = error;
-                    return;
+                    if let Some(suggestion) = selected_suggestion
+                        && (trimmed.len() > 1 || was_suggestion_focused)
+                    {
+                        if suggestion.template.ends_with(' ') {
+                            self.prompt = suggestion.template.to_string();
+                            self.diagnostic = format!("usage: {}<title>", suggestion.template);
+                            return;
+                        } else if let Ok(command) = cli::parse_command(suggestion.template) {
+                            command
+                        } else {
+                            self.diagnostic = error;
+                            return;
+                        }
+                    } else {
+                        self.diagnostic = error;
+                        return;
+                    }
                 }
             };
             match self.command_service.execute(command) {
@@ -545,6 +567,7 @@ impl App {
                 runtime.start_generation(session_id, agent_mode, &provider, &model, prompt)
             {
                 self.diagnostic = format!("generation failed to start: {error}");
+                self.status = ConversationStatus::Error;
             }
         } else if !is_connected {
             self.diagnostic = "provider not connected; use /connect".into();

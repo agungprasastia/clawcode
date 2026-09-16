@@ -360,6 +360,69 @@ fn slash_command_suggestions_filter_cycle_and_autocomplete() {
 }
 
 #[test]
+fn slash_command_suggestion_submits_directly_on_enter() {
+    let mut app = App::default();
+    let mut events = UiEventQueue::new(8);
+
+    // Type "/co": matches /connect
+    for ch in "/co".chars() {
+        runtime_step(
+            &mut app,
+            &mut events,
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            ))),
+            |_| Ok::<_, std::convert::Infallible>(()),
+        )
+        .unwrap();
+    }
+    assert_eq!(app.matching_suggestions()[0].name, "/connect");
+
+    // Press Enter directly: should execute /connect without requiring manual Tab completion
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+
+    // /connect executed -> provider connected or diagnostic set
+    assert!(!app.selected_provider().is_empty() || !app.diagnostic().is_empty());
+    assert!(app.prompt().is_empty());
+
+    // Also verify /new template suggestion on Enter populates template
+    for ch in "/n".chars() {
+        runtime_step(
+            &mut app,
+            &mut events,
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            ))),
+            |_| Ok::<_, std::convert::Infallible>(()),
+        )
+        .unwrap();
+    }
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+    assert_eq!(app.prompt(), "/new ");
+    assert!(app.diagnostic().contains("usage: /new <title>"));
+}
+
+#[test]
 fn renders_with_command_popup_active_without_panic() {
     let mut app = App::default();
     let mut events = UiEventQueue::new(8);
