@@ -415,13 +415,17 @@ fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(54)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(2),
+            Constraint::Length(54),
+        ])
         .split(area);
 
     frame.render_widget(Paragraph::new(Line::from(left_spans)), chunks[0]);
     frame.render_widget(
         Paragraph::new(Line::from(right_spans)).alignment(Alignment::Right),
-        chunks[1],
+        chunks[2],
     );
 }
 

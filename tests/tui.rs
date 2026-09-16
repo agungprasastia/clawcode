@@ -189,6 +189,22 @@ fn submit_executes_slash_command_in_tui_app() {
 }
 
 #[test]
+fn submit_executes_help_command_in_tui_app() {
+    let mut app = App::default();
+    app.apply_batch([
+        UiEvent::Input(Input::Character('/')),
+        UiEvent::Input(Input::Character('h')),
+        UiEvent::Input(Input::Character('e')),
+        UiEvent::Input(Input::Character('l')),
+        UiEvent::Input(Input::Character('p')),
+        UiEvent::Input(Input::Submit),
+    ]);
+    assert!(app.diagnostic().contains("/plan"));
+    assert!(app.diagnostic().contains("/build"));
+    assert!(app.prompt().is_empty());
+}
+
+#[test]
 fn tab_key_toggles_mode_between_plan_and_build() {
     let mut app = App::default();
     let mut events = UiEventQueue::new(8);

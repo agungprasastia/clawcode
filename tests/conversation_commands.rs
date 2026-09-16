@@ -30,6 +30,14 @@ fn parses_session_and_mode_commands() {
         parse_command("/build"),
         Ok(Command::Mode(ConversationMode::Build))
     );
+    assert_eq!(parse_command("/help"), Ok(Command::Help));
+}
+
+#[test]
+fn help_command_returns_available_commands() {
+    let mut service = CommandService::new(Source);
+    let output = service.execute(Command::Help).unwrap();
+    assert!(matches!(output, CommandOutput::Help(text) if text.contains("/plan") && text.contains("/build")));
 }
 
 #[test]

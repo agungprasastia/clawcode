@@ -15,6 +15,7 @@ pub enum Command {
     Connect,
     Models,
     ModelsRefresh,
+    Help,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,6 +33,7 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         "/connect" => Ok(Command::Connect),
         "/models" => Ok(Command::Models),
         "/models refresh" => Ok(Command::ModelsRefresh),
+        "/help" => Ok(Command::Help),
         "/new" => Err("usage: /new <title>".into()),
         value if value.starts_with("/new ") => {
             let title = value[5..].trim();
@@ -41,9 +43,9 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
                 Ok(Command::New(title.to_owned()))
             }
         }
-        "" => Err("enter a command; try /plan, /build, /new <title>, /sessions, or /exit".into()),
+        "" => Err("enter a command; try /plan, /build, or /help".into()),
         value => Err(format!(
-            "unknown command `{value}`; try /plan, /build, /new <title>, /sessions, or /exit"
+            "unknown command `{value}`; try /plan, /build, or /help"
         )),
     }
 }
@@ -57,6 +59,7 @@ pub enum CommandOutput {
     Connected(ProviderId),
     Models(Vec<ModelInfo>),
     RefreshStarted,
+    Help(String),
 }
 
 pub struct CommandService<D> {
@@ -154,6 +157,9 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
                 ));
                 Ok(CommandOutput::RefreshStarted)
             }
+            Command::Help => Ok(CommandOutput::Help(
+                "available commands: /plan, /build, /models, /sessions, /new <title>, /exit".into(),
+            )),
         }
     }
 

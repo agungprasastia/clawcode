@@ -296,6 +296,7 @@ impl App {
             Ok(CommandOutput::Models(models)) => {
                 self.diagnostic = format!("{} model(s)", models.len())
             }
+            Ok(CommandOutput::Help(text)) => self.diagnostic = text,
             Ok(CommandOutput::RefreshStarted) => self.diagnostic = "model refresh started".into(),
             Err(error) => self.diagnostic = error.to_string(),
         }
