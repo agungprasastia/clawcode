@@ -638,3 +638,114 @@ fn submitting_prompt_clears_sessions_panel() {
 
     assert!(app.session_listings().is_empty());
 }
+
+#[test]
+fn status_bar_and_input_card_visual_parity() {
+    let mut app = App::default();
+    app.set_git_branch(Some("feature-tui-polish".into()));
+    app.set_placeholder("Ask anything... \"Refactor this function\"".into());
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        lines.push(line);
+    }
+    let text = lines.join("\n");
+
+    // Left status bar has git branch
+    assert!(text.contains(":feature-tui-polish"));
+    // Right status bar has version
+    assert!(text.contains("clawcode v0.1.0"));
+    // Input card has vertical accent bar
+    assert!(text.contains("┃"));
+    // Input card has ghost text placeholder
+    assert!(text.contains("Ask anything... \"Refactor this function\""));
+    // Input card has Plan badge
+    assert!(text.contains("[PLAN]"));
+
+    // Toggle mode to Build and check [BUILD]
+    app.toggle_mode();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut lines_build = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        lines_build.push(line);
+    }
+    let text_build = lines_build.join("\n");
+    assert!(text_build.contains("[BUILD]"));
+}
+
+#[test]
+fn placeholder_rotation_on_submit() {
+    let mut app = App::default();
+    assert!(app.placeholder().starts_with("Ask anything..."));
+
+    app.apply(UiEvent::Input(Input::Character('h')));
+    app.apply(UiEvent::Input(Input::Character('i')));
+    app.apply(UiEvent::Input(Input::Submit));
+
+    assert_eq!(app.prompt(), "");
+    assert!(app.placeholder().starts_with("Ask anything..."));
+}
+
+#[test]
+fn chat_view_renders_user_accent_border_and_ai_metadata_badge() {
+    let mut app = App::default();
+    // Submit user prompt
+    for c in "write unit tests".chars() {
+        app.apply(UiEvent::Input(Input::Character(c)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+
+    // Simulate response text delta
+    app.apply(UiEvent::StreamDelta("Generated tests successfully.".into()));
+
+    // Attach turn metrics
+    app.set_metrics(Some(clawcode::provider::TurnMetrics {
+        duration: std::time::Duration::from_millis(1500),
+        usage: Some(clawcode::provider::Usage {
+            input_tokens: 120,
+            output_tokens: 45,
+        }),
+        finish_reason: Some(clawcode::provider::FinishReason::Stop),
+        provider: "anthropic".into(),
+        model: "claude-3-7-sonnet".into(),
+    }));
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        lines.push(line);
+    }
+    let text = lines.join("\n");
+
+    // Chat view replaces "> write unit tests" with styled "┃ write unit tests"
+    assert!(text.contains("┃ write unit tests"));
+    assert!(!text.contains("> write unit tests"));
+    // Contains AI response text
+    assert!(text.contains("Generated tests successfully."));
+    // Contains AI metadata badge icon and components
+    assert!(text.contains("▣"));
+    assert!(text.contains("PLAN"));
+    assert!(text.contains("claude-3-7-sonnet"));
+    assert!(text.contains("30t/s"));
+    assert!(text.contains("1.5s"));
+}

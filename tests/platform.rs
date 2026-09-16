@@ -1,6 +1,6 @@
 use clawcode::platform::{
     Clipboard, CredentialStore, MAX_CLIPBOARD_BYTES, PlatformError, ShellDiscovery,
-    UnsupportedCredentialStore,
+    UnsupportedCredentialStore, get_branch_for_path, get_current_branch, is_git_repo,
 };
 use clawcode::platform::{ClipboardBackend, PathShellDiscovery, SystemClipboard};
 use std::fs;
@@ -175,6 +175,24 @@ fn shell_discovery_rejects_empty_and_path_separator_names() {
         discovery.find("nested/name"),
         Err(PlatformError::InvalidInput(_))
     ));
+}
+
+#[test]
+fn git_branch_and_repo_detection_in_workspace() {
+    assert!(is_git_repo(std::path::Path::new(".")));
+    let branch = get_current_branch();
+    assert!(branch.is_some());
+    let branch = branch.unwrap();
+    assert!(!branch.is_empty());
+    assert_ne!(branch, "HEAD");
+}
+
+#[test]
+fn git_branch_for_non_git_directory_returns_none() {
+    let directory = temp_directory("non-git");
+    assert!(!is_git_repo(&directory));
+    assert_eq!(get_branch_for_path(&directory), None);
+    fs::remove_dir_all(directory).unwrap();
 }
 
 fn temp_directory(label: &str) -> PathBuf {

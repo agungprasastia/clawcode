@@ -94,6 +94,29 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
     },
 ];
 
+pub const PLACEHOLDER_SUGGESTIONS: &[&str] = &[
+    "Fix a TODO in the codebase",
+    "What is the tech stack of this project?",
+    "Write unit tests for this module",
+    "Refactor this function for better performance",
+    "Add error handling to this code",
+    "Explain how this code works",
+    "Find and fix a bug in this module",
+    "Add documentation to this function",
+    "Create a new feature for X",
+    "Optimize this database query",
+    "Add type hints to this code",
+    "Implement caching for this endpoint",
+];
+
+pub fn get_random_placeholder() -> String {
+    let index = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_millis() as usize) % PLACEHOLDER_SUGGESTIONS.len())
+        .unwrap_or(0);
+    format!("Ask anything... \"{}\"", PLACEHOLDER_SUGGESTIONS[index])
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum UiEvent {
     Input(Input),
@@ -105,6 +128,7 @@ pub struct App {
     running: bool,
     cancellation_pending: bool,
     prompt: String,
+    placeholder: String,
     transcript: String,
     mode: ConversationMode,
     status: ConversationStatus,
@@ -120,6 +144,8 @@ pub struct App {
     sessions: std::collections::HashMap<i64, ClientSessionState>,
     /// Snapshot shown by the /sessions panel.
     session_listings: Vec<crate::persistence::Session>,
+    /// Cached git branch of the workspace
+    git_branch: Option<String>,
     /// Optional runtime client wiring prompt submissions to generation
     /// threads. Inactive until a provider-backed runtime is attached.
     runtime: Option<RuntimeClient>,
@@ -152,6 +178,7 @@ impl App {
             running: true,
             cancellation_pending: false,
             prompt: String::new(),
+            placeholder: get_random_placeholder(),
             transcript: String::new(),
             mode: ConversationMode::Plan,
             status: ConversationStatus::Idle,
@@ -164,6 +191,7 @@ impl App {
             active_session_id: None,
             sessions: std::collections::HashMap::new(),
             session_listings: Vec::new(),
+            git_branch: crate::platform::get_current_branch(),
             runtime: None,
             runtime_events: None,
         }
@@ -375,8 +403,32 @@ impl App {
         self.metrics.as_ref()
     }
 
+    pub fn set_metrics(&mut self, metrics: Option<TurnMetrics>) {
+        self.metrics = metrics;
+    }
+
     pub fn is_running(&self) -> bool {
         self.running
+    }
+
+    pub fn git_branch(&self) -> Option<&str> {
+        self.git_branch.as_deref()
+    }
+
+    pub fn set_git_branch(&mut self, branch: Option<String>) {
+        self.git_branch = branch;
+    }
+
+    pub fn placeholder(&self) -> &str {
+        &self.placeholder
+    }
+
+    pub fn set_placeholder(&mut self, placeholder: String) {
+        self.placeholder = placeholder;
+    }
+
+    pub fn rotate_placeholder(&mut self) {
+        self.placeholder = get_random_placeholder();
     }
 
     /// Consumes a UI cancellation request. Provider cancellation is not wired yet.
@@ -454,6 +506,7 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
+        self.rotate_placeholder();
 
         if trimmed.starts_with('/') {
             let command = match cli::parse_command(trimmed) {

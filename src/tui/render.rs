@@ -2,8 +2,12 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::border,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
 };
 
 use crate::persistence::SessionStatus;
@@ -400,15 +404,16 @@ fn render_input_card(
     theme: &Theme,
     mode_color: Color,
 ) {
+    let border_set = border::Set {
+        vertical_left: "┃",
+        ..border::PLAIN
+    };
+
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .borders(Borders::LEFT)
+        .border_set(border_set)
         .border_style(Style::default().fg(mode_color))
-        .style(Style::default().bg(theme.bg_element))
-        .title(Span::styled(
-            format!(" [{}] ", mode_label(app)),
-            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-        ));
+        .style(Style::default().bg(theme.bg_element));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -417,22 +422,10 @@ fn render_input_card(
         return;
     }
 
-    let input_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
     let prompt_text = if app.prompt().is_empty() {
         Line::from(vec![
             Span::styled(" › ", Style::default().fg(mode_color)),
-            Span::styled(
-                "Ask Clawcode to inspect, plan, or build…",
-                Style::default().fg(theme.dim),
-            ),
+            Span::styled(app.placeholder(), Style::default().fg(theme.dim)),
         ])
     } else {
         Line::from(vec![
@@ -444,43 +437,61 @@ fn render_input_card(
             Span::styled("█", Style::default().fg(mode_color)),
         ])
     };
-    frame.render_widget(Paragraph::new(prompt_text), input_chunks[0]);
 
-    if input_chunks.len() >= 3 && input_chunks[2].height > 0 {
+    let provider_text = if app.selected_provider().is_empty() {
+        "disconnected"
+    } else {
+        app.selected_provider()
+    };
+    let model_text = if app.selected_model().is_empty() {
+        "default"
+    } else {
+        app.selected_model()
+    };
+
+    let mut meta_spans = vec![
+        Span::styled(
+            format!(" [{}] ", mode_label(app)),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" {model_text} "), Style::default().fg(theme.ink)),
+        Span::styled(format!(" {provider_text} "), Style::default().fg(theme.dim)),
+    ];
+
+    if !matches!(app.conversation_status(), super::ConversationStatus::Idle) {
         let status_color = match app.conversation_status() {
             super::ConversationStatus::Active => theme.success,
             super::ConversationStatus::Error => theme.error,
             super::ConversationStatus::Cancelled => theme.warning,
             _ => theme.dim,
         };
+        meta_spans.push(Span::styled("  ·  ", Style::default().fg(theme.panel)));
+        meta_spans.push(Span::styled("● ", Style::default().fg(status_color)));
+        meta_spans.push(Span::styled(
+            status_label(app),
+            Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
+        ));
+    }
 
-        let provider_text = if app.selected_provider().is_empty() {
-            "disconnected"
-        } else {
-            app.selected_provider()
-        };
-        let model_text = if app.selected_model().is_empty() {
-            "default"
-        } else {
-            app.selected_model()
-        };
-
-        let meta_spans = vec![
-            Span::styled("● ", Style::default().fg(status_color)),
-            Span::styled(
-                mode_label(app),
-                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled(model_text, Style::default().fg(theme.ink)),
-            Span::styled("  ", Style::default()),
-            Span::styled(provider_text, Style::default().fg(theme.quiet)),
-            Span::styled("  ·  ", Style::default().fg(theme.panel)),
-            Span::styled(
-                status_label(app),
-                Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
-            ),
-        ];
+    if inner.height == 1 {
+        frame.render_widget(Paragraph::new(prompt_text), inner);
+    } else if inner.height == 2 {
+        let input_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(inner);
+        frame.render_widget(Paragraph::new(prompt_text), input_chunks[0]);
+        frame.render_widget(Paragraph::new(Line::from(meta_spans)), input_chunks[1]);
+    } else {
+        let input_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+        frame.render_widget(Paragraph::new(prompt_text), input_chunks[0]);
         frame.render_widget(Paragraph::new(Line::from(meta_spans)), input_chunks[2]);
     }
 }
@@ -621,31 +632,83 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         .borders(Borders::NONE)
         .style(Style::default().bg(theme.bg_element));
 
-    let lines: Vec<Line> = app
-        .transcript()
-        .lines()
-        .map(|line| {
-            if let Some(prompt) = line.strip_prefix("> ") {
-                Line::from(vec![
-                    Span::styled(
-                        "> ",
-                        Style::default()
-                            .fg(theme.amber)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        prompt.to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                    ),
-                ])
+    let mut lines: Vec<Line> = Vec::new();
+    for line in app.transcript().lines() {
+        if let Some(prompt) = line.strip_prefix("> ") {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "┃ ",
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    prompt.to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(theme.ink),
+            )));
+        }
+    }
+
+    if let Some(metrics) = app.metrics() {
+        let mut meta_spans = vec![
+            Span::styled(
+                "▣ ",
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                mode_label(app),
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            ),
+        ];
+
+        let model = if !metrics.model().is_empty() {
+            metrics.model()
+        } else if !app.selected_model().is_empty() {
+            app.selected_model()
+        } else {
+            "default"
+        };
+        meta_spans.push(Span::styled(" • ", Style::default().fg(theme.dim)));
+        meta_spans.push(Span::styled(
+            model.to_string(),
+            Style::default().fg(theme.dim),
+        ));
+
+        if let Some(usage) = metrics.usage() {
+            let dur_secs = metrics.duration.as_secs_f64();
+            let tps = if dur_secs > 0.05 {
+                format!("{:.0}t/s", (usage.output_tokens as f64) / dur_secs)
             } else {
-                Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(theme.ink),
-                ))
-            }
-        })
-        .collect();
+                format!("{}t", usage.output_tokens)
+            };
+            meta_spans.push(Span::styled(" • ", Style::default().fg(theme.dim)));
+            meta_spans.push(Span::styled(tps, Style::default().fg(theme.dim)));
+        }
+
+        let dur_str = if metrics.duration.as_secs() > 0 {
+            format!("{:.1}s", metrics.duration.as_secs_f64())
+        } else {
+            format!("{}ms", metrics.duration.as_millis())
+        };
+        meta_spans.push(Span::styled(" • ", Style::default().fg(theme.dim)));
+        meta_spans.push(Span::styled(dur_str, Style::default().fg(theme.dim)));
+
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(meta_spans));
+    } else if matches!(app.conversation_status(), super::ConversationStatus::Active) {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "▣ ",
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Streaming...", Style::default().fg(theme.dim)),
+        ]));
+    }
 
     let total_lines = lines.len() as u16;
     let visible_height = chunks[1].height;
@@ -660,51 +723,42 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         chunks[1],
     );
 
+    if total_lines > visible_height && visible_height > 0 {
+        let mut scrollbar_state =
+            ScrollbarState::new(total_lines as usize).position(scroll_y as usize);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("┃");
+        frame.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
+    }
+
     render_input_card(frame, chunks[2], app, theme, mode_color);
     render_command_popup(frame, chunks[2], app, theme);
     render_hints_row(frame, chunks[3], app, theme);
 }
 
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let repo = repo_context();
-    let cwd_display = if repo.cwd.len() > 30 {
-        format!("...{}", &repo.cwd[repo.cwd.len() - 27..])
-    } else {
-        repo.cwd
-    };
+    let cwd_display = repo_cwd_display();
 
     let mut left_spans = vec![Span::styled(cwd_display, Style::default().fg(theme.dim))];
 
-    if let Some(branch) = repo.branch {
+    let branch = app
+        .git_branch()
+        .map(|b| b.to_string())
+        .or_else(crate::platform::get_current_branch);
+    if let Some(branch) = branch {
         left_spans.push(Span::styled(
-            format!(" ({branch})"),
-            Style::default()
-                .fg(theme.amber)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    if let Some(metrics) = app.metrics() {
-        left_spans.push(Span::styled("  ·  ", Style::default().fg(theme.panel)));
-        left_spans.push(Span::styled(
-            format!(
-                "duration {:?}  usage {:?}  finish {:?}",
-                metrics.duration(),
-                metrics.usage(),
-                metrics.finish_reason()
-            ),
+            format!(":{branch}"),
             Style::default().fg(theme.dim),
         ));
     }
 
     let right_spans = vec![
         Span::styled("clawcode ", Style::default().fg(theme.dim)),
-        Span::styled(
-            "v0.1.0",
-            Style::default()
-                .fg(theme.quiet)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("v0.1.0", Style::default().fg(theme.dim)),
     ];
 
     let chunks = Layout::default()
@@ -719,16 +773,11 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
     );
 }
 
-struct RepoContext {
-    cwd: String,
-    branch: Option<String>,
-}
-
-fn repo_context() -> RepoContext {
+fn repo_cwd_display() -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| ".".into());
-    let cwd_display =
+    let cwd_with_tilde =
         if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
             let home_str = home.to_string_lossy();
             if cwd.starts_with(&*home_str) {
@@ -742,22 +791,10 @@ fn repo_context() -> RepoContext {
             cwd
         };
 
-    let branch = std::fs::read_to_string(".git/HEAD")
-        .ok()
-        .and_then(|content| {
-            let line = content.lines().next()?.trim();
-            if let Some(branch) = line.strip_prefix("ref: refs/heads/") {
-                Some(branch.to_string())
-            } else if line.len() >= 7 {
-                Some(line[..7].to_string())
-            } else {
-                None
-            }
-        });
-
-    RepoContext {
-        cwd: cwd_display,
-        branch,
+    if cwd_with_tilde.len() > 30 {
+        format!("...{}", &cwd_with_tilde[cwd_with_tilde.len() - 27..])
+    } else {
+        cwd_with_tilde
     }
 }
 
