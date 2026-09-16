@@ -38,6 +38,12 @@ pub enum Input {
     ToggleMode,
     Up,
     Down,
+    ScrollUp,
+    ScrollDown,
+    PageUp,
+    PageDown,
+    Home,
+    End,
     WhichKey,
 }
 
@@ -429,6 +435,89 @@ impl ThemesDialogState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionsDialogState {
+    pub items: Vec<crate::persistence::Session>,
+    pub selected: usize,
+    pub filter: String,
+    pub scroll_offset: usize,
+}
+
+impl SessionsDialogState {
+    pub fn new(items: Vec<crate::persistence::Session>, active_session_id: Option<i64>) -> Self {
+        let selected = active_session_id
+            .and_then(|id| items.iter().position(|s| s.id == id))
+            .unwrap_or(0);
+        Self {
+            items,
+            selected,
+            filter: String::new(),
+            scroll_offset: 0,
+        }
+    }
+
+    pub fn filtered_items(&self) -> Vec<&crate::persistence::Session> {
+        if self.filter.is_empty() {
+            self.items.iter().collect()
+        } else {
+            let q = self.filter.to_lowercase();
+            self.items
+                .iter()
+                .filter(|s| {
+                    s.title.to_lowercase().contains(&q)
+                        || s.id.to_string().contains(&q)
+                        || format!("ws#{}", s.workspace_id).to_lowercase().contains(&q)
+                })
+                .collect()
+        }
+    }
+
+    pub fn selected_session(&self) -> Option<&crate::persistence::Session> {
+        let filtered = self.filtered_items();
+        filtered.get(self.selected).copied()
+    }
+
+    pub fn next(&mut self) {
+        let count = self.filtered_items().len();
+        if count > 0 {
+            self.selected = (self.selected + 1) % count;
+        }
+    }
+
+    pub fn previous(&mut self) {
+        let count = self.filtered_items().len();
+        if count > 0 {
+            self.selected = if self.selected == 0 {
+                count - 1
+            } else {
+                self.selected - 1
+            };
+        }
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.filter.push(c);
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+
+    pub fn pop_char(&mut self) {
+        self.filter.pop();
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+
+    pub fn remove_item(&mut self, id: i64) {
+        self.items.retain(|s| s.id != id);
+        let count = self.filtered_items().len();
+        if count == 0 {
+            self.selected = 0;
+        } else if self.selected >= count {
+            self.selected = count - 1;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusDialogState {
     pub mode: String,
     pub provider: String,
@@ -547,6 +636,8 @@ pub struct App {
     sessions: std::collections::HashMap<i64, ClientSessionState>,
     /// Snapshot shown by the /sessions panel.
     session_listings: Vec<crate::persistence::Session>,
+    /// Active interactive sessions selection dialog, if opened.
+    sessions_dialog: Option<SessionsDialogState>,
     /// Active interactive model selection dialog, if opened.
     models_dialog: Option<ModelsDialogState>,
     /// Active interactive agent mode selection dialog, if opened.
@@ -567,6 +658,8 @@ pub struct App {
     home_state: HomeState,
     /// Timestamp of last animation tick.
     last_animation_tick: std::time::Instant,
+    /// Vertical scroll offset from the bottom of chat transcript (0 = auto-follow bottom).
+    chat_scroll: u16,
     /// Smooth typewriter buffer and stream metrics.
     typewriter: crate::tui::TypewriterState,
     /// Animated wave spinner for streaming indicator.
@@ -627,6 +720,7 @@ impl App {
             active_session_id: None,
             sessions: std::collections::HashMap::new(),
             session_listings: Vec::new(),
+            sessions_dialog: None,
             models_dialog: None,
             agents_dialog: None,
             themes_dialog: None,
@@ -637,6 +731,7 @@ impl App {
             git_branch: crate::platform::get_current_branch(),
             home_state: HomeState::new(),
             last_animation_tick: std::time::Instant::now(),
+            chat_scroll: 0,
             typewriter: crate::tui::TypewriterState::new(),
             wave_spinner: crate::tui::WaveSpinner::new(ratatui::style::Color::Rgb(224, 159, 63)),
             runtime: None,
@@ -687,6 +782,10 @@ impl App {
                     self.which_key.hide();
                     self.open_status_dialog();
                 }
+                UiEvent::Input(Input::Character('r')) => {
+                    self.which_key.hide();
+                    self.open_sessions_dialog();
+                }
                 UiEvent::Input(Input::Character('c')) => {
                     self.which_key.hide();
                     self.transcript.clear();
@@ -719,12 +818,16 @@ impl App {
                         dialog.pop_char();
                     }
                 }
-                UiEvent::Input(Input::Up) => {
+                UiEvent::Input(Input::Up)
+                | UiEvent::Input(Input::ScrollUp)
+                | UiEvent::Input(Input::PageUp) => {
                     if let Some(dialog) = &mut self.agents_dialog {
                         dialog.previous();
                     }
                 }
-                UiEvent::Input(Input::Down) => {
+                UiEvent::Input(Input::Down)
+                | UiEvent::Input(Input::ScrollDown)
+                | UiEvent::Input(Input::PageDown) => {
                     if let Some(dialog) = &mut self.agents_dialog {
                         dialog.next();
                     }
@@ -770,12 +873,16 @@ impl App {
                         dialog.pop_char();
                     }
                 }
-                UiEvent::Input(Input::Up) => {
+                UiEvent::Input(Input::Up)
+                | UiEvent::Input(Input::ScrollUp)
+                | UiEvent::Input(Input::PageUp) => {
                     if let Some(dialog) = &mut self.themes_dialog {
                         dialog.previous();
                     }
                 }
-                UiEvent::Input(Input::Down) => {
+                UiEvent::Input(Input::Down)
+                | UiEvent::Input(Input::ScrollDown)
+                | UiEvent::Input(Input::PageDown) => {
                     if let Some(dialog) = &mut self.themes_dialog {
                         dialog.next();
                     }
@@ -804,6 +911,71 @@ impl App {
             return;
         }
 
+        if self.sessions_dialog.is_some() {
+            match event {
+                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
+                    self.sessions_dialog = None;
+                    self.session_listings.clear();
+                }
+                UiEvent::Input(Input::Character(character)) => {
+                    if let Some(dialog) = &mut self.sessions_dialog {
+                        if dialog.filter.is_empty() && character == '/' {
+                            self.sessions_dialog = None;
+                            self.session_listings.clear();
+                            self.history_index = None;
+                            self.prompt.push('/');
+                            self.selected_suggestion = 0;
+                            return;
+                        }
+                        dialog.push_char(character);
+                    }
+                }
+                UiEvent::Input(Input::Backspace) => {
+                    if let Some(dialog) = &mut self.sessions_dialog {
+                        dialog.pop_char();
+                    }
+                }
+                UiEvent::Input(Input::Up)
+                | UiEvent::Input(Input::ScrollUp)
+                | UiEvent::Input(Input::PageUp) => {
+                    if let Some(dialog) = &mut self.sessions_dialog {
+                        dialog.previous();
+                    }
+                }
+                UiEvent::Input(Input::Down)
+                | UiEvent::Input(Input::ScrollDown)
+                | UiEvent::Input(Input::PageDown) => {
+                    if let Some(dialog) = &mut self.sessions_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Input(Input::Submit) => {
+                    let chosen_session = self
+                        .sessions_dialog
+                        .as_ref()
+                        .and_then(|d| d.selected_session().cloned());
+                    if let Some(chosen) = chosen_session {
+                        self.switch_session(chosen.id);
+                        self.diagnostic = format!("switched to session #{} ({})", chosen.id, chosen.title);
+                    }
+                    self.sessions_dialog = None;
+                    self.session_listings.clear();
+                }
+                UiEvent::Input(Input::ToggleMode) => {
+                    if let Some(dialog) = &mut self.sessions_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Resize { .. } => {}
+                UiEvent::StreamDelta(delta) => {
+                    self.transcript.push_str(&delta);
+                    self.truncate_transcript();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.models_dialog.is_some() {
             match event {
                 UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
@@ -819,12 +991,16 @@ impl App {
                         dialog.pop_char();
                     }
                 }
-                UiEvent::Input(Input::Up) => {
+                UiEvent::Input(Input::Up)
+                | UiEvent::Input(Input::ScrollUp)
+                | UiEvent::Input(Input::PageUp) => {
                     if let Some(dialog) = &mut self.models_dialog {
                         dialog.previous();
                     }
                 }
-                UiEvent::Input(Input::Down) => {
+                UiEvent::Input(Input::Down)
+                | UiEvent::Input(Input::ScrollDown)
+                | UiEvent::Input(Input::PageDown) => {
                     if let Some(dialog) = &mut self.models_dialog {
                         dialog.next();
                     }
@@ -890,6 +1066,7 @@ impl App {
             }
             UiEvent::Input(Input::Clear) => {
                 self.transcript.clear();
+                self.chat_scroll = 0;
                 self.status = ConversationStatus::Idle;
                 self.diagnostic = "screen cleared".to_string();
             }
@@ -916,6 +1093,24 @@ impl App {
                 } else {
                     self.navigate_history_down();
                 }
+            }
+            UiEvent::Input(Input::ScrollUp) => {
+                self.scroll_up(3);
+            }
+            UiEvent::Input(Input::ScrollDown) => {
+                self.scroll_down(3);
+            }
+            UiEvent::Input(Input::PageUp) => {
+                self.scroll_up(15);
+            }
+            UiEvent::Input(Input::PageDown) => {
+                self.scroll_down(15);
+            }
+            UiEvent::Input(Input::Home) => {
+                self.scroll_to_top();
+            }
+            UiEvent::Input(Input::End) => {
+                self.scroll_to_bottom();
             }
             UiEvent::Input(Input::Submit) => self.submit_prompt(),
             UiEvent::Input(Input::WhichKey) => {
@@ -948,6 +1143,7 @@ impl App {
 
         let quitting = event == UiEvent::Input(Input::Quit)
             && self.session_listings.is_empty()
+            && self.sessions_dialog.is_none()
             && self.models_dialog.is_none()
             && self.agents_dialog.is_none()
             && self.themes_dialog.is_none()
@@ -1214,6 +1410,26 @@ impl App {
         redraw
     }
 
+    pub fn chat_scroll(&self) -> u16 {
+        self.chat_scroll
+    }
+
+    pub fn scroll_up(&mut self, lines: u16) {
+        self.chat_scroll = self.chat_scroll.saturating_add(lines);
+    }
+
+    pub fn scroll_down(&mut self, lines: u16) {
+        self.chat_scroll = self.chat_scroll.saturating_sub(lines);
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.chat_scroll = u16::MAX;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.chat_scroll = 0;
+    }
+
     pub fn placeholder(&self) -> &str {
         &self.placeholder
     }
@@ -1256,6 +1472,24 @@ impl App {
 
     pub fn selected_suggestion_index(&self) -> usize {
         self.selected_suggestion
+    }
+
+    pub fn sessions_dialog(&self) -> Option<&SessionsDialogState> {
+        self.sessions_dialog.as_ref()
+    }
+
+    pub fn sessions_dialog_mut(&mut self) -> Option<&mut SessionsDialogState> {
+        self.sessions_dialog.as_mut()
+    }
+
+    pub fn open_sessions_dialog(&mut self) {
+        if let Ok(sessions) = self.command_service.list_sessions() {
+            self.diagnostic = format!("{} session(s) — press Esc to close", sessions.len());
+            self.session_listings = sessions.clone();
+            self.sessions_dialog = Some(SessionsDialogState::new(sessions, self.active_session_id));
+        } else {
+            self.diagnostic = "no sessions found or db unavailable".to_string();
+        }
     }
 
     pub fn models_dialog(&self) -> Option<&ModelsDialogState> {
@@ -1458,6 +1692,7 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
+        self.chat_scroll = 0;
         if self.prompt_history.last().map(|s| s.as_str()) != Some(trimmed) {
             self.prompt_history.push(trimmed.to_string());
             if self.prompt_history.len() > 100 {
@@ -1797,6 +2032,7 @@ impl App {
         let state = self.sessions.entry(session_id).or_default();
         state.transcript = std::mem::take(&mut self.transcript);
         state.input_draft = std::mem::take(&mut self.prompt);
+        state.scroll = self.chat_scroll;
         state.status = self.status;
     }
 
@@ -1805,10 +2041,34 @@ impl App {
         let state = self.sessions.entry(session_id).or_default();
         self.transcript = std::mem::take(&mut state.transcript);
         self.prompt = std::mem::take(&mut state.input_draft);
+        self.chat_scroll = state.scroll;
         self.status = state.status;
         self.metrics = None;
         self.diagnostic.clear();
         self.selected_suggestion = 0;
+
+        if self.transcript.is_empty() {
+            if let Ok(messages) = self.command_service.session_messages(session_id) {
+                for msg in messages {
+                    if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                        if self.transcript.ends_with('\n') {
+                            self.transcript.push('\n');
+                        } else {
+                            self.transcript.push_str("\n\n");
+                        }
+                    }
+                    if msg.role == "user" {
+                        self.transcript.push_str(&format!("> {}\n\n", msg.content.trim()));
+                    } else if msg.role == "assistant" {
+                        self.transcript.push_str(&format!("{}\n\n", msg.content.trim()));
+                    } else {
+                        self.transcript.push_str(&format!("[{}]: {}\n\n", msg.role, msg.content.trim()));
+                    }
+                }
+                self.truncate_transcript();
+                self.scroll_to_bottom();
+            }
+        }
     }
 
     /// Switch the live view to `session_id`, stashing the current one first.
@@ -1855,7 +2115,8 @@ impl App {
                 // Grouped per workspace for the /sessions panel; rendering
                 // order matches the panel layout (workspace, then sessions).
                 self.diagnostic = format!("{} session(s) — press Esc to close", sessions.len());
-                self.session_listings = sessions;
+                self.session_listings = sessions.clone();
+                self.sessions_dialog = Some(SessionsDialogState::new(sessions, self.active_session_id));
             }
             CommandOutput::Help(text) => {
                 if self.transcript.is_empty() {

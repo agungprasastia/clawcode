@@ -173,6 +173,14 @@ impl Db {
             .busy_timeout(std::time::Duration::from_millis(2_000))
             .expect("set busy timeout");
         schema::migrate(&connection)?;
+        // If workspace 1 exists with an empty root_path, seed it with current working directory
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd_str = cwd.to_string_lossy();
+            let _ = connection.execute(
+                "UPDATE workspaces SET root_path = ?1 WHERE id = 1 AND (root_path = '' OR root_path IS NULL)",
+                params![cwd_str],
+            );
+        }
         let db = Self { connection };
         db.recover_interrupted_generations()?;
         Ok(db)
@@ -404,6 +412,19 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    /// Update the root path for a workspace.
+    pub fn update_workspace_root_path(
+        &self,
+        id: i64,
+        root_path: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.connection.execute(
+            "UPDATE workspaces SET root_path = ?1 WHERE id = ?2",
+            params![root_path, id],
+        )?;
+        Ok(())
     }
 
     /// Create a session bound to `workspace_id`.

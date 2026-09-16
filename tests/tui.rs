@@ -1377,3 +1377,184 @@ fn typewriter_pacing_animates_in_chat_view_and_renders_cursor() {
     assert!(!app.is_typing());
     render_to_test_backend(&app, 80, 24).unwrap();
 }
+
+#[test]
+fn chat_scrolling_mouse_and_keyboard_controls() {
+    let mut app = App::default();
+    assert_eq!(app.chat_scroll(), 0);
+
+    // Populate transcript with multi-line text
+    let mut transcript_lines = String::new();
+    for i in 1..=50 {
+        transcript_lines.push_str(&format!("Line #{i}: This is transcript content\n"));
+    }
+    app.apply(UiEvent::StreamDelta(transcript_lines));
+
+    // 1. Mouse wheel / Shift+Up scroll up
+    app.apply(UiEvent::Input(Input::ScrollUp));
+    assert_eq!(app.chat_scroll(), 3);
+
+    // 2. PageUp scrolls 15 lines
+    app.apply(UiEvent::Input(Input::PageUp));
+    assert_eq!(app.chat_scroll(), 18);
+
+    // 3. Mouse wheel / Shift+Down scroll down
+    app.apply(UiEvent::Input(Input::ScrollDown));
+    assert_eq!(app.chat_scroll(), 15);
+
+    // 4. PageDown scrolls down 15 lines
+    app.apply(UiEvent::Input(Input::PageDown));
+    assert_eq!(app.chat_scroll(), 0);
+
+    // 5. Home key jumps to top
+    app.apply(UiEvent::Input(Input::Home));
+    assert_eq!(app.chat_scroll(), u16::MAX);
+
+    // 6. End key snaps back to bottom
+    app.apply(UiEvent::Input(Input::End));
+    assert_eq!(app.chat_scroll(), 0);
+
+    // 7. Render with scroll offset shows scroll indicator
+    app.apply(UiEvent::Input(Input::ScrollUp));
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut rendered_lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        rendered_lines.push(line);
+    }
+    let rendered = rendered_lines.join("\n");
+    assert!(rendered.contains("lines up (End to bottom)"));
+
+    // 8. Submitting a new prompt resets scroll to 0
+    app.apply(UiEvent::Input(Input::Character('h')));
+    app.apply(UiEvent::Input(Input::Character('i')));
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.chat_scroll(), 0);
+}
+
+#[test]
+fn sessions_dialog_opens_navigates_filters_and_switches_session() {
+    let mut app = App::default();
+    app.apply_command_output(clawcode::cli::CommandOutput::Sessions(vec![
+        clawcode::persistence::Session {
+            id: 1,
+            title: "planning session".into(),
+            workspace_id: 1,
+            status: clawcode::persistence::SessionStatus::Idle,
+            pinned: false,
+        },
+        clawcode::persistence::Session {
+            id: 2,
+            title: "spike optimization".into(),
+            workspace_id: 1,
+            status: clawcode::persistence::SessionStatus::Running,
+            pinned: true,
+        },
+        clawcode::persistence::Session {
+            id: 3,
+            title: "other project".into(),
+            workspace_id: 2,
+            status: clawcode::persistence::SessionStatus::Idle,
+            pinned: false,
+        },
+    ]));
+
+    assert!(app.sessions_dialog().is_some());
+    assert_eq!(app.sessions_dialog().unwrap().selected, 0);
+
+    // Navigate down
+    app.apply(UiEvent::Input(Input::Down));
+    assert_eq!(app.sessions_dialog().unwrap().selected, 1);
+    let selected = app.sessions_dialog().unwrap().selected_session().unwrap();
+    assert_eq!(selected.id, 2);
+
+    // Typing a filter string
+    for ch in "spike".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    assert_eq!(app.sessions_dialog().unwrap().filter, "spike");
+    let filtered = app.sessions_dialog().unwrap().filtered_items();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].id, 2);
+
+    // Submit selection -> switches session and closes dialog
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.sessions_dialog().is_none());
+    assert_eq!(app.active_session_id(), Some(2));
+    assert!(app.diagnostic().contains("switched to session #2"));
+
+    // Esc closes dialog without switching
+    app.apply_command_output(clawcode::cli::CommandOutput::Sessions(vec![
+        clawcode::persistence::Session {
+            id: 1,
+            title: "planning session".into(),
+            workspace_id: 1,
+            status: clawcode::persistence::SessionStatus::Idle,
+            pinned: false,
+        },
+    ]));
+    assert!(app.sessions_dialog().is_some());
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.sessions_dialog().is_none());
+    assert_eq!(app.active_session_id(), Some(2)); // Still session 2
+}
+
+#[test]
+fn sessions_switching_hydrates_messages_from_database() {
+    let db = clawcode::persistence::Db::open_in_memory().unwrap();
+    let s1 = db.create_session("First Session").unwrap();
+    db.append_message(s1.id, "user", "What is Rust?").unwrap();
+    db.append_message(s1.id, "assistant", "Rust is a fast systems language.").unwrap();
+
+    let s2 = db.create_session("Second Session").unwrap();
+    db.append_message(s2.id, "user", "Explain SQLite").unwrap();
+    db.append_message(s2.id, "assistant", "SQLite is an embedded database engine.").unwrap();
+
+    let mut app = App::default();
+    let service = clawcode::cli::CommandService::with_db(clawcode::cli::CliDiscovery::new(), db);
+    app.set_command_service(service);
+
+    // Switch to session 1 -> hydrates messages from SQLite
+    app.switch_session(s1.id);
+    assert_eq!(app.active_session_id(), Some(s1.id));
+    assert!(app.transcript().contains("> What is Rust?"));
+    assert!(app.transcript().contains("Rust is a fast systems language."));
+
+    // Switch to session 2 -> hydrates session 2 messages
+    app.switch_session(s2.id);
+    assert_eq!(app.active_session_id(), Some(s2.id));
+    assert!(app.transcript().contains("> Explain SQLite"));
+    assert!(app.transcript().contains("SQLite is an embedded database engine."));
+    assert!(!app.transcript().contains("What is Rust?"));
+
+    // Switch back to session 1 -> previous state intact
+    app.switch_session(s1.id);
+    assert_eq!(app.active_session_id(), Some(s1.id));
+    assert!(app.transcript().contains("> What is Rust?"));
+    assert!(app.transcript().contains("Rust is a fast systems language."));
+}
+
+#[test]
+fn which_key_r_opens_sessions_dialog() {
+    let db = clawcode::persistence::Db::open_in_memory().unwrap();
+    let _s = db.create_session("Mock session").unwrap();
+
+    let mut app = App::default();
+    let service = clawcode::cli::CommandService::with_db(clawcode::cli::CliDiscovery::new(), db);
+    app.set_command_service(service);
+
+    // Open WhichKey
+    app.apply(UiEvent::Input(Input::WhichKey));
+    assert!(app.which_key().visible);
+
+    // 'r' opens sessions dialog
+    app.apply(UiEvent::Input(Input::Character('r')));
+    assert!(!app.which_key().visible);
+    assert!(app.sessions_dialog().is_some());
+}

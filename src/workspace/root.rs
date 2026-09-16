@@ -6,9 +6,23 @@ pub struct WorkspaceRoot {
     canonical_path: PathBuf,
 }
 
+fn strip_unc_prefix(path: &Path) -> &Path {
+    if let Some(s) = path.to_str() {
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return Path::new(stripped);
+        }
+    }
+    path
+}
+
 impl WorkspaceRoot {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Diagnostic> {
         let path = path.as_ref();
+        let path = if path.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            path
+        };
         let canonical_path = fs::canonicalize(path).map_err(|error| {
             Diagnostic::new(
                 ErrorCategory::Workspace,
@@ -33,7 +47,13 @@ impl WorkspaceRoot {
 
     pub fn resolve(&self, relative: impl AsRef<Path>) -> Result<PathBuf, Diagnostic> {
         let relative = relative.as_ref();
+        let stripped_canonical = strip_unc_prefix(&self.canonical_path);
+        let stripped_rel = strip_unc_prefix(relative);
         let relative = if let Ok(stripped) = relative.strip_prefix(&self.canonical_path) {
+            stripped
+        } else if let Ok(stripped) = stripped_rel.strip_prefix(stripped_canonical) {
+            stripped
+        } else if let Ok(stripped) = relative.strip_prefix(stripped_canonical) {
             stripped
         } else {
             relative
@@ -83,7 +103,9 @@ impl WorkspaceRoot {
             )
         })?;
 
-        if !resolved_path.starts_with(&self.canonical_path) {
+        if !resolved_path.starts_with(&self.canonical_path)
+            && !strip_unc_prefix(&resolved_path).starts_with(stripped_canonical)
+        {
             return Err(Diagnostic::new(
                 ErrorCategory::Workspace,
                 format!("workspace path escapes root: {}", relative.display()),

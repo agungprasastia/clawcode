@@ -1103,3 +1103,10 @@ fn capture_rejects_states_larger_than_snapshot_limit() {
 
     assert_eq!(error.category(), ErrorCategory::Workspace);
 }
+
+#[test]
+fn root_open_empty_string_resolves_current_dir() {
+    // Opening empty string must not fail with OS error 3; it falls back to "."
+    let root = WorkspaceRoot::open("").expect("empty path should open current directory");
+    assert!(root.canonical_path().is_dir());
+}

@@ -1,4 +1,4 @@
-use crate::persistence::{Db, Session};
+use crate::persistence::{Db, Message, Session};
 use crate::provider::{DiscoveryService, DiscoverySource, ModelInfo, ProviderError, ProviderId};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
@@ -28,7 +28,7 @@ pub enum ConversationMode {
 
 pub fn parse_command(input: &str) -> Result<Command, String> {
     match input.trim() {
-        "/sessions" => Ok(Command::Sessions),
+        "/sessions" | "/session" | "/resume" => Ok(Command::Sessions),
         "/exit" => Ok(Command::Exit),
         "/plan" => Ok(Command::Mode(ConversationMode::Plan)),
         "/build" => Ok(Command::Mode(ConversationMode::Build)),
@@ -321,6 +321,36 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
             .and_then(|db| {
                 db.append_message(session_id, role, content)
                     .map(|_| ())
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn session_messages(&self, session_id: i64) -> Result<Vec<Message>, ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.messages(session_id)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn list_sessions(&self) -> Result<Vec<Session>, ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.list_sessions()
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn delete_session(&self, session_id: i64) -> Result<(), ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.delete_session(session_id)
                     .map_err(|error| ProviderError::Protocol(error.to_string()))
             })
     }

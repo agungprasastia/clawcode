@@ -1,4 +1,6 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 
 use super::{Input, UiEvent};
 
@@ -8,6 +10,11 @@ pub fn translate(event: Event) -> Option<UiEvent> {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             translate_key(key).map(UiEvent::Input)
         }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => Some(UiEvent::Input(Input::ScrollUp)),
+            MouseEventKind::ScrollDown => Some(UiEvent::Input(Input::ScrollDown)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -19,6 +26,28 @@ fn translate_key(key: KeyEvent) -> Option<Input> {
             if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
         {
             Some(Input::ToggleMode)
+        }
+        KeyCode::PageUp => Some(Input::PageUp),
+        KeyCode::PageDown => Some(Input::PageDown),
+        KeyCode::Home if key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Input::Home)
+        }
+        KeyCode::End if key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Input::End)
+        }
+        KeyCode::Up
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            Some(Input::ScrollUp)
+        }
+        KeyCode::Down
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            Some(Input::ScrollDown)
         }
         KeyCode::Up if key.modifiers.is_empty() => Some(Input::Up),
         KeyCode::Down if key.modifiers.is_empty() => Some(Input::Down),
@@ -79,5 +108,26 @@ mod tests {
 
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(translate_key(down), Some(Input::Down));
+    }
+
+    #[test]
+    fn page_keys_and_scroll_translate_properly() {
+        let page_up = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(translate_key(page_up), Some(Input::PageUp));
+
+        let page_down = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(translate_key(page_down), Some(Input::PageDown));
+
+        let shift_up = KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT);
+        assert_eq!(translate_key(shift_up), Some(Input::ScrollUp));
+
+        let ctrl_down = KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL);
+        assert_eq!(translate_key(ctrl_down), Some(Input::ScrollDown));
+
+        let home = KeyEvent::new(KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(translate_key(home), Some(Input::Home));
+
+        let end = KeyEvent::new(KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(translate_key(end), Some(Input::End));
     }
 }

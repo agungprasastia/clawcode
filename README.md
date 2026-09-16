@@ -16,14 +16,45 @@ cargo run
 
 Startup tidak membutuhkan network discovery. Provider discovery berjalan setelah aplikasi hidup dan memakai cache/backoff.
 
+## Providers
+
+- **OpenAI & OpenAI-compatible**: endpoint `/chat/completions` (OpenAI, OpenRouter, DeepSeek, vLLM, dll.).
+- **Anthropic**: native adapter endpoint `/v1/messages`.
+- **Ollama**: native adapter endpoint `/api/chat`.
+
+Autentikasi via environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) atau secret references di konfigurasi.
+
 ## Commands
 
-- `/new <title>` — buat session.
-- `/sessions` — daftar session.
-- `/connect` — connect provider.
+- `/plan` — beralih ke mode PLAN (read-only).
+- `/build` — beralih ke mode BUILD (transactional execution).
+- `/connect [provider]` — hubungkan provider (default atau provider spesifik).
+- `/model <id>` — pilih model aktif (atau lihat model jika tanpa id).
 - `/models` — daftar model tersedia.
-- `/models refresh` — refresh model discovery.
-- `/exit` — keluar.
+- `/models refresh` — refresh model discovery dari provider.
+- `/new <title>` — buat session baru.
+- `/sessions` — daftar session tersimpan.
+- `/help` — daftar perintah.
+- `/exit` — keluar aplikasi.
+
+## Keybindings (TUI)
+
+- `Tab` / `Shift+Tab` — toggle mode PLAN / BUILD.
+- `Ctrl+C` — batalkan streaming / turn generasi aktif.
+- `Ctrl+L` — bersihkan transcript layar.
+- `Ctrl+X` — toggle cheatsheet shortcuts (`WhichKey`).
+- `Esc` / `q` — tutup dialog aktif atau keluar saat input kosong.
+- `PageUp` / `PageDown` — scroll transcript.
+- `Shift+Up` / `Shift+Down` (atau `Ctrl`/`Alt` + panah) — scroll transcript per baris.
+- `Up` / `Down` — navigasi riwayat input atau dialog.
+
+Saat menu shortcut (`Ctrl+X`) aktif:
+- `a` — buka dialog Agents.
+- `t` — buka dialog Themes.
+- `m` — buka dialog Models.
+- `s` — buka dialog Status sistem.
+- `p` / `b` — switch mode ke Plan / Build.
+- `c` — clear transcript.
 
 ## Modes
 
@@ -47,6 +78,8 @@ Lihat `docs/diagnostics.md` dan `docs/migrations.md`.
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-targets --all-features --locked
+cargo bench --bench performance
+cargo bench --bench first_frame
 ```
 
 ## Release packaging

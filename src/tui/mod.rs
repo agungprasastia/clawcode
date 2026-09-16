@@ -15,7 +15,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 pub use app::{
     AgentItem, AgentsDialogState, App, ConversationMode, ConversationStatus, HomeState, Input,
-    ThemesDialogState, UiEvent, UiEventQueue, WhichKeyState,
+    SessionsDialogState, ThemesDialogState, UiEvent, UiEventQueue, WhichKeyState,
 };
 pub use render::render;
 pub use theme::{Theme, ThemeKind};
@@ -66,6 +66,10 @@ pub fn attach_production_runtime(app: &mut App) {
         (Ok(r), Ok(w), Ok(c)) => (r, w, c),
         _ => return,
     };
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let _ = db_runtime.update_workspace_root_path(1, &cwd.to_string_lossy());
+    }
 
     if let Ok(service) = crate::cli::runtime_service_with_config_and_db(&config, db_cli) {
         app.set_command_service(service);
@@ -140,7 +144,7 @@ impl TerminalSession {
     fn start() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, event::EnableMouseCapture) {
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -148,7 +152,11 @@ impl TerminalSession {
         match Terminal::new(CrosstermBackend::new(stdout)) {
             Ok(terminal) => Ok(Self { terminal }),
             Err(error) => {
-                let _ = execute!(io::stdout(), LeaveAlternateScreen);
+                let _ = execute!(
+                    io::stdout(),
+                    LeaveAlternateScreen,
+                    event::DisableMouseCapture
+                );
                 let _ = disable_raw_mode();
                 Err(error)
             }
@@ -158,8 +166,12 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            event::DisableMouseCapture
+        );
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
     }
 }

@@ -359,11 +359,20 @@ fn run_generation(
     let workspace_dir = ctx
         .db
         .with(|db| {
-            db.session(ctx.session_id)
-                .ok()
-                .flatten()
-                .and_then(|s| db.workspace(s.workspace_id).ok().flatten())
-                .map(|w| std::path::PathBuf::from(w.root_path))
+            let session = db.session(ctx.session_id).ok().flatten();
+            let ws = session.and_then(|s| db.workspace(s.workspace_id).ok().flatten());
+            if let Some(ws) = ws {
+                if !ws.root_path.trim().is_empty() && std::path::Path::new(&ws.root_path).is_dir() {
+                    Some(std::path::PathBuf::from(ws.root_path))
+                } else if let Ok(cwd) = std::env::current_dir() {
+                    let _ = db.update_workspace_root_path(ws.id, &cwd.to_string_lossy());
+                    Some(cwd)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         })
         .unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -576,14 +585,20 @@ fn run_generation(
                 }),
             );
 
-            let result = match crate::workspace::Workspace::with_filesystem(&workspace_dir, crate::workspace::RealFileSystem) {
+            let effective_ws_dir = if workspace_dir.as_os_str().is_empty() || !workspace_dir.exists() {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            } else {
+                workspace_dir.clone()
+            };
+
+            let result = match crate::workspace::Workspace::with_filesystem(&effective_ws_dir, crate::workspace::RealFileSystem) {
                 Ok(ws) => crate::conversation::tools::execute_tool(
                     &ws,
                     mode,
                     &tool_name,
                     &args_str,
                 ),
-                Err(e) => Err(format!("Failed to open workspace {}: {e}", workspace_dir.display())),
+                Err(e) => Err(format!("Failed to open workspace {}: {e}", effective_ws_dir.display())),
             };
 
             let (success, output) = match result {
