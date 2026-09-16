@@ -2,7 +2,7 @@ use clawcode::{
     cli::CommandOutput,
     conversation::ConversationEvent,
     provider::{FinishReason, ProviderId, TurnMetrics},
-    tui::{App, ConversationMode, ConversationStatus},
+    tui::{App, ConversationMode, ConversationStatus, Input, UiEvent},
 };
 
 #[test]
@@ -222,4 +222,55 @@ fn conversation_text_remains_bounded_and_utf8_safe() {
     }
     assert!(app.transcript().len() <= App::MAX_TRANSCRIPT_BYTES);
     assert!(app.transcript().is_char_boundary(app.transcript().len()));
+}
+
+#[test]
+fn switching_sessions_preserves_per_session_view_state() {
+    let mut app = App::default();
+    app.submit_user_prompt("seed a");
+    let session_a = app.active_session_id().expect("session a created");
+
+    // Transcript + live status in session A.
+    app.apply_conversation(ConversationEvent::PromptSubmitted {
+        prompt: "hello".into(),
+        provider: "p".into(),
+        model: "m".into(),
+    });
+    app.apply_conversation(ConversationEvent::TextDelta("answer a".into()));
+    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+
+    // Session B through the real command path; the view is still A's.
+    for character in "/new b".chars() {
+        app.apply(UiEvent::Input(Input::Character(character)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    let session_b = app.active_session_id().expect("session b created");
+    assert_ne!(session_a, session_b);
+
+    // Move to B: it starts with its own empty view.
+    app.switch_session(session_b);
+    app.apply_batch([UiEvent::Input(Input::Character('b'))]);
+    assert_eq!(app.prompt(), "b");
+    assert_eq!(app.transcript(), "");
+
+    // Back to A: transcript and status restored.
+    app.switch_session(session_a);
+    assert_eq!(app.active_session_id(), Some(session_a));
+    assert!(app.transcript().contains("answer a"));
+    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+
+    // A draft typed here stays A's.
+    app.apply_batch([
+        UiEvent::Input(Input::Character('a')),
+        UiEvent::Input(Input::Character('2')),
+    ]);
+
+    // Forward to B: B's draft survived, transcript still empty.
+    app.switch_session(session_b);
+    assert_eq!(app.prompt(), "b");
+    assert_eq!(app.transcript(), "");
+
+    // Switching to the live session is a no-op.
+    app.switch_session(session_b);
+    assert_eq!(app.prompt(), "b");
 }

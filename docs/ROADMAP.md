@@ -62,6 +62,12 @@ Dokumentasi, config examples, migration notes, release binaries, reproducible bu
 
 **Gate:** acceptance criteria PRD 100% terpetakan dan tidak ada blocker severity tinggi.
 
+## M10 — Multiworkspace Foundation & Runtime Event System
+
+Implementasi isolated per-session client view state (`ClientSessionState`), panel `/sessions` dengan pengelompokan workspace dan penanda pinned `📌`, in-process synchronous runtime client (`RuntimeClient`), append-only generation event log (`generation_events`), non-blocking event fan-out (`EventBus`), wiring prompt submission ke generation thread dengan background draining (`poll_runtime`), schema v1→v2 migration, recovery status interrupted, dan isolasi view antar workspace.
+
+**Gate:** `tests/multiworkspace.rs` dan `tests/runtime_wiring.rs` lulus (8 gap + wiring e2e); `cargo fmt` dan `cargo clippy --all-targets -- -D warnings` bersih tanpa error.
+
 ## Ditunda setelah MVP
 
 ACP, MCP, daemon, plugin ecosystem, remote client, desktop app, OAuth provider khusus, dan feature parity platform-specific lanjutan.

@@ -44,6 +44,7 @@ pub fn process_pending<E>(
     events: &mut UiEventQueue,
     draw: impl FnOnce(&App) -> Result<(), E>,
 ) -> Result<(), E> {
+    app.poll_runtime();
     if app.apply_pending(events) && app.is_running() {
         draw(app)?;
     }

@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 
 /// Current persistence schema version.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Apply all migrations up to [`SCHEMA_VERSION`]. Idempotent.
 pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
@@ -31,6 +31,53 @@ pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
              );
              CREATE INDEX idx_messages_session ON messages(session_id, id);
              PRAGMA user_version = 1;
+             COMMIT;",
+        )?;
+    }
+    if current < 2 {
+        connection.execute_batch(
+            "BEGIN;
+             CREATE TABLE workspaces (
+                 id INTEGER PRIMARY KEY,
+                 root_path TEXT NOT NULL UNIQUE,
+                 display_name TEXT NOT NULL,
+                 sort_order INTEGER NOT NULL DEFAULT 0,
+                 archived_at TEXT,
+                 last_opened_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+             );
+             CREATE TABLE generations (
+                 id INTEGER PRIMARY KEY,
+                 session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                 agent_mode TEXT NOT NULL,
+                 provider TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                 ended_at TEXT,
+                 cancel_requested_at TEXT,
+                 metrics TEXT
+             );
+             CREATE INDEX idx_generations_session ON generations(session_id, id);
+             CREATE TABLE generation_events (
+                 seq INTEGER NOT NULL,
+                 session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                 generation_id INTEGER REFERENCES generations(id) ON DELETE SET NULL,
+                 kind TEXT NOT NULL,
+                 payload_json TEXT NOT NULL,
+                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                 PRIMARY KEY (session_id, seq)
+             );
+             INSERT INTO workspaces (id, root_path, display_name)
+                 VALUES (1, '', 'default');
+             ALTER TABLE sessions ADD COLUMN workspace_id INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'idle';
+             ALTER TABLE sessions ADD COLUMN active_generation_id INTEGER;
+             ALTER TABLE sessions ADD COLUMN last_error TEXT;
+             ALTER TABLE sessions ADD COLUMN last_event_seq INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN pinned_at TEXT;
+             ALTER TABLE sessions ADD COLUMN archived_at TEXT;
+             CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
+             PRAGMA user_version = 2;
              COMMIT;",
         )?;
     }

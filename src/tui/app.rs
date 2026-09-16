@@ -5,6 +5,7 @@ use crate::conversation::ConversationEvent;
 use crate::notify::{BestEffortNotifier, Notification, NotificationKind, Notifier};
 use crate::provider::FinishReason;
 use crate::provider::TurnMetrics;
+use crate::runtime::{EventBus, RuntimeEvent, client::RuntimeClient};
 
 const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 const MAX_IDENTITY_BYTES: usize = 256;
@@ -15,8 +16,9 @@ pub enum ConversationMode {
     Build,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum ConversationStatus {
+    #[default]
     Idle,
     Active,
     Finished(FinishReason),
@@ -113,6 +115,29 @@ pub struct App {
     command_service: crate::cli::CommandService<cli::CliDiscovery>,
     selected_suggestion: usize,
     active_session_id: Option<i64>,
+    /// Per-session view state. The fields above are the live window onto the
+    /// active session; switching stashes them here and restores the target.
+    sessions: std::collections::HashMap<i64, ClientSessionState>,
+    /// Snapshot shown by the /sessions panel.
+    session_listings: Vec<crate::persistence::Session>,
+    /// Optional runtime client wiring prompt submissions to generation
+    /// threads. Inactive until a provider-backed runtime is attached.
+    runtime: Option<RuntimeClient>,
+    /// Live events from the runtime for the active session.
+    runtime_events: Option<std::sync::mpsc::Receiver<RuntimeEvent>>,
+}
+
+/// View state isolated per session: switching sessions must not reset the
+/// draft, transcript, or scroll position of either side.
+#[derive(Debug, Default, Clone)]
+pub struct ClientSessionState {
+    pub transcript: String,
+    pub input_draft: String,
+    pub scroll: u16,
+    pub loaded_until_seq: i64,
+    pub status: ConversationStatus,
+    pub active_generation_id: Option<i64>,
+    pub loading: bool,
 }
 
 impl Default for App {
@@ -137,6 +162,10 @@ impl App {
             command_service: cli::runtime_service().expect("in-memory runtime database"),
             selected_suggestion: 0,
             active_session_id: None,
+            sessions: std::collections::HashMap::new(),
+            session_listings: Vec::new(),
+            runtime: None,
+            runtime_events: None,
         }
     }
 
@@ -145,7 +174,13 @@ impl App {
 
     pub fn apply(&mut self, event: UiEvent) {
         match event {
-            UiEvent::Input(Input::Quit) => self.running = false,
+            UiEvent::Input(Input::Quit) => {
+                if self.session_listings.is_empty() {
+                    self.running = false;
+                } else {
+                    self.session_listings.clear();
+                }
+            }
             UiEvent::Input(Input::Cancel) => self.cancellation_pending = true,
             UiEvent::Input(Input::Character(character)) => {
                 self.prompt.push(character);
@@ -428,11 +463,12 @@ impl App {
                 }),
                 Ok(CommandOutput::Exit) => self.running = false,
                 Ok(CommandOutput::SessionCreated(session)) => {
-                    self.active_session_id = Some(session.id);
+                    self.switch_session(session.id);
                     self.diagnostic = format!("session created: {}", session.title);
                 }
                 Ok(CommandOutput::Sessions(sessions)) => {
-                    self.diagnostic = format!("{} session(s)", sessions.len());
+                    self.diagnostic = format!("{} session(s) — press Esc to close", sessions.len());
+                    self.session_listings = sessions;
                 }
                 Ok(CommandOutput::Connected(provider)) => {
                     self.apply_command_output(CommandOutput::Connected(provider));
@@ -456,13 +492,20 @@ impl App {
     }
 
     pub fn submit_user_prompt(&mut self, prompt: &str) {
+        self.session_listings.clear();
         if self.active_session_id.is_none() {
-            if let Ok(session) = self.command_service.create_session(prompt) {
-                self.active_session_id = Some(session.id);
+            if let Some(runtime) = self.runtime.as_ref() {
+                if let Ok(id) = runtime.create_session(1, prompt) {
+                    self.switch_session(id);
+                }
+            } else if let Ok(session) = self.command_service.create_session(prompt) {
+                self.switch_session(session.id);
             }
         }
         if let Some(session_id) = self.active_session_id {
-            let _ = self.command_service.append_message(session_id, "user", prompt);
+            let _ = self
+                .command_service
+                .append_message(session_id, "user", prompt);
         }
 
         if self.transcript.is_empty() {
@@ -487,24 +530,153 @@ impl App {
 
         self.apply_conversation(ConversationEvent::PromptSubmitted {
             prompt: prompt.to_string(),
-            provider,
-            model,
+            provider: provider.clone(),
+            model: model.clone(),
         });
 
-        if !is_connected {
+        if let Some(runtime) = self.runtime.as_ref()
+            && let Some(session_id) = self.active_session_id
+        {
+            let agent_mode = match self.mode {
+                ConversationMode::Plan => "plan",
+                ConversationMode::Build => "build",
+            };
+            if let Err(error) =
+                runtime.start_generation(session_id, agent_mode, &provider, &model, prompt)
+            {
+                self.diagnostic = format!("generation failed to start: {error}");
+            }
+        } else if !is_connected {
             self.diagnostic = "provider not connected; use /connect".into();
         }
+    }
+
+    /// Drain pending runtime events into the live transcript view.
+    /// Unbounded growth is impossible: the bus prunes closed/full receivers,
+    /// and this drains to exhaustion each call.
+    pub fn poll_runtime(&mut self) {
+        let Some(receiver) = self.runtime_events.take() else {
+            return;
+        };
+        while let Ok(event) = receiver.try_recv() {
+            match event.kind.as_str() {
+                "text_delta" => {
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                        && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
+                    {
+                        self.transcript.push_str(delta);
+                        self.truncate_transcript();
+                    }
+                }
+                "generation_finished" => {
+                    if let Some(session_id) = self.active_session_id
+                        && event.session_id == session_id
+                        && let Ok(payload) =
+                            serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                        && let Some(status) = payload.get("status").and_then(|v| v.as_str())
+                    {
+                        self.status = match status {
+                            "cancelled" => ConversationStatus::Cancelled,
+                            "failed" => ConversationStatus::Error,
+                            _ => ConversationStatus::Finished(FinishReason::Stop),
+                        };
+                    }
+                }
+                "error" => {
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                        && let Some(message) = payload.get("message").and_then(|v| v.as_str())
+                    {
+                        self.diagnostic = bounded(message.to_string(), MAX_DIAGNOSTIC_BYTES);
+                        self.status = ConversationStatus::Error;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.runtime_events = Some(receiver);
     }
 
     pub fn active_session_id(&self) -> Option<i64> {
         self.active_session_id
     }
 
-    pub fn apply_command_output(&mut self, output: CommandOutput) {
-        if let CommandOutput::Connected(provider) = output {
-            self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
-            self.diagnostic = "provider connected".into();
+    /// Stash the live view fields into the active session's state.
+    fn stash_active(&mut self) {
+        let Some(session_id) = self.active_session_id else {
+            return;
+        };
+        let state = self.sessions.entry(session_id).or_default();
+        state.transcript = std::mem::take(&mut self.transcript);
+        state.input_draft = std::mem::take(&mut self.prompt);
+        state.status = self.status;
+    }
+
+    /// Restore the target session's state into the live view fields.
+    fn restore_into_view(&mut self, session_id: i64) {
+        let state = self.sessions.entry(session_id).or_default();
+        self.transcript = std::mem::take(&mut state.transcript);
+        self.prompt = std::mem::take(&mut state.input_draft);
+        self.status = state.status;
+        self.metrics = None;
+        self.diagnostic.clear();
+        self.selected_suggestion = 0;
+    }
+
+    /// Switch the live view to `session_id`, stashing the current one first.
+    /// View state is per session: drafts, transcripts, and status survive
+    /// the round trip.
+    pub fn switch_session(&mut self, session_id: i64) {
+        if self.active_session_id == Some(session_id) {
+            return;
         }
+        self.stash_active();
+        self.active_session_id = Some(session_id);
+        self.restore_into_view(session_id);
+    }
+
+    /// Per-session state for `session_id` (creating an empty entry on first
+    /// access), independent of which session is live.
+    pub fn session_state(&mut self, session_id: i64) -> &mut ClientSessionState {
+        self.sessions.entry(session_id).or_default()
+    }
+
+    pub fn apply_command_output(&mut self, output: CommandOutput) {
+        match output {
+            CommandOutput::Connected(provider) => {
+                self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
+                self.diagnostic = "provider connected".into();
+            }
+            CommandOutput::Sessions(sessions) => {
+                // Grouped per workspace for the /sessions panel; rendering
+                // order matches the panel layout (workspace, then sessions).
+                self.diagnostic = format!("{} session(s) — press Esc to close", sessions.len());
+                self.session_listings = sessions;
+            }
+            _ => {}
+        }
+    }
+
+    /// Snapshot of sessions for the /sessions panel, most recent first.
+    pub fn session_listings(&self) -> &[crate::persistence::Session] {
+        &self.session_listings
+    }
+
+    /// Attach a provider-backed runtime. Prompt submissions on the active
+    /// session are then queued as generations and progress arrives as
+    /// runtime events (drained by [`App::poll_runtime`]).
+    pub fn attach_runtime(
+        &mut self,
+        db: crate::persistence::Db,
+        writer: crate::persistence::WriterHandle,
+        provider: Box<dyn crate::provider::Provider + Send + Sync>,
+    ) {
+        let bus = EventBus::new();
+        let (_subscription_id, receiver) = bus.subscribe(None);
+        let client = RuntimeClient::spawn(db, writer, provider, bus);
+        self.runtime_events = Some(receiver);
+        self.runtime = Some(client);
     }
 
     pub fn transcript(&self) -> &str {

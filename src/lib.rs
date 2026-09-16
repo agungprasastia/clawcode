@@ -7,5 +7,6 @@ pub mod notify;
 pub mod persistence;
 pub mod platform;
 pub mod provider;
+pub mod runtime;
 pub mod tui;
 pub mod workspace;

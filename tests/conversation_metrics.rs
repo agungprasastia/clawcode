@@ -123,7 +123,7 @@ fn persists_one_assembled_assistant_message_only_after_terminal_success() {
     runtime
         .run_and_persist(&request(), &writer, session.id)
         .unwrap();
-    let db = writer.shutdown();
+    let db = writer.shutdown().expect("sole writer");
     let messages = db.messages(session.id).unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].role, "assistant");
@@ -146,7 +146,7 @@ fn does_not_persist_without_terminal_success() {
     runtime
         .run_and_persist(&request(), &writer, session.id)
         .unwrap();
-    let db = writer.shutdown();
+    let db = writer.shutdown().expect("sole writer");
     assert!(db.messages(session.id).unwrap().is_empty());
 }
 
@@ -173,7 +173,7 @@ fn does_not_persist_error_finish_or_cancellation() {
         runtime
             .run_and_persist(&request(), &writer, session.id)
             .unwrap();
-        let db = writer.shutdown();
+        let db = writer.shutdown().expect("sole writer");
         assert!(db.messages(session.id).unwrap().is_empty());
     }
 }
@@ -197,7 +197,7 @@ fn does_not_persist_when_error_precedes_finish() {
     runtime
         .run_and_persist(&request(), &writer, session.id)
         .unwrap();
-    let db = writer.shutdown();
+    let db = writer.shutdown().expect("sole writer");
     assert!(db.messages(session.id).unwrap().is_empty());
 }
 
@@ -220,7 +220,7 @@ fn does_not_persist_when_cancellation_precedes_finish() {
     runtime
         .run_and_persist(&request(), &writer, session.id)
         .unwrap();
-    let db = writer.shutdown();
+    let db = writer.shutdown().expect("sole writer");
     assert!(db.messages(session.id).unwrap().is_empty());
 }
 

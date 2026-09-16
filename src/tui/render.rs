@@ -6,6 +6,8 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
+use crate::persistence::SessionStatus;
+
 use super::App;
 
 const LOGO: [&str; 6] = [
@@ -74,8 +76,87 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     }
 
     render_status_bar(frame, status_bar_area, app, &theme);
+
+    if !app.session_listings().is_empty() {
+        render_sessions_panel(frame, area, app, &theme);
+    }
 }
 
+/// Overlay panel listing all sessions grouped by workspace. Pinned sessions
+/// first within each group; running sessions show a spinner glyph.
+fn render_sessions_panel(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    const SPINNER: [&str; 7] = ["·", "✻", "✽", "✶", "✳", "✢", "*"];
+
+    let sessions = app.session_listings();
+    let group_count = sessions
+        .iter()
+        .map(|session| session.workspace_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+
+    // Borders + one header line per workspace + one line per session.
+    let height = (2 + group_count + sessions.len()).min(area.height as usize);
+    let width = area.width.min(70);
+
+    let rows: Vec<Line> = sessions
+        .iter()
+        .scan(None::<i64>, |last_workspace, session| {
+            let new_group = *last_workspace != Some(session.workspace_id);
+            *last_workspace = Some(session.workspace_id);
+            Some((new_group, session))
+        })
+        .flat_map(|(new_group, session)| {
+            let glyph = if session.status == SessionStatus::Running {
+                SPINNER[(std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_millis() / 120)
+                    .unwrap_or(0) as usize)
+                    % SPINNER.len()]
+            } else {
+                " "
+            };
+            let mut lines = Vec::new();
+            if new_group {
+                lines.push(Line::from(Span::styled(
+                    format!("  ws#{}", session.workspace_id),
+                    Style::new().fg(theme.quiet),
+                )));
+            }
+            let title = if session.pinned { "📌 " } else { "  " };
+            lines.push(Line::from(vec![
+                Span::styled(title, Style::new().fg(theme.amber)),
+                Span::raw(&session.title),
+                if session.status == SessionStatus::Running {
+                    Span::styled(format!("  {glyph}"), Style::new().fg(theme.teal))
+                } else {
+                    Span::raw("")
+                },
+            ]));
+            lines
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.panel))
+        .title(Span::styled(
+            " Sessions ",
+            Style::new().fg(theme.ink).bold(),
+        ));
+
+    let paragraph = Paragraph::new(rows)
+        .block(block)
+        .style(Style::new().bg(theme.bg_element));
+    let panel_area = Rect::new(
+        area.width.saturating_sub(width) / 2,
+        1,
+        width,
+        height.min(area.height.saturating_sub(2) as usize) as u16,
+    );
+    frame.render_widget(Clear, panel_area);
+    frame.render_widget(paragraph, panel_area);
+}
 fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode_color: Color) {
     if area.height < 14 || area.width < 50 {
         render_compact_home(frame, area, app, theme, mode_color);
@@ -434,7 +515,9 @@ fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
             vec![
                 Span::styled(
                     "Tab",
-                    Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.amber)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" complete   ", Style::default().fg(theme.dim)),
                 Span::styled("↑/↓", Style::default().fg(theme.ink)),
@@ -552,13 +635,14 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
                     ),
                     Span::styled(
                         prompt.to_string(),
-                        Style::default()
-                            .fg(theme.ink)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
                     ),
                 ])
             } else {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(theme.ink)))
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme.ink),
+                ))
             }
         })
         .collect();
@@ -649,7 +733,7 @@ fn repo_context() -> RepoContext {
             let home_str = home.to_string_lossy();
             if cwd.starts_with(&*home_str) {
                 let relative = &cwd[home_str.len()..];
-                let relative = relative.trim_start_matches(|c| c == '/' || c == '\\');
+                let relative = relative.trim_start_matches(['/', '\\']);
                 format!("~/{relative}")
             } else {
                 cwd
@@ -741,21 +825,22 @@ fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App, them
                 Line::from(vec![
                     Span::styled(
                         " › ",
-                        Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.amber)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         format!("{:<16}", item.name),
-                        Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.amber)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(item.description, Style::default().fg(theme.ink)),
                 ])
             } else {
                 Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(
-                        format!("{:<16}", item.name),
-                        Style::default().fg(theme.ink),
-                    ),
+                    Span::styled(format!("{:<16}", item.name), Style::default().fg(theme.ink)),
                     Span::styled(item.description, Style::default().fg(theme.dim)),
                 ])
             }
@@ -769,7 +854,9 @@ fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App, them
         .style(Style::default().bg(theme.bg_element))
         .title(Span::styled(
             " Commands (↑/↓ navigate, Tab complete) ",
-            Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
         ));
 
     frame.render_widget(Paragraph::new(items).block(block), popup_area);

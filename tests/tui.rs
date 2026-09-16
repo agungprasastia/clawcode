@@ -292,7 +292,10 @@ fn slash_command_suggestions_filter_cycle_and_autocomplete() {
     runtime_step(
         &mut app,
         &mut events,
-        Some(Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))),
+        Some(Event::Key(KeyEvent::new(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        ))),
         |_| Ok::<_, std::convert::Infallible>(()),
     )
     .unwrap();
@@ -323,7 +326,10 @@ fn slash_command_suggestions_filter_cycle_and_autocomplete() {
     runtime_step(
         &mut app,
         &mut events,
-        Some(Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))),
+        Some(Event::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::NONE,
+        ))),
         |_| Ok::<_, std::convert::Infallible>(()),
     )
     .unwrap();
@@ -343,7 +349,10 @@ fn slash_command_suggestions_filter_cycle_and_autocomplete() {
     runtime_step(
         &mut app,
         &mut events,
-        Some(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+        Some(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))),
         |_| Ok::<_, std::convert::Infallible>(()),
     )
     .unwrap();
@@ -358,7 +367,10 @@ fn renders_with_command_popup_active_without_panic() {
     runtime_step(
         &mut app,
         &mut events,
-        Some(Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))),
+        Some(Event::Key(KeyEvent::new(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        ))),
         |_| Ok::<_, std::convert::Infallible>(()),
     )
     .unwrap();
@@ -376,7 +388,10 @@ fn submitting_non_slash_prompt_adds_to_transcript_and_sets_active_status() {
         runtime_step(
             &mut app,
             &mut events,
-            Some(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))),
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            ))),
             |_| Ok::<_, std::convert::Infallible>(()),
         )
         .unwrap();
@@ -387,7 +402,10 @@ fn submitting_non_slash_prompt_adds_to_transcript_and_sets_active_status() {
     runtime_step(
         &mut app,
         &mut events,
-        Some(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+        Some(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))),
         |_| Ok::<_, std::convert::Infallible>(()),
     )
     .unwrap();
@@ -397,7 +415,10 @@ fn submitting_non_slash_prompt_adds_to_transcript_and_sets_active_status() {
     // Transcript should contain the formatted prompt turn
     assert!(app.transcript().contains("> explain this code"));
     // Status should be Active
-    assert_eq!(app.conversation_status(), clawcode::tui::ConversationStatus::Active);
+    assert_eq!(
+        app.conversation_status(),
+        clawcode::tui::ConversationStatus::Active
+    );
     // Session should be created automatically
     assert!(app.active_session_id().is_some());
     // View switches to chat rendering seamlessly
@@ -415,7 +436,10 @@ fn multiple_user_prompts_and_stream_deltas_accumulate() {
         runtime_step(
             &mut app,
             &mut events,
-            Some(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))),
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            ))),
             |_| Ok::<_, std::convert::Infallible>(()),
         )
         .unwrap();
@@ -423,7 +447,10 @@ fn multiple_user_prompts_and_stream_deltas_accumulate() {
     runtime_step(
         &mut app,
         &mut events,
-        Some(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+        Some(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))),
         |_| Ok::<_, std::convert::Infallible>(()),
     )
     .unwrap();
@@ -437,7 +464,10 @@ fn multiple_user_prompts_and_stream_deltas_accumulate() {
         runtime_step(
             &mut app,
             &mut events,
-            Some(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))),
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            ))),
             |_| Ok::<_, std::convert::Infallible>(()),
         )
         .unwrap();
@@ -445,7 +475,10 @@ fn multiple_user_prompts_and_stream_deltas_accumulate() {
     runtime_step(
         &mut app,
         &mut events,
-        Some(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+        Some(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))),
         |_| Ok::<_, std::convert::Infallible>(()),
     )
     .unwrap();
@@ -453,4 +486,92 @@ fn multiple_user_prompts_and_stream_deltas_accumulate() {
     assert!(app.transcript().contains("> first prompt"));
     assert!(app.transcript().contains("First answer."));
     assert!(app.transcript().contains("> second prompt"));
+}
+
+#[test]
+fn sessions_panel_renders_grouped_and_esc_clears() {
+    let mut app = App::default();
+    let sessions = vec![
+        clawcode::persistence::Session {
+            id: 1,
+            title: "planning".into(),
+            workspace_id: 1,
+            status: clawcode::persistence::SessionStatus::Running,
+            pinned: true,
+        },
+        clawcode::persistence::Session {
+            id: 2,
+            title: "spike".into(),
+            workspace_id: 1,
+            status: clawcode::persistence::SessionStatus::Idle,
+            pinned: false,
+        },
+        clawcode::persistence::Session {
+            id: 3,
+            title: "other repo".into(),
+            workspace_id: 2,
+            status: clawcode::persistence::SessionStatus::Idle,
+            pinned: false,
+        },
+    ];
+    app.apply_command_output(clawcode::cli::CommandOutput::Sessions(sessions));
+
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut rendered_lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        rendered_lines.push(line);
+    }
+    let text = rendered_lines.join("\n");
+    assert!(text.contains("Sessions"));
+    assert!(text.contains("planning"));
+    assert!(text.contains("spike"));
+    assert!(text.contains("other repo"));
+    assert!(text.contains("ws#1"));
+    assert!(text.contains("ws#2"));
+
+    // Esc closes the panel instead of quitting the app.
+    app.apply(UiEvent::Input(Input::Quit));
+    assert!(app.is_running());
+    assert!(app.session_listings().is_empty());
+
+    // Rendering returns to the normal home view.
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut after_lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        after_lines.push(line);
+    }
+    let after = after_lines.join("\n");
+    assert!(after.contains("CLAWCODE"));
+    assert!(!after.contains("other repo"));
+}
+
+#[test]
+fn submitting_prompt_clears_sessions_panel() {
+    let mut app = App::default();
+    app.apply_command_output(clawcode::cli::CommandOutput::Sessions(vec![
+        clawcode::persistence::Session {
+            id: 1,
+            title: "planning".into(),
+            workspace_id: 1,
+            status: clawcode::persistence::SessionStatus::Running,
+            pinned: false,
+        },
+    ]));
+
+    app.apply(UiEvent::Input(Input::Character('h')));
+    app.apply(UiEvent::Input(Input::Submit));
+
+    assert!(app.session_listings().is_empty());
 }

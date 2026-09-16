@@ -55,7 +55,7 @@ fn batched_writer_persists_all_and_returns_db() {
             .expect("append should succeed");
     }
     writer.flush();
-    let db = writer.shutdown();
+    let db = writer.shutdown().expect("sole writer");
     assert_eq!(db.messages(session_id).unwrap().len(), 200);
     let _ = std::fs::remove_file(&path);
 }
@@ -82,9 +82,9 @@ fn concurrent_appends_commit_in_batches() {
     for handle in handles {
         handle.join().unwrap();
     }
-    let db = std::sync::Arc::into_inner(writer)
-        .expect("sole owner")
-        .shutdown();
+    let db = std::sync::Arc::unwrap_or_clone(writer)
+        .shutdown()
+        .expect("sole writer");
     assert_eq!(db.messages(session_id).unwrap().len(), 100);
 }
 
@@ -105,7 +105,7 @@ fn try_append_rejects_oversized_without_blocking() {
         .try_append(session.id, "user", "ok")
         .expect("append should succeed");
     writer.flush();
-    let db = writer.shutdown();
+    let db = writer.shutdown().expect("sole writer");
     assert_eq!(db.messages(session.id).unwrap().len(), 1);
 }
 
@@ -117,7 +117,7 @@ fn append_then_shutdown_does_not_hang() {
     writer
         .append(session.id, "user", "last words")
         .expect("append should succeed");
-    let db = writer.shutdown();
+    let db = writer.shutdown().expect("sole writer");
     assert_eq!(db.messages(session.id).unwrap().len(), 1);
 }
 

@@ -58,6 +58,15 @@ Prioritas: P0 wajib MVP, P1 penting sebelum release candidate, P2 sesudah MVP.
 - [x] `P1-M9-02` Tulis README, config examples, diagnostics, migration docs. (README, valid JSONC examples, diagnostics reference, dan migration notes lulus strict validation serta `cargo run -- --version`.)
 - [x] `P1-M9-03` Run full PRD acceptance checklist. (Checklist di `docs/prd-acceptance.md`; local Windows evidence dan GitHub Actions matrix Windows/Linux/macOS lulus pada run `34678182340`.)
 
+## P1 — Multiworkspace foundation dan runtime event system
+
+- [x] `P1-M10-01` Implement per-session isolated view state `ClientSessionState` (transcript, input draft, scroll, seq boundary, status); switching session preserves view state.
+- [x] `P1-M10-02` Render overlay panel `/sessions` dikelompokkan berdasarkan workspace ID (`ws#<id>`), penanda pinned `📌`, dan animasi status running.
+- [x] `P1-M10-03` Wire `submit_user_prompt` ke `RuntimeClient::start_generation` dengan fallback `command_service` dan background draining `poll_runtime`.
+- [x] `P1-M10-04` Implement schema v1→v2 migration dengan default workspace dan backward compatibility data session/messages.
+- [x] `P1-M10-05` Implement startup recovery untuk interupsi generasi (`recover_interrupted_generations`) dari `running` ke `idle` dan `interrupted`.
+- [x] `P1-M10-06` Test suite komprehensif `tests/multiworkspace.rs` dan `tests/runtime_wiring.rs` mencakup 8 area validasi (migration, recovery, lifecycle matrix, monotonic seq, pinned ordering, EventBus bounded drop/prune, WriterHandle batched append_event, workspace isolation).
+
 ## P2 — Sesudah MVP
 
 - [ ] ACP editor integration.

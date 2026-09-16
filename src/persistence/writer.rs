@@ -2,7 +2,7 @@
 //! only sends appends through a bounded channel and never blocks on SQLite.
 
 use crate::persistence::db::{Db, MAX_MESSAGE_BYTES};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 /// Capacity of the append channel. Senders get an error beyond this, so a
@@ -12,6 +12,15 @@ pub const WRITER_CHANNEL_CAPACITY: usize = 1_024;
 /// Pending append queued for a batched commit.
 type PendingAppend = (i64, String, String, mpsc::Sender<Result<(), String>>);
 
+/// Pending event append queued for a batched commit.
+type PendingEvent = (
+    i64,
+    Option<i64>,
+    String,
+    String,
+    mpsc::Sender<Result<i64, String>>,
+);
+
 enum Command {
     Append {
         session_id: i64,
@@ -19,14 +28,22 @@ enum Command {
         content: String,
         reply: mpsc::Sender<Result<(), String>>,
     },
+    AppendEvent {
+        session_id: i64,
+        generation_id: Option<i64>,
+        kind: String,
+        payload_json: String,
+        reply: mpsc::Sender<Result<i64, String>>,
+    },
     Flush(mpsc::Sender<()>),
-    Shutdown,
 }
 
-/// Handle for sending batched writes from the UI thread.
+/// Handle for sending batched writes from any thread. Clonable; all clones
+/// feed the same worker. The last `shutdown` takes back the `Db`.
+#[derive(Clone)]
 pub struct WriterHandle {
-    sender: mpsc::SyncSender<Command>,
-    worker: Option<thread::JoinHandle<Db>>,
+    inner: Arc<Mutex<Option<mpsc::SyncSender<Command>>>>,
+    worker: Arc<Mutex<Option<thread::JoinHandle<Db>>>>,
 }
 
 impl WriterHandle {
@@ -34,47 +51,81 @@ impl WriterHandle {
     pub fn spawn(db: Db) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<Command>(WRITER_CHANNEL_CAPACITY);
         let worker = thread::spawn(move || {
+            // ...existing worker loop, returns db at the end...
             let mut pending: Vec<PendingAppend> = Vec::new();
-            let mut shutdown = false;
-            while !shutdown {
-                // Block until first command, then drain what is ready.
-                let Ok(command) = receiver.recv() else {
-                    break;
-                };
-                let mut command = Some(command);
-                loop {
-                    let Some(current) = command.take() else {
-                        break;
-                    };
-                    match current {
+            let mut pending_events: Vec<PendingEvent> = Vec::new();
+            while let Ok(command) = receiver.recv() {
+                match command {
+                    Command::Append {
+                        session_id,
+                        role,
+                        content,
+                        reply,
+                    } => pending.push((session_id, role, content, reply)),
+                    Command::AppendEvent {
+                        session_id,
+                        generation_id,
+                        kind,
+                        payload_json,
+                        reply,
+                    } => {
+                        pending_events.push((session_id, generation_id, kind, payload_json, reply))
+                    }
+                    Command::Flush(ack) => {
+                        flush_batch(&db, &mut pending);
+                        flush_events(&db, &mut pending_events);
+                        let _ = ack.send(());
+                    }
+                }
+                // Drain what is already queued without blocking.
+                while let Ok(command) = receiver.try_recv() {
+                    match command {
                         Command::Append {
                             session_id,
                             role,
                             content,
                             reply,
                         } => pending.push((session_id, role, content, reply)),
+                        Command::AppendEvent {
+                            session_id,
+                            generation_id,
+                            kind,
+                            payload_json,
+                            reply,
+                        } => pending_events.push((
+                            session_id,
+                            generation_id,
+                            kind,
+                            payload_json,
+                            reply,
+                        )),
                         Command::Flush(ack) => {
                             flush_batch(&db, &mut pending);
+                            flush_events(&db, &mut pending_events);
                             let _ = ack.send(());
                         }
-                        Command::Shutdown => {
-                            shutdown = true;
-                            break;
-                        }
-                    }
-                    match receiver.try_recv() {
-                        Ok(next) => command = Some(next),
-                        Err(_) => break,
                     }
                 }
                 flush_batch(&db, &mut pending);
+                flush_events(&db, &mut pending_events);
             }
+            flush_batch(&db, &mut pending);
+            flush_events(&db, &mut pending_events);
             db
         });
         Self {
-            sender,
-            worker: Some(worker),
+            inner: Arc::new(Mutex::new(Some(sender))),
+            worker: Arc::new(Mutex::new(Some(worker))),
         }
+    }
+
+    fn sender(&self) -> mpsc::SyncSender<Command> {
+        self.inner
+            .lock()
+            .expect("writer handle poisoned")
+            .as_ref()
+            .expect("writer shut down")
+            .clone()
     }
 
     /// Queue an append without waiting for the commit. Returns the receiver
@@ -96,7 +147,7 @@ impl WriterHandle {
             ));
         }
         let (reply_tx, reply_rx) = mpsc::channel();
-        self.sender
+        self.sender()
             .try_send(Command::Append {
                 session_id,
                 role: role.to_string(),
@@ -114,22 +165,56 @@ impl WriterHandle {
         reply_rx.recv().map_err(|error| error.to_string())?
     }
 
+    /// Queue an event-log append without waiting for the commit. Returns the
+    /// receiver for the eventual seq; dropping it is fine.
+    pub fn try_append_event(
+        &self,
+        session_id: i64,
+        generation_id: Option<i64>,
+        kind: &str,
+        payload_json: &str,
+    ) -> Result<mpsc::Receiver<Result<i64, String>>, String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()
+            .try_send(Command::AppendEvent {
+                session_id,
+                generation_id,
+                kind: kind.to_string(),
+                payload_json: payload_json.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(reply_rx)
+    }
+
+    /// Queue an event-log append and wait for the committed seq.
+    pub fn append_event(
+        &self,
+        session_id: i64,
+        generation_id: Option<i64>,
+        kind: &str,
+        payload_json: &str,
+    ) -> Result<i64, String> {
+        let reply_rx = self.try_append_event(session_id, generation_id, kind, payload_json)?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
     /// Wait until all queued writes before this call are committed.
     pub fn flush(&self) {
         let (ack_tx, ack_rx) = mpsc::channel();
-        if self.sender.send(Command::Flush(ack_tx)).is_ok() {
+        if self.sender().send(Command::Flush(ack_tx)).is_ok() {
             let _ = ack_rx.recv();
         }
     }
 
-    /// Stop the worker and take back the `Db`.
-    pub fn shutdown(mut self) -> Db {
-        let _ = self.sender.send(Command::Shutdown);
-        self.worker
-            .take()
-            .expect("worker already joined")
-            .join()
-            .expect("writer thread panicked")
+    /// Stop the worker and take back the `Db`. Blocks until all other
+    /// handles are dropped, so clones must die first.
+    pub fn shutdown(&self) -> Option<Db> {
+        let sender = self.inner.lock().expect("writer handle poisoned").take()?;
+        let worker = self.worker.lock().expect("writer handle poisoned").take()?;
+        drop(sender);
+        let db = worker.join().expect("writer thread panicked");
+        Some(db)
     }
 }
 
@@ -166,4 +251,58 @@ fn flush_batch(db: &Db, pending: &mut Vec<PendingAppend>) {
     for ((_, _, _, reply), result) in batch.into_iter().zip(results) {
         let _ = reply.send(result);
     }
+}
+
+/// Commit pending event appends in one transaction and ack each sender with
+/// the assigned seq.
+fn flush_events(db: &Db, pending: &mut Vec<PendingEvent>) {
+    let batch: Vec<PendingEvent> = std::mem::take(pending);
+    let tx = match db.connection.unchecked_transaction() {
+        Ok(tx) => tx,
+        Err(error) => {
+            for (_, _, _, _, reply) in &batch {
+                let _ = reply.send(Err(error.to_string()));
+            }
+            return;
+        }
+    };
+    let mut results: Vec<Result<i64, String>> = Vec::with_capacity(batch.len());
+    for (session_id, generation_id, kind, payload_json, _) in &batch {
+        results.push(
+            tx.query_row(
+                "INSERT INTO generation_events (seq, session_id, generation_id, kind, payload_json)
+                 VALUES (
+                     COALESCE((SELECT MAX(seq) + 1 FROM generation_events WHERE session_id = ?1), 0),
+                     ?1, ?2, ?3, ?4
+                 )
+                 RETURNING seq",
+                rusqlite::params![session_id, generation_id, kind, payload_json],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string()),
+        );
+    }
+    if let Err(error) = tx.commit() {
+        for result in &mut results {
+            *result = Err(error.to_string());
+        }
+        tracing::error!(%error, "persistence event batch commit failed");
+    }
+    for ((session_id, _, _, _, reply), result) in batch.into_iter().zip(results) {
+        if let Ok(seq) = result {
+            let _ = tx_owner_update(db, session_id, seq);
+        }
+        let _ = reply.send(result);
+    }
+}
+
+/// Keep `sessions.last_event_seq` in sync after a committed event batch.
+fn tx_owner_update(db: &Db, session_id: i64, seq: i64) -> rusqlite::Result<()> {
+    db.connection.execute(
+        "UPDATE sessions SET last_event_seq = MAX(last_event_seq, ?2),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ?1",
+        rusqlite::params![session_id, seq],
+    )?;
+    Ok(())
 }
