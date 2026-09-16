@@ -2,6 +2,8 @@ mod app;
 mod input;
 mod render;
 mod theme;
+pub mod typewriter;
+pub mod wave_spinner;
 
 use std::{convert::Infallible, io, time::Duration};
 
@@ -17,6 +19,8 @@ pub use app::{
 };
 pub use render::render;
 pub use theme::{Theme, ThemeKind};
+pub use typewriter::TypewriterState;
+pub use wave_spinner::WaveSpinner;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const UI_EVENT_QUEUE_CAPACITY: usize = 64;

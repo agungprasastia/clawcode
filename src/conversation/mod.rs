@@ -6,6 +6,7 @@ use crate::provider::{
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+pub mod prompt;
 pub mod tools;
 
 pub const DEFAULT_TEXT_LIMIT: usize = 256 * 1024;

@@ -60,6 +60,10 @@ impl Workspace<RealFileSystem> {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Diagnostic> {
         Self::with_filesystem(path, RealFileSystem)
     }
+
+    pub fn root_path(&self) -> &Path {
+        self.root.canonical_path()
+    }
 }
 
 impl<F: FileSystem> Workspace<F> {

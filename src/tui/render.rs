@@ -790,11 +790,15 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         Span::styled(identity_label(app), Style::default().fg(theme.ink)),
     ]);
 
-    let status_color = match app.conversation_status() {
-        super::ConversationStatus::Active => theme.success,
-        super::ConversationStatus::Error => theme.error,
-        super::ConversationStatus::Cancelled => theme.warning,
-        _ => theme.dim,
+    let status_color = if app.is_typing() || matches!(app.conversation_status(), super::ConversationStatus::Active) {
+        theme.success
+    } else {
+        match app.conversation_status() {
+            super::ConversationStatus::Active => theme.success,
+            super::ConversationStatus::Error => theme.error,
+            super::ConversationStatus::Cancelled => theme.warning,
+            _ => theme.dim,
+        }
     };
 
     let header_line2 = Line::from(vec![
@@ -837,6 +841,26 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
                 line.to_string(),
                 Style::default().fg(theme.ink),
             )));
+        }
+    }
+
+    if app.is_typing() {
+        let is_last_prompt = lines
+            .last()
+            .and_then(|l| l.spans.first())
+            .map(|s| s.content.as_ref() == "┃ ")
+            .unwrap_or(false);
+
+        if is_last_prompt || app.transcript().ends_with('\n') || lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "▋",
+                Style::default().fg(mode_color),
+            )));
+        } else if let Some(last_line) = lines.last_mut() {
+            last_line.spans.push(Span::styled(
+                "▋",
+                Style::default().fg(mode_color),
+            ));
         }
     }
 
@@ -886,15 +910,37 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
 
         lines.push(Line::from(String::new()));
         lines.push(Line::from(meta_spans));
-    } else if matches!(app.conversation_status(), super::ConversationStatus::Active) {
+    } else if matches!(app.conversation_status(), super::ConversationStatus::Active)
+        || app.is_streaming_active()
+    {
+        let spinner_width = if chunks[1].width < 30 {
+            1
+        } else {
+            crate::tui::WaveSpinner::WIDTH
+        };
+        let mut status_spans = app.wave_spinner().spans_for_width(spinner_width);
+        if let Some(tps) = app.tokens_per_second() {
+            status_spans.push(Span::raw(" "));
+            status_spans.push(Span::styled(
+                format!("{:.0}t/s", tps),
+                Style::default().fg(theme.dim),
+            ));
+        }
+        if let Some(elapsed) = app.streaming_elapsed_seconds() {
+            status_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+            status_spans.push(Span::styled(
+                format!("{:.1}s", elapsed),
+                Style::default().fg(theme.dim),
+            ));
+        }
+        status_spans.push(Span::raw("  "));
+        status_spans.push(Span::styled(
+            "esc to cancel",
+            Style::default().fg(theme.dim),
+        ));
+
         lines.push(Line::from(String::new()));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "▣ ",
-                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Streaming...", Style::default().fg(theme.dim)),
-        ]));
+        lines.push(Line::from(status_spans));
     }
 
     let total_lines = lines.len() as u16;
@@ -993,7 +1039,11 @@ fn mode_label(app: &App) -> &'static str {
 }
 
 fn status_label(app: &App) -> String {
-    format!("{:?}", app.conversation_status()).to_ascii_uppercase()
+    if app.is_typing() {
+        "STREAMING".to_string()
+    } else {
+        format!("{:?}", app.conversation_status()).to_ascii_uppercase()
+    }
 }
 
 fn identity_label(app: &App) -> String {

@@ -19,10 +19,10 @@ pub trait Transport: std::fmt::Debug + Send + Sync {
         endpoint: &str,
         body: &str,
         sender: &crate::provider::StreamSender,
-        parser: fn(Value) -> Result<Option<StreamEvent>, ProviderError>,
+        mut parser: Box<dyn FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send>,
     ) -> Result<(), ProviderError> {
         let response = self.request(endpoint, body)?;
-        let parsed = parse_lines(&response, parser)?;
+        let parsed = parse_lines(&response, &mut *parser)?;
         for event in parsed.events {
             let _ = sender.send(event);
         }
@@ -111,7 +111,7 @@ impl Transport for HttpTransport {
         endpoint: &str,
         body: &str,
         sender: &crate::provider::StreamSender,
-        parser: fn(Value) -> Result<Option<StreamEvent>, ProviderError>,
+        mut parser: Box<dyn FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send>,
     ) -> Result<(), ProviderError> {
         let mut req = ureq::post(endpoint)
             .timeout(self.timeout)
@@ -166,23 +166,24 @@ impl Transport for HttpTransport {
 
             usage = usage.or_else(|| value.get("usage").and_then(parse_usage));
             match parser(value) {
-                Ok(Some(event)) => {
-                    let event = match event {
-                        StreamEvent::Finish { reason } => {
-                            if let Some(u) = usage {
-                                let _ = sender.send(StreamEvent::Usage(u));
-                                let _ = sender.flush();
+                Ok(events) => {
+                    for event in events {
+                        let event = match event {
+                            StreamEvent::Finish { reason } => {
+                                if let Some(u) = usage {
+                                    let _ = sender.send(StreamEvent::Usage(u));
+                                    let _ = sender.flush();
+                                }
+                                StreamEvent::Finish { reason }
                             }
-                            StreamEvent::Finish { reason }
+                            other => other,
+                        };
+                        if sender.send(event).is_err() {
+                            return Ok(());
                         }
-                        other => other,
-                    };
-                    if sender.send(event).is_err() {
-                        break;
                     }
                     let _ = sender.flush();
                 }
-                Ok(None) => {}
                 Err(e) => {
                     let _ = sender.send(StreamEvent::Error(e.to_string()));
                     let _ = sender.flush();
@@ -230,16 +231,29 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
         &self.transport
     }
 
-    pub(crate) fn build_payload(&self, request: &StreamRequest) -> (String, fn(Value) -> Result<Option<StreamEvent>, ProviderError>) {
+    pub(crate) fn build_payload(
+        &self,
+        request: &StreamRequest,
+    ) -> (
+        String,
+        Box<dyn FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send>,
+    ) {
         let messages: Vec<_> = if !request.messages.is_empty() {
             request
                 .messages
                 .iter()
                 .map(|m| {
-                    serde_json::json!({
+                    let mut obj = serde_json::json!({
                         "role": m.role,
                         "content": m.content,
-                    })
+                    });
+                    if let Some(ref tid) = m.tool_call_id {
+                        obj["tool_call_id"] = serde_json::Value::String(tid.clone());
+                    }
+                    if let Some(ref tcalls) = m.tool_calls {
+                        obj["tool_calls"] = serde_json::Value::Array(tcalls.clone());
+                    }
+                    obj
                 })
                 .collect()
         } else {
@@ -249,7 +263,10 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
             })]
         };
 
-        let (body, parser): (serde_json::Value, fn(Value) -> Result<Option<StreamEvent>, ProviderError>) = match self.id.as_str() {
+        let (body, parser): (
+            serde_json::Value,
+            Box<dyn FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send>,
+        ) = match self.id.as_str() {
             "anthropic" => (
                 serde_json::json!({
                     "model": request.model,
@@ -257,7 +274,7 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                     "max_tokens": request.max_output_tokens,
                     "stream": true,
                 }),
-                anthropic_event,
+                Box::new(anthropic_parser()),
             ),
             "ollama" => {
                 if self.endpoint.contains("/api/chat") {
@@ -267,7 +284,7 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                             "messages": messages,
                             "stream": true,
                         }),
-                        ollama_event,
+                        Box::new(ollama_parser()),
                     )
                 } else {
                     (
@@ -276,19 +293,22 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                             "prompt": request.prompt,
                             "stream": true,
                         }),
-                        ollama_event,
+                        Box::new(ollama_parser()),
                     )
                 }
             }
-            _ => (
-                serde_json::json!({
+            _ => {
+                let mut payload = serde_json::json!({
                     "model": request.model,
                     "messages": messages,
                     "max_tokens": request.max_output_tokens,
                     "stream": true,
-                }),
-                openai_event,
-            ),
+                });
+                if !request.tools.is_empty() {
+                    payload["tools"] = serde_json::Value::Array(request.tools.clone());
+                }
+                (payload, Box::new(openai_parser()))
+            }
         };
 
         (body.to_string(), parser)
@@ -313,13 +333,16 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
         self
     }
     pub fn parse_openai(body: &str) -> Result<StreamResponse, ProviderError> {
-        parse_lines(body, openai_event)
+        let mut p = openai_parser();
+        parse_lines(body, &mut p)
     }
     pub fn parse_anthropic(body: &str) -> Result<StreamResponse, ProviderError> {
-        parse_lines(body, anthropic_event)
+        let mut p = anthropic_parser();
+        parse_lines(body, &mut p)
     }
     pub fn parse_ollama(body: &str) -> Result<StreamResponse, ProviderError> {
-        parse_lines(body, ollama_event)
+        let mut p = ollama_parser();
+        parse_lines(body, &mut p)
     }
 }
 
@@ -354,7 +377,7 @@ impl<T: Transport + Clone + 'static> crate::provider::Provider for JsonProvider<
 
 fn parse_lines(
     body: &str,
-    parser: fn(Value) -> Result<Option<StreamEvent>, ProviderError>,
+    parser: &mut (dyn FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send),
 ) -> Result<StreamResponse, ProviderError> {
     let mut events = Vec::new();
     let mut usage = None;
@@ -366,7 +389,7 @@ fn parse_lines(
         let value: Value = serde_json::from_str(json)
             .map_err(|error| ProviderError::Protocol(error.to_string()))?;
         usage = usage.or_else(|| value.get("usage").and_then(parse_usage));
-        if let Some(event) = parser(value)? {
+        for event in parser(value)? {
             let event = match event {
                 StreamEvent::Finish { reason } => {
                     if let Some(value) = usage {
@@ -397,71 +420,185 @@ fn parse_usage(value: &Value) -> Option<crate::provider::Usage> {
     })
 }
 
-fn openai_event(value: Value) -> Result<Option<StreamEvent>, ProviderError> {
-    if let Some(error) = value.get("error").and_then(Value::as_str) {
-        return Err(ProviderError::Protocol(error.into()));
+pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send {
+    let mut active_tools: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    move |value: Value| -> Result<Vec<StreamEvent>, ProviderError> {
+        let mut events = Vec::new();
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(ProviderError::Protocol(error.into()));
+        }
+        if let Some(error_obj) = value.get("error").and_then(Value::as_object) {
+            if let Some(msg) = error_obj.get("message").and_then(Value::as_str) {
+                return Err(ProviderError::Protocol(msg.into()));
+            }
+        }
+
+        // Content
+        if let Some(s) = value
+            .pointer("/choices/0/delta/content")
+            .or_else(|| value.pointer("/choices/0/message/content"))
+            .and_then(Value::as_str)
+        {
+            if !s.is_empty() {
+                events.push(StreamEvent::TextDelta(s.into()));
+            }
+        }
+
+        // Reasoning
+        if let Some(s) = value
+            .pointer("/choices/0/delta/reasoning_content")
+            .or_else(|| value.pointer("/choices/0/delta/reasoning"))
+            .and_then(Value::as_str)
+        {
+            if !s.is_empty() {
+                events.push(StreamEvent::ReasoningDelta(s.into()));
+            }
+        }
+
+        // Streaming tool_calls delta
+        if let Some(tool_calls) = value
+            .pointer("/choices/0/delta/tool_calls")
+            .and_then(Value::as_array)
+        {
+            for call in tool_calls {
+                let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                if let Some(id) = call.get("id").and_then(Value::as_str) {
+                    let id_str = id.to_string();
+                    active_tools.insert(index, id_str.clone());
+                    let name = call
+                        .pointer("/function/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    events.push(StreamEvent::ToolCallStart {
+                        id: id_str,
+                        name,
+                    });
+                }
+                let call_id = active_tools.get(&index).cloned();
+                if let Some(id) = call_id {
+                    if let Some(args) = call
+                        .pointer("/function/arguments")
+                        .and_then(Value::as_str)
+                    {
+                        if !args.is_empty() {
+                            events.push(StreamEvent::ToolCallDelta {
+                                id,
+                                arguments: args.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Non-streaming / message tool_calls
+        if let Some(tool_calls) = value
+            .pointer("/choices/0/message/tool_calls")
+            .and_then(Value::as_array)
+        {
+            for (idx, call) in tool_calls.iter().enumerate() {
+                let id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_else(|| format!("call_{idx}"));
+                let name = call
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let args = call
+                    .pointer("/function/arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+
+                events.push(StreamEvent::ToolCallStart {
+                    id: id.clone(),
+                    name,
+                });
+                if !args.is_empty() {
+                    events.push(StreamEvent::ToolCallDelta {
+                        id: id.clone(),
+                        arguments: args,
+                    });
+                }
+                events.push(StreamEvent::ToolCallEnd { id });
+            }
+        }
+
+        // Finish reason
+        if let Some(finish_reason) = value
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+        {
+            for (_, id) in active_tools.drain() {
+                events.push(StreamEvent::ToolCallEnd { id });
+            }
+            events.push(finish_event(finish_reason));
+        }
+
+        Ok(events)
     }
-    if let Some(error_obj) = value.get("error").and_then(Value::as_object) {
-        if let Some(msg) = error_obj.get("message").and_then(Value::as_str) {
+}
+
+pub(crate) fn anthropic_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send {
+    move |value: Value| -> Result<Vec<StreamEvent>, ProviderError> {
+        let mut events = Vec::new();
+        if value.get("type").and_then(Value::as_str) == Some("error") {
+            let msg = value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("anthropic error");
             return Err(ProviderError::Protocol(msg.into()));
         }
-    }
-    let text = value
-        .pointer("/choices/0/delta/content")
-        .or_else(|| value.pointer("/choices/0/message/content"))
-        .and_then(Value::as_str)
-        .map(|s| StreamEvent::TextDelta(s.into()));
-    let finish = value
-        .pointer("/choices/0/finish_reason")
-        .and_then(Value::as_str)
-        .map(finish_event);
-    Ok(text.or(finish))
-}
-
-fn anthropic_event(value: Value) -> Result<Option<StreamEvent>, ProviderError> {
-    if value.get("type").and_then(Value::as_str) == Some("error") {
-        let msg = value
-            .pointer("/error/message")
+        if let Some(s) = value
+            .pointer("/delta/text")
+            .or_else(|| value.pointer("/content/0/text"))
             .and_then(Value::as_str)
-            .unwrap_or("anthropic error");
-        return Err(ProviderError::Protocol(msg.into()));
+        {
+            if !s.is_empty() {
+                events.push(StreamEvent::TextDelta(s.into()));
+            }
+        }
+        if let Some(stop) = value.get("stop_reason").and_then(Value::as_str) {
+            events.push(finish_event(stop));
+        }
+        Ok(events)
     }
-    Ok(value
-        .pointer("/delta/text")
-        .or_else(|| value.pointer("/content/0/text"))
-        .and_then(Value::as_str)
-        .map(|s| StreamEvent::TextDelta(s.into()))
-        .or_else(|| {
-            value
-                .get("stop_reason")
-                .and_then(Value::as_str)
-                .map(finish_event)
-        }))
 }
 
-fn ollama_event(value: Value) -> Result<Option<StreamEvent>, ProviderError> {
-    if let Some(error) = value.get("error").and_then(Value::as_str) {
-        return Err(ProviderError::Protocol(error.into()));
+pub(crate) fn ollama_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send {
+    move |value: Value| -> Result<Vec<StreamEvent>, ProviderError> {
+        let mut events = Vec::new();
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(ProviderError::Protocol(error.into()));
+        }
+        if let Some(s) = value
+            .pointer("/message/content")
+            .or_else(|| value.get("response"))
+            .and_then(Value::as_str)
+        {
+            if !s.is_empty() {
+                events.push(StreamEvent::TextDelta(s.into()));
+            }
+        }
+        if let Some(done) = value.get("done").and_then(Value::as_bool) {
+            if done {
+                events.push(finish_event("stop"));
+            }
+        }
+        Ok(events)
     }
-    Ok(value
-        .pointer("/message/content")
-        .or_else(|| value.get("response"))
-        .and_then(Value::as_str)
-        .map(|s| StreamEvent::TextDelta(s.into()))
-        .or_else(|| {
-            value
-                .get("done_reason")
-                .and_then(Value::as_str)
-                .map(finish_event)
-        }))
 }
 
 fn finish_event(reason: &str) -> StreamEvent {
     StreamEvent::Finish {
-        reason: if reason == "length" {
-            FinishReason::Length
-        } else {
-            FinishReason::Stop
+        reason: match reason {
+            "length" | "max_tokens" => FinishReason::Length,
+            "tool_calls" | "tool_use" => FinishReason::ToolCall,
+            _ => FinishReason::Stop,
         },
     }
 }
@@ -579,7 +716,7 @@ impl Provider for ConfiguredRouter {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,
-            tools: false,
+            tools: true,
         }
     }
     fn models(&self) -> Vec<ModelInfo> {

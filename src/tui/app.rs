@@ -567,6 +567,10 @@ pub struct App {
     home_state: HomeState,
     /// Timestamp of last animation tick.
     last_animation_tick: std::time::Instant,
+    /// Smooth typewriter buffer and stream metrics.
+    typewriter: crate::tui::TypewriterState,
+    /// Animated wave spinner for streaming indicator.
+    wave_spinner: crate::tui::WaveSpinner,
     /// Optional runtime client wiring prompt submissions to generation
     /// threads. Inactive until a provider-backed runtime is attached.
     runtime: Option<RuntimeClient>,
@@ -633,6 +637,8 @@ impl App {
             git_branch: crate::platform::get_current_branch(),
             home_state: HomeState::new(),
             last_animation_tick: std::time::Instant::now(),
+            typewriter: crate::tui::TypewriterState::new(),
+            wave_spinner: crate::tui::WaveSpinner::new(ratatui::style::Color::Rgb(224, 159, 63)),
             runtime: None,
             runtime_events: None,
             prompt_history: Vec::new(),
@@ -874,7 +880,14 @@ impl App {
                     self.session_listings.clear();
                 }
             }
-            UiEvent::Input(Input::Cancel) => self.cancellation_pending = true,
+            UiEvent::Input(Input::Cancel) => {
+                self.cancellation_pending = true;
+                if let Some(runtime) = self.runtime.as_ref()
+                    && let Some(session_id) = self.active_session_id
+                {
+                    let _ = runtime.cancel_generation(session_id);
+                }
+            }
             UiEvent::Input(Input::Clear) => {
                 self.transcript.clear();
                 self.status = ConversationStatus::Idle;
@@ -969,15 +982,16 @@ impl App {
                 self.metrics = None;
                 self.status = ConversationStatus::Active;
                 self.diagnostic.clear();
+                self.typewriter.start_stream();
             }
             ConversationEvent::TextDelta(delta) => {
                 if self.status == ConversationStatus::Active {
-                    self.transcript.push_str(&delta);
-                    self.truncate_transcript();
+                    self.typewriter.push_delta(&delta);
                 }
             }
             ConversationEvent::Finished(reason) => {
                 if self.status == ConversationStatus::Active {
+                    self.flush_typewriter();
                     self.status = ConversationStatus::Finished(reason);
                     if let Some(session_id) = self.active_session_id {
                         let _ = self.command_service.append_message(
@@ -995,6 +1009,7 @@ impl App {
             }
             ConversationEvent::Error(message) => {
                 if self.status == ConversationStatus::Active {
+                    self.flush_typewriter();
                     self.status = ConversationStatus::Error;
                     self.diagnostic = bounded(message, MAX_DIAGNOSTIC_BYTES);
                     self.notify(
@@ -1056,6 +1071,12 @@ impl App {
 
     pub fn set_mode(&mut self, mode: ConversationMode) {
         self.mode = mode;
+        let theme_bundle = self.theme.to_theme();
+        let mode_color = match mode {
+            ConversationMode::Plan => theme_bundle.amber,
+            ConversationMode::Build => theme_bundle.teal,
+        };
+        self.wave_spinner.set_color(mode_color);
         let command_mode = match mode {
             ConversationMode::Plan => CommandMode::Plan,
             ConversationMode::Build => CommandMode::Build,
@@ -1116,22 +1137,81 @@ impl App {
         &mut self.home_state
     }
 
-    /// Advances periodic UI animations (such as the mascot blinking).
+    /// Whether text is actively streaming/typing out.
+    pub fn is_typing(&self) -> bool {
+        self.typewriter.is_typing() || matches!(self.status, ConversationStatus::Active)
+    }
+
+    /// Whether the typewriter buffer has pending characters or status.
+    pub fn is_streaming_active(&self) -> bool {
+        matches!(self.status, ConversationStatus::Active) || self.typewriter.is_active()
+    }
+
+    pub fn wave_spinner(&self) -> &crate::tui::WaveSpinner {
+        &self.wave_spinner
+    }
+
+    pub fn wave_spinner_mut(&mut self) -> &mut crate::tui::WaveSpinner {
+        &mut self.wave_spinner
+    }
+
+    pub fn typewriter(&self) -> &crate::tui::TypewriterState {
+        &self.typewriter
+    }
+
+    pub fn typewriter_mut(&mut self) -> &mut crate::tui::TypewriterState {
+        &mut self.typewriter
+    }
+
+    pub fn tokens_per_second(&self) -> Option<f64> {
+        self.typewriter.tokens_per_second()
+    }
+
+    pub fn streaming_elapsed_seconds(&self) -> Option<f64> {
+        self.typewriter.elapsed_seconds()
+    }
+
+    /// Flush all pending typewriter characters directly into the transcript.
+    pub fn flush_typewriter(&mut self) {
+        let remaining = self.typewriter.flush();
+        if !remaining.is_empty() {
+            self.transcript.push_str(&remaining);
+            self.truncate_transcript();
+        }
+        if let Some(target) = self.typewriter.take_pending_status() {
+            self.status = target;
+        }
+    }
+
+    /// Advances periodic UI animations (mascot blinking, wave spinner, typewriter pacing).
     /// Returns true if a visual frame changed and redraw is needed.
     pub fn tick(&mut self) -> bool {
-        const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
+        let mut redraw = false;
         if self.last_animation_tick.elapsed() >= ANIMATION_INTERVAL {
             self.last_animation_tick = std::time::Instant::now();
             if self.transcript.is_empty() {
                 let old_frame = self.home_state.frame();
                 self.home_state.tick();
-                return old_frame != self.home_state.frame();
+                if old_frame != self.home_state.frame() {
+                    redraw = true;
+                }
             }
-            if matches!(self.status, ConversationStatus::Active) {
-                return true;
+            if self.is_typing() || self.typewriter.is_active() {
+                self.wave_spinner.tick();
+                if let Some(chunk) = self.typewriter.drain_step() {
+                    self.transcript.push_str(&chunk);
+                    self.truncate_transcript();
+                }
+                if !self.typewriter.is_typing()
+                    && let Some(target) = self.typewriter.take_pending_status()
+                {
+                    self.status = target;
+                }
+                redraw = true;
             }
         }
-        false
+        redraw
     }
 
     pub fn placeholder(&self) -> &str {
@@ -1249,6 +1329,12 @@ impl App {
 
     pub fn set_theme(&mut self, theme: crate::tui::ThemeKind) {
         self.theme = theme;
+        let theme_bundle = self.theme.to_theme();
+        let mode_color = match self.mode {
+            ConversationMode::Plan => theme_bundle.amber,
+            ConversationMode::Build => theme_bundle.teal,
+        };
+        self.wave_spinner.set_color(mode_color);
     }
 
     pub fn which_key(&self) -> &WhichKeyState {
@@ -1513,6 +1599,7 @@ impl App {
     }
 
     pub fn submit_user_prompt(&mut self, prompt: &str) {
+        self.flush_typewriter();
         self.session_listings.clear();
         if self.active_session_id.is_none() {
             if let Some(runtime) = self.runtime.as_ref() {
@@ -1589,7 +1676,61 @@ impl App {
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
                     {
-                        self.transcript.push_str(delta);
+                        self.typewriter.push_delta(delta);
+                    }
+                }
+                "tool_executing" => {
+                    self.flush_typewriter();
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    {
+                        let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                        let args = payload.get("arguments");
+                        let desc = match (name, args) {
+                            ("read_file" | "write_file" | "edit_file", Some(a)) => {
+                                a.get("path").and_then(|p| p.as_str()).unwrap_or("")
+                            }
+                            ("bash", Some(a)) => {
+                                a.get("command").and_then(|c| c.as_str()).unwrap_or("")
+                            }
+                            ("glob_search", Some(a)) => {
+                                a.get("pattern").and_then(|p| p.as_str()).unwrap_or("")
+                            }
+                            ("grep_search", Some(a)) => {
+                                a.get("query").and_then(|q| q.as_str()).unwrap_or("")
+                            }
+                            ("list_dir", Some(a)) => {
+                                a.get("path").and_then(|p| p.as_str()).unwrap_or(".")
+                            }
+                            _ => "",
+                        };
+                        let line = if desc.is_empty() {
+                            format!("\n\n⚙ [{name}]\n")
+                        } else {
+                            format!("\n\n⚙ [{name}: {desc}]\n")
+                        };
+                        self.transcript.push_str(&line);
+                        self.truncate_transcript();
+                    }
+                }
+                "tool_executed" => {
+                    self.flush_typewriter();
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    {
+                        let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                        let success = payload.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                        let mark = if success { "✓" } else { "✗" };
+
+                        let snippet = if !success {
+                            format!("{mark} {name} failed: {output}\n\n")
+                        } else if output.lines().count() <= 5 && output.len() < 300 {
+                            format!("{mark} {name} succeeded\n\n")
+                        } else {
+                            format!("{mark} {name} succeeded ({} lines)\n\n", output.lines().count())
+                        };
+                        self.transcript.push_str(&snippet);
                         self.truncate_transcript();
                     }
                 }
@@ -1600,14 +1741,20 @@ impl App {
                             serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(status) = payload.get("status").and_then(|v| v.as_str())
                     {
-                        self.status = match status {
+                        let target_status = match status {
                             "cancelled" => ConversationStatus::Cancelled,
                             "failed" => ConversationStatus::Error,
                             _ => ConversationStatus::Finished(FinishReason::Stop),
                         };
+                        if self.typewriter.is_typing() {
+                            self.typewriter.set_pending_status(target_status);
+                        } else {
+                            self.status = target_status;
+                        }
                     }
                 }
                 "error" => {
+                    self.flush_typewriter();
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(message) = payload.get("message").and_then(|v| v.as_str())
@@ -1617,6 +1764,20 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+        }
+        // Advance typewriter drain so headless loops and fast polls drain
+        if self.typewriter.is_typing() || self.typewriter.pending_status().is_some() {
+            if let Some(chunk) = self.typewriter.drain_step() {
+                self.transcript.push_str(&chunk);
+                self.truncate_transcript();
+                had_events = true;
+            }
+            if !self.typewriter.is_typing()
+                && let Some(target) = self.typewriter.take_pending_status()
+            {
+                self.status = target;
+                had_events = true;
             }
         }
         self.runtime_events = Some(receiver);
@@ -1629,6 +1790,7 @@ impl App {
 
     /// Stash the live view fields into the active session's state.
     fn stash_active(&mut self) {
+        self.flush_typewriter();
         let Some(session_id) = self.active_session_id else {
             return;
         };

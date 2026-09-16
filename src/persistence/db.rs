@@ -248,6 +248,33 @@ impl Db {
         rows.collect()
     }
 
+    pub fn session(&self, session_id: i64) -> Result<Option<Session>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                &format!("SELECT {} FROM sessions WHERE id = ?1", Session::SELECT_COLUMNS),
+                params![session_id],
+                Session::from_row,
+            )
+            .optional()
+    }
+
+    pub fn workspace(&self, workspace_id: i64) -> Result<Option<Workspace>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT id, root_path, display_name, sort_order FROM workspaces WHERE id = ?1",
+                params![workspace_id],
+                |row| {
+                    Ok(Workspace {
+                        id: row.get(0)?,
+                        root_path: row.get(1)?,
+                        display_name: row.get(2)?,
+                        sort_order: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
     pub fn append_message(
         &self,
         session_id: i64,

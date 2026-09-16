@@ -1326,3 +1326,54 @@ fn status_dialog_clear_compact_and_copy_parity() {
     assert!(app.transcript().is_empty());
     assert_eq!(app.diagnostic(), "screen cleared");
 }
+
+#[test]
+fn wave_spinner_renders_and_animates_across_frames() {
+    let mut app = App::default();
+    assert_eq!(app.wave_spinner().spans().len(), clawcode::tui::WaveSpinner::WIDTH as usize);
+
+    let wide_spans = app.wave_spinner().spans_for_width(clawcode::tui::WaveSpinner::WIDTH);
+    assert_eq!(wide_spans.len(), clawcode::tui::WaveSpinner::WIDTH as usize);
+
+    let compact_spans = app.wave_spinner().spans_for_width(1);
+    assert_eq!(compact_spans.len(), 1);
+
+    app.set_mode(clawcode::tui::ConversationMode::Build);
+    let build_spans = app.wave_spinner().spans();
+    assert_eq!(build_spans.len(), clawcode::tui::WaveSpinner::WIDTH as usize);
+}
+
+#[test]
+fn typewriter_pacing_animates_in_chat_view_and_renders_cursor() {
+    let mut app = App::default();
+    app.submit_user_prompt("Halo");
+    assert!(app.transcript().contains("> Halo"));
+
+    // Feed a fast delta (all at once)
+    app.apply_conversation(clawcode::conversation::ConversationEvent::TextDelta(
+        "Halo. Butuh apa?".into(),
+    ));
+
+    // Typewriter is now active and pacing output
+    assert!(app.is_typing());
+    assert!(app.is_streaming_active());
+
+    // Render frame to ensure cursor and wave spinner render without issues
+    render_to_test_backend(&app, 80, 24).unwrap();
+
+    // Advancing tick drains small increments (typewriter effect)
+    let initial_transcript_len = app.transcript().len();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    app.tick();
+    assert!(app.transcript().len() > initial_transcript_len);
+
+    // Finish conversation
+    app.apply_conversation(clawcode::conversation::ConversationEvent::Finished(
+        clawcode::provider::FinishReason::Stop,
+    ));
+
+    // Full transcript is now flushed
+    assert!(app.transcript().contains("Halo. Butuh apa?"));
+    assert!(!app.is_typing());
+    render_to_test_backend(&app, 80, 24).unwrap();
+}

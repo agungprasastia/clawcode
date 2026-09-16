@@ -10,6 +10,39 @@ use std::time::Duration;
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+}
+
+impl ChatMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".into(),
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".into(),
+            content: content.into(),
+            tool_call_id: Some(tool_call_id.into()),
+            tool_calls: None,
+        }
+    }
 }
 
 /// A streaming completion request.
@@ -20,6 +53,7 @@ pub struct StreamRequest {
     pub max_output_tokens: u32,
     pub messages: Vec<ChatMessage>,
     pub provider: Option<String>,
+    pub tools: Vec<serde_json::Value>,
 }
 
 impl StreamRequest {
@@ -30,10 +64,13 @@ impl StreamRequest {
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: p.clone(),
+                tool_call_id: None,
+                tool_calls: None,
             }],
             prompt: p,
             max_output_tokens,
             provider: None,
+            tools: Vec::new(),
         }
     }
 
@@ -44,6 +81,11 @@ impl StreamRequest {
 
     pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
         self.provider = Some(provider.into());
+        self
+    }
+
+    pub fn with_tools(mut self, tools: Vec<serde_json::Value>) -> Self {
+        self.tools = tools;
         self
     }
 }

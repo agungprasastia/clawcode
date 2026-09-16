@@ -160,3 +160,123 @@ fn tool_layer_enforces_read_and_mutation_bounds() {
         ToolStatus::Failed(_)
     ));
 }
+
+#[test]
+fn test_coding_tools_schemas_validity() {
+    let schemas = clawcode::conversation::tools::coding_tools_schemas();
+    assert_eq!(schemas.len(), 7);
+    let names: Vec<&str> = schemas
+        .iter()
+        .filter_map(|s| s.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+        .collect();
+    assert!(names.contains(&"read_file"));
+    assert!(names.contains(&"write_file"));
+    assert!(names.contains(&"edit_file"));
+    assert!(names.contains(&"list_dir"));
+    assert!(names.contains(&"glob_search"));
+    assert!(names.contains(&"grep_search"));
+    assert!(names.contains(&"bash"));
+}
+
+#[test]
+fn test_execute_tool_file_lifecycle() {
+    let (root, workspace) = workspace("tool-exec-lifecycle");
+
+    // Write file in Build mode
+    let write_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Build,
+        "write_file",
+        r#"{"path": "hello.txt", "content": "Hello World\nLine 2"}"#,
+    );
+    assert!(write_res.is_ok(), "write_file failed: {:?}", write_res);
+
+    // Read file back
+    let read_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Build,
+        "read_file",
+        r#"{"path": "hello.txt"}"#,
+    );
+    assert!(read_res.is_ok());
+    assert!(read_res.unwrap().contains("Hello World"));
+
+    // Edit file
+    let edit_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Build,
+        "edit_file",
+        r#"{"path": "hello.txt", "old_string": "Hello World", "new_string": "Hello Rust"}"#,
+    );
+    assert!(edit_res.is_ok(), "edit_file failed: {:?}", edit_res);
+
+    // Verify disk content
+    let content = fs::read_to_string(root.join("hello.txt")).unwrap();
+    assert!(content.contains("Hello Rust"));
+
+    // List dir
+    let list_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Build,
+        "list_dir",
+        r#"{"path": "."}"#,
+    );
+    assert!(list_res.is_ok());
+    assert!(list_res.unwrap().contains("hello.txt"));
+
+    // Grep search
+    let grep_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Build,
+        "grep_search",
+        r#"{"query": "Hello Rust"}"#,
+    );
+    assert!(grep_res.is_ok());
+    assert!(grep_res.unwrap().contains("hello.txt"));
+
+    // Glob search
+    let glob_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Build,
+        "glob_search",
+        r#"{"pattern": "*.txt"}"#,
+    );
+    assert!(glob_res.is_ok());
+    assert!(glob_res.unwrap().contains("hello.txt"));
+}
+
+#[test]
+fn test_execute_tool_plan_mode_blocks_writes() {
+    let (_root, workspace) = workspace("plan-blocks");
+
+    let write_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "write_file",
+        r#"{"path": "bad.txt", "content": "blocked"}"#,
+    );
+    assert!(write_res.is_err());
+    assert!(write_res.unwrap_err().to_lowercase().contains("plan mode"));
+
+    let edit_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "edit_file",
+        r#"{"path": "bad.txt", "old_string": "a", "new_string": "b"}"#,
+    );
+    assert!(edit_res.is_err());
+    assert!(edit_res.unwrap_err().to_lowercase().contains("plan mode"));
+}
+
+#[test]
+fn test_execute_tool_bash() {
+    let (_root, workspace) = workspace("bash-exec");
+    let res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Build,
+        "bash",
+        r#"{"command": "echo clawcode_agent_test"}"#,
+    );
+    assert!(res.is_ok(), "bash execution failed: {:?}", res);
+    assert!(res.unwrap().contains("clawcode_agent_test"));
+}

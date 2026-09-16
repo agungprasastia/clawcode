@@ -27,8 +27,17 @@ impl WorkspaceRoot {
         Ok(Self { canonical_path })
     }
 
+    pub fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
     pub fn resolve(&self, relative: impl AsRef<Path>) -> Result<PathBuf, Diagnostic> {
         let relative = relative.as_ref();
+        let relative = if let Ok(stripped) = relative.strip_prefix(&self.canonical_path) {
+            stripped
+        } else {
+            relative
+        };
         if relative.is_absolute()
             || relative.components().any(|component| {
                 matches!(

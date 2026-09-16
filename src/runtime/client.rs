@@ -356,117 +356,275 @@ fn run_generation(
         }),
     );
 
-    let mut messages: Vec<crate::provider::ChatMessage> = ctx
+    let workspace_dir = ctx
+        .db
+        .with(|db| {
+            db.session(ctx.session_id)
+                .ok()
+                .flatten()
+                .and_then(|s| db.workspace(s.workspace_id).ok().flatten())
+                .map(|w| std::path::PathBuf::from(w.root_path))
+        })
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+
+    let mode = if agent_mode.eq_ignore_ascii_case("build") {
+        crate::workspace::Mode::Build
+    } else {
+        crate::workspace::Mode::Plan
+    };
+
+    let composer = crate::conversation::prompt::SystemPromptComposer::new(
+        model,
+        provider_name,
+        workspace_dir.clone(),
+        mode,
+    );
+    let system_prompt = composer.compose();
+
+    let history: Vec<crate::provider::ChatMessage> = ctx
         .db
         .with(|db| db.messages(ctx.session_id))
         .unwrap_or_default()
         .into_iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
         .map(|m| crate::provider::ChatMessage {
             role: m.role,
             content: m.content,
+            tool_call_id: None,
+            tool_calls: None,
         })
         .collect();
+
+    let mut messages = Vec::with_capacity(history.len() + 2);
+    messages.push(crate::provider::ChatMessage {
+        role: "system".to_string(),
+        content: system_prompt,
+        tool_call_id: None,
+        tool_calls: None,
+    });
+    messages.extend(history);
 
     if messages.last().map(|m| (m.role.as_str(), m.content.as_str())) != Some(("user", prompt)) {
         let _ = ctx.writer.append(ctx.session_id, "user", prompt);
         messages.push(crate::provider::ChatMessage {
             role: "user".to_string(),
             content: prompt.to_string(),
+            tool_call_id: None,
+            tool_calls: None,
         });
     }
 
-    let request = StreamRequest {
-        model: model.to_string(),
-        prompt: prompt.to_string(),
-        max_output_tokens: MAX_OUTPUT_TOKENS,
-        messages,
-        provider: Some(provider_name.to_string()),
+    let tools = crate::conversation::tools::coding_tools_schemas();
+    const MAX_AGENT_TURNS: usize = 25;
+    let mut total_usage = crate::provider::Usage {
+        input_tokens: 0,
+        output_tokens: 0,
     };
-    let mut stream = match provider.stream(&request) {
-        Ok(stream) => stream,
-        Err(error) => {
-            ctx.db.last_error(ctx.session_id, &error.to_string());
-            fail_generation(ctx, &error.to_string());
-            ctx.deactivate();
-            return;
-        }
-    };
+    let mut final_finish_reason = None;
 
-    let mut text = String::new();
-    let mut usage = None;
-    let mut finish_reason = None;
-    let mut failed = false;
-    let mut provider_cancelled = false;
-    for event in &mut stream {
+    for turn in 0..MAX_AGENT_TURNS {
         if cancel_requested(&ctx.db, ctx.generation_id) {
             break;
         }
-        match event {
-            StreamEvent::TextDelta(delta) => {
-                text.push_str(&delta);
-                ctx.emit("text_delta", &serde_json::json!({ "delta": delta }));
+
+        let request = StreamRequest {
+            model: model.to_string(),
+            prompt: prompt.to_string(),
+            max_output_tokens: MAX_OUTPUT_TOKENS,
+            messages: messages.clone(),
+            provider: Some(provider_name.to_string()),
+            tools: tools.clone(),
+        };
+
+        let mut stream = match provider.stream(&request) {
+            Ok(stream) => stream,
+            Err(error) => {
+                ctx.db.last_error(ctx.session_id, &error.to_string());
+                fail_generation(ctx, &error.to_string());
+                ctx.deactivate();
+                return;
             }
-            StreamEvent::Usage(value) => {
-                usage = Some(value);
-                ctx.emit(
-                    "usage",
-                    &serde_json::json!({
-                        "input_tokens": value.input_tokens,
-                        "output_tokens": value.output_tokens,
-                    }),
-                );
-            }
-            StreamEvent::Finish { reason } => {
-                finish_reason = Some(reason);
-                ctx.emit(
-                    "finish",
-                    &serde_json::json!({ "reason": format!("{reason:?}") }),
-                );
-            }
-            StreamEvent::Cancelled => {
-                provider_cancelled = true;
+        };
+
+        let mut text = String::new();
+        let mut turn_tool_calls: Vec<(String, String, String)> = Vec::new();
+        let mut failed = false;
+        let mut provider_cancelled = false;
+
+        for event in &mut stream {
+            if cancel_requested(&ctx.db, ctx.generation_id) {
                 break;
             }
-            StreamEvent::Error(message) => {
-                ctx.emit_error(&message);
-                failed = true;
+            match event {
+                StreamEvent::TextDelta(delta) => {
+                    text.push_str(&delta);
+                    ctx.emit("text_delta", &serde_json::json!({ "delta": delta }));
+                }
+                StreamEvent::ReasoningDelta(delta) => {
+                    ctx.emit("reasoning_delta", &serde_json::json!({ "delta": delta }));
+                }
+                StreamEvent::ToolCallStart { id, name } => {
+                    turn_tool_calls.push((id.clone(), name.clone(), String::new()));
+                    ctx.emit("tool_call_start", &serde_json::json!({ "id": id, "name": name }));
+                }
+                StreamEvent::ToolCallDelta { id, arguments } => {
+                    if let Some(call) = turn_tool_calls.iter_mut().find(|(cid, _, _)| cid == &id) {
+                        call.2.push_str(&arguments);
+                    }
+                    ctx.emit("tool_call_delta", &serde_json::json!({ "id": id, "arguments": arguments }));
+                }
+                StreamEvent::ToolCallEnd { id } => {
+                    ctx.emit("tool_call_end", &serde_json::json!({ "id": id }));
+                }
+                StreamEvent::Usage(value) => {
+                    total_usage.input_tokens += value.input_tokens;
+                    total_usage.output_tokens += value.output_tokens;
+                    ctx.emit(
+                        "usage",
+                        &serde_json::json!({
+                            "input_tokens": total_usage.input_tokens,
+                            "output_tokens": total_usage.output_tokens,
+                        }),
+                    );
+                }
+                StreamEvent::Finish { reason } => {
+                    final_finish_reason = Some(reason);
+                    ctx.emit(
+                        "finish",
+                        &serde_json::json!({ "reason": format!("{reason:?}") }),
+                    );
+                }
+                StreamEvent::Cancelled => {
+                    provider_cancelled = true;
+                    break;
+                }
+                StreamEvent::Error(message) => {
+                    ctx.emit_error(&message);
+                    failed = true;
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
 
-    if cancel_requested(&ctx.db, ctx.generation_id) || provider_cancelled {
-        // Persist partial output so replay matches what live subscribers saw.
+        if cancel_requested(&ctx.db, ctx.generation_id) || provider_cancelled {
+            if !text.is_empty() {
+                let _ = ctx.writer.append(ctx.session_id, "assistant", &text);
+            }
+            ctx.db.clear_last_error(ctx.session_id);
+            let _ = ctx
+                .db
+                .with(|db| db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None));
+            ctx.emit_status("cancelled");
+            ctx.deactivate();
+            return;
+        }
+
+        if failed {
+            ctx.db.last_error(ctx.session_id, "stream error");
+            fail_generation(ctx, "stream error");
+            ctx.deactivate();
+            return;
+        }
+
+        if turn_tool_calls.is_empty() {
+            if !text.is_empty() {
+                let _ = ctx.writer.append(ctx.session_id, "assistant", &text);
+                ctx.emit("assistant_message", &serde_json::json!({ "content": text }));
+            }
+            break;
+        }
+
+        // Assistant called tools
+        let tool_calls_json: Vec<serde_json::Value> = turn_tool_calls
+            .iter()
+            .map(|(id, name, args)| {
+                serde_json::json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": args,
+                    }
+                })
+            })
+            .collect();
+
         if !text.is_empty() {
             let _ = ctx.writer.append(ctx.session_id, "assistant", &text);
+            ctx.emit("assistant_message", &serde_json::json!({ "content": text }));
         }
-        ctx.db.clear_last_error(ctx.session_id);
-        let _ = ctx
-            .db
-            .with(|db| db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None));
-        ctx.emit_status("cancelled");
-        ctx.deactivate();
-        return;
-    }
-    if failed {
-        ctx.db.last_error(ctx.session_id, "stream error");
-        fail_generation(ctx, "stream error");
-        ctx.deactivate();
-        return;
+
+        messages.push(crate::provider::ChatMessage {
+            role: "assistant".to_string(),
+            content: text,
+            tool_call_id: None,
+            tool_calls: Some(tool_calls_json),
+        });
+
+        for (call_id, tool_name, args_str) in turn_tool_calls {
+            let args_val: serde_json::Value = serde_json::from_str(&args_str)
+                .unwrap_or_else(|_| serde_json::json!({}));
+
+            ctx.emit(
+                "tool_executing",
+                &serde_json::json!({
+                    "id": &call_id,
+                    "name": &tool_name,
+                    "arguments": &args_val,
+                }),
+            );
+
+            let result = match crate::workspace::Workspace::with_filesystem(&workspace_dir, crate::workspace::RealFileSystem) {
+                Ok(ws) => crate::conversation::tools::execute_tool(
+                    &ws,
+                    mode,
+                    &tool_name,
+                    &args_str,
+                ),
+                Err(e) => Err(format!("Failed to open workspace {}: {e}", workspace_dir.display())),
+            };
+
+            let (success, output) = match result {
+                Ok(out) => (true, out),
+                Err(err) => (false, format!("Error executing {tool_name}: {err}")),
+            };
+
+            ctx.emit(
+                "tool_executed",
+                &serde_json::json!({
+                    "id": &call_id,
+                    "name": &tool_name,
+                    "success": success,
+                    "output": &output,
+                }),
+            );
+
+            messages.push(crate::provider::ChatMessage {
+                role: "tool".to_string(),
+                content: output,
+                tool_call_id: Some(call_id),
+                tool_calls: None,
+            });
+        }
+
+        ctx.emit("agent_turn", &serde_json::json!({ "turn": turn + 1 }));
     }
 
-    if !text.is_empty() {
-        let _ = ctx.writer.append(ctx.session_id, "assistant", &text);
-        ctx.emit("assistant_message", &serde_json::json!({ "content": text }));
-    }
-    let metrics_json = usage.map(|value| {
-        serde_json::json!({
-            "input_tokens": value.input_tokens,
-            "output_tokens": value.output_tokens,
-            "finish_reason": format!("{:?}", finish_reason.unwrap_or(FinishReason::Stop)),
-        })
-        .to_string()
-    });
+    let metrics_json = if total_usage.input_tokens > 0 || total_usage.output_tokens > 0 {
+        Some(
+            serde_json::json!({
+                "input_tokens": total_usage.input_tokens,
+                "output_tokens": total_usage.output_tokens,
+                "finish_reason": format!("{:?}", final_finish_reason.unwrap_or(FinishReason::Stop)),
+            })
+            .to_string(),
+        )
+    } else {
+        None
+    };
+
     ctx.db.clear_last_error(ctx.session_id);
     let _ = ctx.db.with(|db| {
         db.finish_generation(
