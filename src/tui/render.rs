@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
 use super::App;
@@ -143,6 +143,7 @@ fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         height: input_area.height,
     };
     render_input_card(frame, centered_input, app, theme, mode_color);
+    render_command_popup(frame, centered_input, app, theme);
 
     let centered_hints = Rect {
         x: centered_x,
@@ -187,6 +188,7 @@ fn render_compact_home(
     frame.render_widget(Paragraph::new(brand_line), chunks[0]);
 
     render_input_card(frame, chunks[2], app, theme, mode_color);
+    render_command_popup(frame, chunks[2], app, theme);
     render_hints_row(frame, chunks[3], app, theme);
 }
 
@@ -364,10 +366,35 @@ fn render_input_card(
     frame.render_widget(Paragraph::new(prompt_text), input_chunks[0]);
 
     if input_chunks.len() >= 3 && input_chunks[2].height > 0 {
+        let status_color = match app.conversation_status() {
+            super::ConversationStatus::Active => theme.success,
+            super::ConversationStatus::Error => theme.error,
+            super::ConversationStatus::Cancelled => theme.warning,
+            _ => theme.dim,
+        };
+
+        let provider_text = if app.selected_provider().is_empty() {
+            "disconnected"
+        } else {
+            app.selected_provider()
+        };
+        let model_text = if app.selected_model().is_empty() {
+            "default"
+        } else {
+            app.selected_model()
+        };
+
         let meta_spans = vec![
-            Span::styled("● ", Style::default().fg(theme.success)),
-            Span::styled(identity_label(app), Style::default().fg(theme.quiet)),
-            Span::styled("   ", Style::default()),
+            Span::styled("● ", Style::default().fg(status_color)),
+            Span::styled(
+                mode_label(app),
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(model_text, Style::default().fg(theme.ink)),
+            Span::styled("  ", Style::default()),
+            Span::styled(provider_text, Style::default().fg(theme.quiet)),
+            Span::styled("  ·  ", Style::default().fg(theme.panel)),
             Span::styled(
                 status_label(app),
                 Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
@@ -402,23 +429,45 @@ fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
         ]
     };
 
-    let right_spans = vec![
-        Span::styled("Enter", Style::default().fg(theme.ink)),
-        Span::styled(" send   ", Style::default().fg(theme.dim)),
-        Span::styled("Tab", Style::default().fg(theme.ink)),
-        Span::styled(" mode   ", Style::default().fg(theme.dim)),
-        Span::styled("/help", Style::default().fg(theme.ink)),
-        Span::styled(" commands   ", Style::default().fg(theme.dim)),
-        Span::styled("Ctrl+C", Style::default().fg(theme.ink)),
-        Span::styled(" cancel", Style::default().fg(theme.dim)),
-    ];
+    let (right_spans, right_len) = if !app.matching_suggestions().is_empty() {
+        (
+            vec![
+                Span::styled(
+                    "Tab",
+                    Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" complete   ", Style::default().fg(theme.dim)),
+                Span::styled("↑/↓", Style::default().fg(theme.ink)),
+                Span::styled(" select   ", Style::default().fg(theme.dim)),
+                Span::styled("Enter", Style::default().fg(theme.ink)),
+                Span::styled(" run   ", Style::default().fg(theme.dim)),
+                Span::styled("Ctrl+C", Style::default().fg(theme.ink)),
+                Span::styled(" cancel", Style::default().fg(theme.dim)),
+            ],
+            54,
+        )
+    } else {
+        (
+            vec![
+                Span::styled("Enter", Style::default().fg(theme.ink)),
+                Span::styled(" send   ", Style::default().fg(theme.dim)),
+                Span::styled("Tab", Style::default().fg(theme.ink)),
+                Span::styled(" mode   ", Style::default().fg(theme.dim)),
+                Span::styled("/help", Style::default().fg(theme.ink)),
+                Span::styled(" commands   ", Style::default().fg(theme.dim)),
+                Span::styled("Ctrl+C", Style::default().fg(theme.ink)),
+                Span::styled(" cancel", Style::default().fg(theme.dim)),
+            ],
+            54,
+        )
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min(0),
             Constraint::Length(2),
-            Constraint::Length(54),
+            Constraint::Length(right_len),
         ])
         .split(area);
 
@@ -491,6 +540,7 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
     );
 
     render_input_card(frame, chunks[2], app, theme, mode_color);
+    render_command_popup(frame, chunks[2], app, theme);
     render_hints_row(frame, chunks[3], app, theme);
 }
 
@@ -506,9 +556,9 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
 
     if let Some(branch) = repo.branch {
         left_spans.push(Span::styled(
-            format!(" :{branch}"),
+            format!(" ({branch})"),
             Style::default()
-                .fg(theme.quiet)
+                .fg(theme.amber)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -607,4 +657,83 @@ fn identity_label(app: &App) -> String {
         (provider, "") => provider.to_owned(),
         (provider, model) => format!("{provider} / {model}"),
     }
+}
+
+fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App, theme: &Theme) {
+    let suggestions = app.matching_suggestions();
+    if suggestions.is_empty() {
+        return;
+    }
+
+    let max_visible = 6;
+    let visible_count = suggestions.len().min(max_visible);
+    let popup_height = (visible_count as u16) + 2;
+
+    if input_area.y < popup_height {
+        return;
+    }
+    let popup_y = input_area.y.saturating_sub(popup_height);
+    let popup_width = input_area.width.min(64);
+    let popup_x = input_area.x;
+
+    let popup_area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    frame.render_widget(Clear, popup_area);
+
+    let selected_idx = app.selected_suggestion_index();
+    let scroll_offset = if selected_idx >= visible_count {
+        selected_idx + 1 - visible_count
+    } else {
+        0
+    };
+
+    let items: Vec<Line> = suggestions
+        .iter()
+        .skip(scroll_offset)
+        .take(visible_count)
+        .enumerate()
+        .map(|(rel_idx, item)| {
+            let actual_idx = scroll_offset + rel_idx;
+            let is_selected = actual_idx == selected_idx;
+            if is_selected {
+                Line::from(vec![
+                    Span::styled(
+                        " › ",
+                        Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{:<16}", item.name),
+                        Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(item.description, Style::default().fg(theme.ink)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!("{:<16}", item.name),
+                        Style::default().fg(theme.ink),
+                    ),
+                    Span::styled(item.description, Style::default().fg(theme.dim)),
+                ])
+            }
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.amber))
+        .style(Style::default().bg(theme.bg_element))
+        .title(Span::styled(
+            " Commands (↑/↓ navigate, Tab complete) ",
+            Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+        ));
+
+    frame.render_widget(Paragraph::new(items).block(block), popup_area);
 }

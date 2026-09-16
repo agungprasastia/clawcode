@@ -33,7 +33,64 @@ pub enum Input {
     Backspace,
     Submit,
     ToggleMode,
+    Up,
+    Down,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandSuggestion {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub template: &'static str,
+}
+
+pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
+    CommandSuggestion {
+        name: "/plan",
+        description: "Switch to read-only Plan mode",
+        template: "/plan",
+    },
+    CommandSuggestion {
+        name: "/build",
+        description: "Switch to Build mode with edits enabled",
+        template: "/build",
+    },
+    CommandSuggestion {
+        name: "/models",
+        description: "List discovered AI models",
+        template: "/models",
+    },
+    CommandSuggestion {
+        name: "/models refresh",
+        description: "Refresh provider model list",
+        template: "/models refresh",
+    },
+    CommandSuggestion {
+        name: "/connect",
+        description: "Connect configured AI provider",
+        template: "/connect",
+    },
+    CommandSuggestion {
+        name: "/sessions",
+        description: "List saved chat sessions",
+        template: "/sessions",
+    },
+    CommandSuggestion {
+        name: "/new",
+        description: "Create a new conversation session",
+        template: "/new ",
+    },
+    CommandSuggestion {
+        name: "/help",
+        description: "Show manual, commands & shortcuts",
+        template: "/help",
+    },
+    CommandSuggestion {
+        name: "/exit",
+        description: "Quit Clawcode workbench",
+        template: "/exit",
+    },
+];
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum UiEvent {
@@ -54,6 +111,7 @@ pub struct App {
     diagnostic: String,
     metrics: Option<TurnMetrics>,
     command_service: crate::cli::CommandService<cli::CliDiscovery>,
+    selected_suggestion: usize,
 }
 
 impl Default for App {
@@ -76,6 +134,7 @@ impl App {
             diagnostic: String::new(),
             metrics: None,
             command_service: cli::runtime_service().expect("in-memory runtime database"),
+            selected_suggestion: 0,
         }
     }
 
@@ -86,12 +145,28 @@ impl App {
         match event {
             UiEvent::Input(Input::Quit) => self.running = false,
             UiEvent::Input(Input::Cancel) => self.cancellation_pending = true,
-            UiEvent::Input(Input::Character(character)) => self.prompt.push(character),
+            UiEvent::Input(Input::Character(character)) => {
+                self.prompt.push(character);
+                self.selected_suggestion = 0;
+            }
             UiEvent::Input(Input::Backspace) => {
                 self.prompt.pop();
+                self.selected_suggestion = 0;
+            }
+            UiEvent::Input(Input::Up) => {
+                self.previous_suggestion();
+            }
+            UiEvent::Input(Input::Down) => {
+                self.next_suggestion();
             }
             UiEvent::Input(Input::Submit) => self.submit_prompt(),
-            UiEvent::Input(Input::ToggleMode) => self.toggle_mode(),
+            UiEvent::Input(Input::ToggleMode) => {
+                if !self.matching_suggestions().is_empty() {
+                    self.autocomplete_selected_command();
+                } else {
+                    self.toggle_mode();
+                }
+            }
             UiEvent::Resize { .. } => {}
             UiEvent::StreamDelta(delta) => {
                 self.transcript.push_str(&delta);
@@ -269,7 +344,60 @@ impl App {
         &self.prompt
     }
 
+    pub fn matching_suggestions(&self) -> Vec<&'static CommandSuggestion> {
+        if !self.prompt.starts_with('/') {
+            return Vec::new();
+        }
+        let query = self.prompt.trim_start_matches('/');
+        let mut exact_matches = Vec::new();
+        let mut other_matches = Vec::new();
+        for cmd in AVAILABLE_COMMANDS {
+            let cmd_name = cmd.name.trim_start_matches('/');
+            if cmd_name.starts_with(query) {
+                exact_matches.push(cmd);
+            } else if cmd.name.contains(query) {
+                other_matches.push(cmd);
+            }
+        }
+        exact_matches.extend(other_matches);
+        exact_matches
+    }
+
+    pub fn selected_suggestion_index(&self) -> usize {
+        self.selected_suggestion
+    }
+
+    pub fn next_suggestion(&mut self) {
+        let count = self.matching_suggestions().len();
+        if count > 0 {
+            self.selected_suggestion = (self.selected_suggestion + 1) % count;
+        }
+    }
+
+    pub fn previous_suggestion(&mut self) {
+        let count = self.matching_suggestions().len();
+        if count > 0 {
+            self.selected_suggestion = if self.selected_suggestion == 0 {
+                count - 1
+            } else {
+                self.selected_suggestion - 1
+            };
+        }
+    }
+
+    pub fn autocomplete_selected_command(&mut self) -> bool {
+        let suggestions = self.matching_suggestions();
+        if let Some(suggestion) = suggestions.get(self.selected_suggestion) {
+            self.prompt = suggestion.template.to_string();
+            self.selected_suggestion = 0;
+            true
+        } else {
+            false
+        }
+    }
+
     fn submit_prompt(&mut self) {
+        self.selected_suggestion = 0;
         let input = std::mem::take(&mut self.prompt);
         let command = match cli::parse_command(&input) {
             Ok(command) => command,

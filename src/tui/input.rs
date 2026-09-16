@@ -20,6 +20,8 @@ fn translate_key(key: KeyEvent) -> Option<Input> {
         {
             Some(Input::ToggleMode)
         }
+        KeyCode::Up if key.modifiers.is_empty() => Some(Input::Up),
+        KeyCode::Down if key.modifiers.is_empty() => Some(Input::Down),
         KeyCode::Esc | KeyCode::Char('q') if key.modifiers.is_empty() => Some(Input::Quit),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Cancel),
         KeyCode::Char(character)
@@ -50,5 +52,14 @@ mod tests {
 
         let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
         assert_eq!(translate_key(backtab), Some(Input::ToggleMode));
+    }
+
+    #[test]
+    fn arrow_keys_translate_to_up_down() {
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(translate_key(up), Some(Input::Up));
+
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(translate_key(down), Some(Input::Down));
     }
 }

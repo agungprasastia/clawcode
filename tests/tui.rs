@@ -279,3 +279,90 @@ fn runtime_step_prioritizes_translated_cancel_and_quit_during_stream_flood() {
     assert!(!app.is_running());
     assert!(events.is_empty());
 }
+
+#[test]
+fn slash_command_suggestions_filter_cycle_and_autocomplete() {
+    let mut app = App::default();
+    let mut events = UiEventQueue::new(8);
+
+    // Initial prompt empty: no suggestions
+    assert!(app.matching_suggestions().is_empty());
+
+    // Type '/': all available suggestions listed
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+    assert!(!app.matching_suggestions().is_empty());
+    assert_eq!(app.selected_suggestion_index(), 0);
+
+    // Arrow Down cycles to next suggestion
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+    assert_eq!(app.selected_suggestion_index(), 1);
+
+    // Arrow Up cycles back
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+    assert_eq!(app.selected_suggestion_index(), 0);
+
+    // Type 'b': filters suggestions to /build
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+    assert_eq!(app.matching_suggestions()[0].name, "/build");
+
+    // Press Tab: autocompletes /build into prompt
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+    assert_eq!(app.prompt(), "/build");
+
+    // Press Enter: submits and executes /build command
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Build);
+}
+
+#[test]
+fn renders_with_command_popup_active_without_panic() {
+    let mut app = App::default();
+    let mut events = UiEventQueue::new(8);
+
+    runtime_step(
+        &mut app,
+        &mut events,
+        Some(Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))),
+        |_| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+
+    assert!(render_to_test_backend(&app, 120, 30).is_ok());
+    assert!(render_to_test_backend(&app, 60, 15).is_ok());
+}
