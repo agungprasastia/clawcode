@@ -118,6 +118,37 @@ impl Config {
             .and_then(|id| self.providers.get(id))
             .and_then(|p| p.base_url.as_deref())
     }
+
+    pub fn initial_provider_and_model(&self) -> (String, String) {
+        if let Some(ref m) = self.model {
+            for p in self.providers.keys() {
+                if let Some(rest) = m.strip_prefix(&format!("{p}/")) {
+                    return (p.clone(), rest.to_string());
+                }
+            }
+            if let Some((p, _)) = self.providers.iter().find(|(_, cfg)| cfg.models.contains_key(m)) {
+                return (p.clone(), m.clone());
+            }
+            if self.providers.len() == 1 {
+                let p = self.providers.keys().next().unwrap().clone();
+                return (p, m.clone());
+            }
+            if let Some((p, model_name)) = m.split_once('/') {
+                return (p.to_string(), model_name.to_string());
+            }
+            if let Some(p) = self.providers.keys().next() {
+                return (p.clone(), m.clone());
+            }
+            return (String::new(), m.clone());
+        }
+
+        if let Some((p, cfg)) = self.providers.iter().next() {
+            let model = cfg.models.keys().next().cloned().unwrap_or_default();
+            return (p.clone(), model);
+        }
+
+        (String::new(), String::new())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

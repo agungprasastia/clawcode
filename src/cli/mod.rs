@@ -13,6 +13,8 @@ pub enum Command {
     Exit,
     Mode(ConversationMode),
     Connect,
+    ConnectProvider(String),
+    Model(String),
     Models,
     ModelsRefresh,
     Help,
@@ -35,12 +37,29 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         "/models refresh" => Ok(Command::ModelsRefresh),
         "/help" => Ok(Command::Help),
         "/new" => Err("usage: /new <title>".into()),
+        "/model" => Err("usage: /model <id>".into()),
         value if value.starts_with("/new ") => {
             let title = value[5..].trim();
             if title.is_empty() {
                 Err("usage: /new <title>; title cannot be empty".into())
             } else {
                 Ok(Command::New(title.to_owned()))
+            }
+        }
+        value if value.starts_with("/model ") => {
+            let model = value[7..].trim();
+            if model.is_empty() {
+                Err("usage: /model <id>; model cannot be empty".into())
+            } else {
+                Ok(Command::Model(model.to_owned()))
+            }
+        }
+        value if value.starts_with("/connect ") => {
+            let provider = value[9..].trim();
+            if provider.is_empty() {
+                Ok(Command::Connect)
+            } else {
+                Ok(Command::ConnectProvider(provider.to_owned()))
             }
         }
         "" => Err("enter a command; try /plan, /build, /connect, or /help".into()),
@@ -57,6 +76,7 @@ pub enum CommandOutput {
     Mode(ConversationMode),
     Exit,
     Connected(ProviderId),
+    ModelSelected(String),
     Models(Vec<ModelInfo>),
     RefreshStarted,
     Help(String),
@@ -66,24 +86,68 @@ pub struct CommandService<D> {
     db: Option<Db>,
     mode: ConversationMode,
     provider: Option<ProviderId>,
+    default_provider: Option<ProviderId>,
     discovery: DiscoveryService,
     source: D,
     pending_refresh: Option<PendingRefresh>,
     diagnostic: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-pub struct CliDiscovery;
+#[derive(Clone, Debug, Default)]
+pub struct CliDiscovery {
+    custom_models: std::collections::HashMap<ProviderId, Vec<ModelInfo>>,
+}
+
+impl CliDiscovery {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_models(custom_models: std::collections::HashMap<ProviderId, Vec<ModelInfo>>) -> Self {
+        Self { custom_models }
+    }
+
+    pub fn add_provider_models(&mut self, provider: ProviderId, models: Vec<ModelInfo>) {
+        self.custom_models.insert(provider, models);
+    }
+}
+
+pub fn runtime_service_with_config(
+    config: &crate::config::Config,
+) -> Result<CommandService<CliDiscovery>, rusqlite::Error> {
+    let mut custom_models = std::collections::HashMap::new();
+    for (name, provider_cfg) in &config.providers {
+        let pid = ProviderId::new(name);
+        custom_models.insert(pid, provider_cfg.to_model_infos());
+    }
+    let discovery_source = CliDiscovery::with_models(custom_models.clone());
+    let mut service = CommandService::with_db(discovery_source, Db::open_in_memory()?);
+    for (pid, models) in custom_models {
+        service.discovery.apply(pid, Ok(models));
+    }
+    let (default_p, _) = config.initial_provider_and_model();
+    if !default_p.is_empty() {
+        let pid = ProviderId::new(default_p);
+        service.set_default_provider(pid.clone());
+        service.set_provider(pid);
+    }
+    Ok(service)
+}
 
 pub fn runtime_service() -> Result<CommandService<CliDiscovery>, rusqlite::Error> {
-    Ok(CommandService::with_db(CliDiscovery, Db::open_in_memory()?))
+    let config = crate::config::ConfigLoader.load().unwrap_or_default();
+    runtime_service_with_config(&config)
 }
 
 impl DiscoverySource for CliDiscovery {
-    fn discover(&self, _provider: &ProviderId) -> Result<Vec<ModelInfo>, ProviderError> {
-        Err(ProviderError::Network(
-            "provider discovery unavailable".into(),
-        ))
+    fn discover(&self, provider: &ProviderId) -> Result<Vec<ModelInfo>, ProviderError> {
+        if let Some(models) = self.custom_models.get(provider) {
+            Ok(models.clone())
+        } else {
+            Err(ProviderError::Network(
+                "provider discovery unavailable".into(),
+            ))
+        }
     }
 }
 
@@ -93,6 +157,7 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
             db: None,
             mode: ConversationMode::Plan,
             provider: None,
+            default_provider: None,
             discovery: DiscoveryService::new(Duration::from_secs(300), Duration::from_secs(5)),
             source,
             pending_refresh: None,
@@ -104,6 +169,18 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
         let mut service = Self::new(source);
         service.db = Some(db);
         service
+    }
+
+    pub fn set_provider(&mut self, provider: ProviderId) {
+        self.provider = Some(provider);
+    }
+
+    pub fn set_default_provider(&mut self, provider: ProviderId) {
+        self.default_provider = Some(provider);
+    }
+
+    pub fn register_models(&mut self, provider: ProviderId, models: Vec<ModelInfo>) {
+        self.discovery.apply(provider, Ok(models));
     }
 
     pub fn execute(&mut self, command: Command) -> Result<CommandOutput, ProviderError> {
@@ -140,6 +217,12 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
                 self.provider = Some(provider.clone());
                 Ok(CommandOutput::Connected(provider))
             }
+            Command::ConnectProvider(name) => {
+                let provider = ProviderId::new(name);
+                self.provider = Some(provider.clone());
+                Ok(CommandOutput::Connected(provider))
+            }
+            Command::Model(model) => Ok(CommandOutput::ModelSelected(model)),
             Command::Models => Ok(CommandOutput::Models(self.models()?)),
             Command::ModelsRefresh => {
                 let provider = self
@@ -158,7 +241,7 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
                 Ok(CommandOutput::RefreshStarted)
             }
             Command::Help => Ok(CommandOutput::Help(
-                "available commands: /plan, /build, /connect, /models, /sessions, /new <title>, /help, /exit".into(),
+                "available commands: /plan, /build, /connect, /model <id>, /models, /sessions, /new <title>, /help, /exit".into(),
             )),
         }
     }
@@ -255,7 +338,7 @@ pub fn run() -> std::io::Result<()> {
     }
     if !arguments.is_empty() {
         let command = parse_command(&arguments.join(" ")).map_err(std::io::Error::other)?;
-        let mut service = CommandService::new(CliDiscovery);
+        let mut service = runtime_service().map_err(|e| std::io::Error::other(e.to_string()))?;
         let output = service
             .execute(command)
             .map_err(|error| std::io::Error::other(error.to_string()))?;

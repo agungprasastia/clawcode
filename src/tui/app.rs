@@ -58,6 +58,11 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
         template: "/build",
     },
     CommandSuggestion {
+        name: "/model",
+        description: "Select active model",
+        template: "/model ",
+    },
+    CommandSuggestion {
         name: "/models",
         description: "List discovered AI models",
         template: "/models",
@@ -174,6 +179,9 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
+        let config = crate::config::ConfigLoader.load().unwrap_or_default();
+        let (initial_p, initial_m) = config.initial_provider_and_model();
+        let command_service = cli::runtime_service_with_config(&config).expect("in-memory runtime database");
         Self {
             running: true,
             cancellation_pending: false,
@@ -182,11 +190,11 @@ impl App {
             transcript: String::new(),
             mode: ConversationMode::Plan,
             status: ConversationStatus::Idle,
-            provider: String::new(),
-            model: String::new(),
+            provider: initial_p,
+            model: initial_m,
             diagnostic: String::new(),
             metrics: None,
-            command_service: cli::runtime_service().expect("in-memory runtime database"),
+            command_service,
             selected_suggestion: 0,
             active_session_id: None,
             sessions: std::collections::HashMap::new(),
@@ -541,19 +549,11 @@ impl App {
                     self.switch_session(session.id);
                     self.diagnostic = format!("session created: {}", session.title);
                 }
-                Ok(CommandOutput::Sessions(sessions)) => {
-                    self.diagnostic = format!("{} session(s) — press Esc to close", sessions.len());
-                    self.session_listings = sessions;
-                }
-                Ok(CommandOutput::Connected(provider)) => {
-                    self.apply_command_output(CommandOutput::Connected(provider));
-                }
-                Ok(CommandOutput::Models(models)) => {
-                    self.diagnostic = format!("{} model(s)", models.len());
-                }
-                Ok(CommandOutput::Help(text)) => self.diagnostic = text,
                 Ok(CommandOutput::RefreshStarted) => {
                     self.diagnostic = "model refresh started".into();
+                }
+                Ok(output) => {
+                    self.apply_command_output(output);
                 }
                 Err(error) => self.diagnostic = error.to_string(),
             }
@@ -722,13 +722,48 @@ impl App {
         match output {
             CommandOutput::Connected(provider) => {
                 self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
-                self.diagnostic = "provider connected".into();
+                self.diagnostic = format!("provider connected: {provider}");
+            }
+            CommandOutput::ModelSelected(model) => {
+                let model_to_set = if !self.provider.is_empty()
+                    && model.starts_with(&format!("{}/", self.provider))
+                {
+                    model[self.provider.len() + 1..].to_string()
+                } else {
+                    model
+                };
+                self.model = bounded(model_to_set.clone(), MAX_IDENTITY_BYTES);
+                self.diagnostic = format!("model switched to: {model_to_set}");
+            }
+            CommandOutput::Models(models) => {
+                if !models.is_empty() {
+                    let mut list = String::from("Available models:\n");
+                    for m in &models {
+                        list.push_str(&format!("  • {}\n", m.id));
+                    }
+                    if self.transcript.is_empty() {
+                        self.transcript.push_str(&list);
+                    } else {
+                        self.transcript.push_str(&format!("\n{list}"));
+                    }
+                    self.truncate_transcript();
+                }
+                self.diagnostic = format!("{} model(s)", models.len());
             }
             CommandOutput::Sessions(sessions) => {
                 // Grouped per workspace for the /sessions panel; rendering
                 // order matches the panel layout (workspace, then sessions).
                 self.diagnostic = format!("{} session(s) — press Esc to close", sessions.len());
                 self.session_listings = sessions;
+            }
+            CommandOutput::Help(text) => {
+                if self.transcript.is_empty() {
+                    self.transcript.push_str(&text);
+                } else {
+                    self.transcript.push_str(&format!("\n{text}"));
+                }
+                self.truncate_transcript();
+                self.diagnostic = text;
             }
             _ => {}
         }
