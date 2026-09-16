@@ -63,6 +63,20 @@ impl Value {
             _ => None,
         }
     }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool { value, .. } => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_array(&self) -> Option<&[Value]> {
+        match self {
+            Self::Array { items, .. } => Some(items.as_slice()),
+            _ => None,
+        }
+    }
 }
 
 /// Parse JSONC. Returns `(line, column, message)` on error, 1-based.

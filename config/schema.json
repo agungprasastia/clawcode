@@ -2,16 +2,20 @@
   "$schema": "./schema.meta.json",
   "title": "clawcode config",
   "type": "object",
-  "required": ["schema_version"],
   "properties": {
+    "$schema": { "type": "string" },
     "schema_version": { "type": "integer", "const": 1 },
     "model": { "type": "string" },
-    "endpoint": { "type": "string", "format": "uri" },
+    "endpoint": { "type": "string" },
     "api_key": {
       "type": "string",
       "pattern": "^(env|credential):.+",
       "description": "Secret reference; plaintext rejected."
-    }
+    },
+    "provider": { "type": "object" },
+    "providers": { "type": "object" },
+    "agent": { "type": "object" },
+    "agents": { "type": "object" }
   },
   "additionalProperties": false
 }

@@ -182,3 +182,169 @@ fn bundled_schema_exists_and_is_local() {
     assert!(schema.contains("schema_version"));
     assert!(!schema.contains("http://") && !schema.contains("https://"));
 }
+
+#[test]
+fn parses_opencode_style_9router_provider() {
+    let source = r#"{
+      "model": "9router/minimax/MiniMax-Text-01",
+      "provider": {
+        "9router": {
+          "npm": "@ai-sdk/openai-compatible",
+          "name": "9router",
+          "apiKey": "",
+          "baseURL": "https://9router.com/v1",
+          "models": {
+            "minimax/MiniMax-Text-01": {
+              "name": "MiniMax-Text-01",
+              "limit": {
+                "context": 1000000,
+                "output": 8192
+              },
+              "modalities": {
+                "input": ["text"],
+                "output": ["text"]
+              }
+            }
+          }
+        }
+      },
+      "agent": {
+        "build": {
+          "model": "9router/minimax/MiniMax-Text-01"
+        }
+      }
+    }"#;
+
+    let config = ConfigLoader.parse_str("opencode.jsonc", source).unwrap();
+    assert_eq!(
+        config.model.as_deref(),
+        Some("9router/minimax/MiniMax-Text-01")
+    );
+    assert_eq!(
+        config.resolved_endpoint(Some("9router")),
+        Some("https://9router.com/v1")
+    );
+
+    let provider = config.providers.get("9router").expect("9router provider");
+    assert_eq!(provider.npm.as_deref(), Some("@ai-sdk/openai-compatible"));
+    assert_eq!(provider.base_url.as_deref(), Some("https://9router.com/v1"));
+    assert_eq!(provider.api_key, None);
+    assert_eq!(provider.resolved_api_key(), None);
+
+    let model = provider
+        .models
+        .get("minimax/MiniMax-Text-01")
+        .expect("model config");
+    assert_eq!(model.name.as_deref(), Some("MiniMax-Text-01"));
+    assert_eq!(model.context_window, Some(1_000_000));
+    assert_eq!(model.max_output_tokens, Some(8192));
+
+    let modalities = model.modalities.as_ref().expect("modalities");
+    assert_eq!(modalities.input, vec!["text"]);
+    assert_eq!(modalities.output, vec!["text"]);
+
+    let model_infos = provider.to_model_infos();
+    assert_eq!(model_infos.len(), 1);
+    assert_eq!(model_infos[0].id, "minimax/MiniMax-Text-01");
+    assert_eq!(model_infos[0].context_window, 1_000_000);
+
+    let agent = config.agents.get("build").expect("build agent");
+    assert_eq!(
+        agent.model.as_deref(),
+        Some("9router/minimax/MiniMax-Text-01")
+    );
+}
+
+#[test]
+fn parses_opencode_options_nested_provider() {
+    let source = r#"{
+      "mcp": {},
+      "plugin": ["test-plugin"],
+      "provider": {
+        "9router": {
+          "npm": "@ai-sdk/openai-compatible",
+          "options": {
+            "baseURL": "http://127.0.0.1:20128/v1",
+            "apiKey": "sk-local-test-key"
+          },
+          "models": {
+            "ag/claude-opus-4-6-thinking": {
+              "name": "ag/claude-opus-4-6-thinking"
+            }
+          }
+        }
+      }
+    }"#;
+
+    let config = ConfigLoader.parse_str("opencode.jsonc", source).unwrap();
+    let provider = config.providers.get("9router").expect("9router");
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("http://127.0.0.1:20128/v1")
+    );
+    assert_eq!(
+        provider.resolved_api_key().as_deref(),
+        Some("sk-local-test-key")
+    );
+    assert!(provider.models.contains_key("ag/claude-opus-4-6-thinking"));
+}
+
+#[test]
+fn merges_providers_and_agents_across_configs() {
+    let global_src = r#"{
+      "schema_version": 1,
+      "provider": {
+        "p1": { "baseURL": "https://p1.global" }
+      },
+      "agent": {
+        "a1": { "model": "p1/m1" }
+      }
+    }"#;
+    let project_src = r#"{
+      "schema_version": 1,
+      "provider": {
+        "p2": { "baseURL": "https://p2.project" }
+      },
+      "agent": {
+        "a2": { "model": "p2/m2" }
+      }
+    }"#;
+
+    let global = ConfigLoader.parse_str("global.jsonc", global_src).unwrap();
+    let project = ConfigLoader
+        .parse_str("project.jsonc", project_src)
+        .unwrap();
+    let merged = Config::merge(global, project).unwrap();
+
+    assert!(merged.providers.contains_key("p1"));
+    assert!(merged.providers.contains_key("p2"));
+    assert!(merged.agents.contains_key("a1"));
+    assert!(merged.agents.contains_key("a2"));
+}
+
+#[test]
+fn loads_from_opencode_directory_fallback() {
+    let temp = std::env::temp_dir().join(format!("clawcode-test-opencode-{}", std::process::id()));
+    let xdg = temp.join(".config");
+    let opencode_dir = xdg.join("opencode");
+    std::fs::create_dir_all(&opencode_dir).unwrap();
+
+    let opencode_jsonc = r#"{
+      "model": "fallback-model",
+      "provider": {
+        "fallback": {
+          "baseURL": "https://fallback.local"
+        }
+      }
+    }"#;
+    std::fs::write(opencode_dir.join("opencode.jsonc"), opencode_jsonc).unwrap();
+
+    let project = temp.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let config = ConfigLoader.load_with_paths(&xdg, &project).unwrap();
+    assert_eq!(config.model.as_deref(), Some("fallback-model"));
+    assert!(config.providers.contains_key("fallback"));
+
+    let _ = std::fs::remove_dir_all(temp);
+}
