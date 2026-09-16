@@ -790,7 +790,13 @@ fn models_dialog_opens_navigates_filters_and_selects_model() {
     }
 
     // Enter selects the currently focused model and closes dialog
-    let selected_id = app.models_dialog().unwrap().selected_model().unwrap().id.clone();
+    let selected_id = app
+        .models_dialog()
+        .unwrap()
+        .selected_model()
+        .unwrap()
+        .id
+        .clone();
     app.apply(UiEvent::Input(Input::Submit));
     assert!(app.models_dialog().is_none());
     assert_eq!(app.selected_model(), selected_id);
@@ -867,4 +873,456 @@ fn slash_model_autocompletion_and_popup() {
     app.apply(UiEvent::Input(Input::ToggleMode));
     assert!(app.prompt().starts_with("/model "));
     assert_eq!(app.prompt(), format!("/model {}", model_suggestions[1]));
+}
+
+#[test]
+fn home_state_ticks_and_animates_blinking_frames() {
+    let mut state = clawcode::tui::HomeState::new();
+    assert_eq!(state.frame(), 0);
+
+    // Phase 0: duration 14
+    for _ in 0..13 {
+        state.tick();
+        assert_eq!(state.frame(), 0);
+    }
+    state.tick();
+    assert_eq!(state.frame(), 1); // Phase 1: blink (frame 1)
+
+    // Phase 1: duration 7
+    for _ in 0..6 {
+        state.tick();
+        assert_eq!(state.frame(), 1);
+    }
+    state.tick();
+    assert_eq!(state.frame(), 0); // Phase 2: eyes open (frame 0)
+
+    // Phase 2: duration 7
+    for _ in 0..7 {
+        state.tick();
+    }
+    assert_eq!(state.frame(), 1); // Phase 3: blink (frame 1)
+
+    // Phase 3: duration 7
+    for _ in 0..7 {
+        state.tick();
+    }
+    assert_eq!(state.frame(), 0); // Phase 4: eyes open (frame 0)
+
+    // Phase 4: duration 14
+    for _ in 0..14 {
+        state.tick();
+    }
+    assert_eq!(state.frame(), 0); // Wraps back to Phase 0
+}
+
+#[test]
+fn home_screen_renders_mascot_and_reflects_frame_transition() {
+    let mut app = App::default();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        lines.push(line);
+    }
+    let text = lines.join("\n");
+
+    // Frame 0 has open eyes: █▟▟▜
+    assert!(text.contains("█▟▟▜"));
+    assert!(text.contains("CLAWCODE"));
+    assert!(text.contains("clawcode v0.1.0"));
+
+    // Advance 14 ticks to trigger blink frame 1
+    for _ in 0..14 {
+        app.home_state_mut().tick();
+    }
+    assert_eq!(app.home_state().frame(), 1);
+
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer_blink = terminal.backend().buffer();
+    let mut lines_blink = Vec::new();
+    for y in 0..buffer_blink.area.height {
+        let mut line = String::new();
+        for x in 0..buffer_blink.area.width {
+            line.push_str(buffer_blink[(x, y)].symbol());
+        }
+        lines_blink.push(line);
+    }
+    let text_blink = lines_blink.join("\n");
+
+    // Frame 1 has blinking eyes: █▙▟▜
+    assert!(text_blink.contains("█▙▟▜"));
+}
+
+#[test]
+fn prompt_history_navigation_and_draft_preservation() {
+    let mut app = App::default();
+
+    // 1. Initially empty history; Up does nothing
+    app.apply(UiEvent::Input(Input::Up));
+    assert_eq!(app.prompt(), "");
+
+    // 2. Submit "alpha"
+    for c in "alpha".chars() {
+        app.apply(UiEvent::Input(Input::Character(c)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.prompt_history(), &["alpha"]);
+
+    // 3. Submit "beta"
+    for c in "beta".chars() {
+        app.apply(UiEvent::Input(Input::Character(c)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.prompt_history(), &["alpha", "beta"]);
+
+    // 4. Consecutive duplicate "beta" is not re-added
+    for c in "beta".chars() {
+        app.apply(UiEvent::Input(Input::Character(c)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.prompt_history(), &["alpha", "beta"]);
+
+    // 5. User types draft "drafting"
+    for c in "drafting".chars() {
+        app.apply(UiEvent::Input(Input::Character(c)));
+    }
+    assert_eq!(app.prompt(), "drafting");
+
+    // 6. Up -> recalled "beta"
+    app.apply(UiEvent::Input(Input::Up));
+    assert_eq!(app.prompt(), "beta");
+
+    // 7. Up -> recalled "alpha"
+    app.apply(UiEvent::Input(Input::Up));
+    assert_eq!(app.prompt(), "alpha");
+
+    // 8. Up at top -> stays at "alpha"
+    app.apply(UiEvent::Input(Input::Up));
+    assert_eq!(app.prompt(), "alpha");
+
+    // 9. Down -> "beta"
+    app.apply(UiEvent::Input(Input::Down));
+    assert_eq!(app.prompt(), "beta");
+
+    // 10. Down past newest -> restores draft
+    app.apply(UiEvent::Input(Input::Down));
+    assert_eq!(app.prompt(), "drafting");
+
+    // 11. Typing character resets history navigation state
+    app.apply(UiEvent::Input(Input::Up));
+    assert_eq!(app.prompt(), "beta");
+    app.apply(UiEvent::Input(Input::Character('!')));
+    assert_eq!(app.prompt(), "beta!");
+    // Pressing Down now should not restore "drafting" because history navigation was reset
+    app.apply(UiEvent::Input(Input::Down));
+    assert_eq!(app.prompt(), "beta!");
+}
+
+#[test]
+fn original_logo_preserved_and_rendered() {
+    let app = App::default();
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        lines.push(line);
+    }
+    let text = lines.join("\n");
+
+    // Original block ASCII logo elements
+    assert!(text.contains("██████╗"));
+    assert!(text.contains("AUTONOMOUS AGENT WORKBENCH"));
+}
+
+#[test]
+fn theme_switching_via_slash_command_and_dialog() {
+    let mut app = App::default();
+    assert_eq!(app.theme(), clawcode::tui::ThemeKind::ClawcodeDark);
+
+    // Direct /theme command
+    for ch in "/theme catppuccin".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.theme(), clawcode::tui::ThemeKind::CatppuccinMocha);
+    assert!(app.diagnostic().contains("Catppuccin Mocha"));
+
+    for ch in "/theme dracula".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.theme(), clawcode::tui::ThemeKind::Dracula);
+
+    // Interactive /themes dialog
+    for ch in "/themes".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.themes_dialog().is_some());
+
+    // Filter themes
+    for ch in "nord".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    assert_eq!(app.themes_dialog().unwrap().filter, "nord");
+    assert_eq!(app.themes_dialog().unwrap().filtered_items().len(), 1);
+
+    // Submit selection
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.themes_dialog().is_none());
+    assert_eq!(app.theme(), clawcode::tui::ThemeKind::Nord);
+
+    // Render themes dialog test
+    app.apply(UiEvent::Input(Input::Character('/')));
+    for ch in "themes".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.themes_dialog().is_some());
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        lines.push(line);
+    }
+    let text = lines.join("\n");
+    assert!(text.contains("Color Theme"));
+    assert!(text.contains("Filter:"));
+    assert!(text.contains("navigate"));
+    assert!(text.contains("select"));
+    assert!(text.contains("close"));
+
+    // Close with Cancel / Esc
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.themes_dialog().is_none());
+}
+
+#[test]
+fn agents_dialog_opens_navigates_filters_and_switches_mode() {
+    let mut app = App::default();
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Plan);
+
+    // Open /agents dialog
+    for ch in "/agents".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.agents_dialog().is_some());
+
+    // Navigate to Build Agent
+    app.apply(UiEvent::Input(Input::Down));
+    let selected = app.agents_dialog().unwrap().selected_agent().unwrap();
+    assert_eq!(selected.id, "build");
+
+    // Select with Enter
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.agents_dialog().is_none());
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Build);
+
+    // Reopen and filter
+    for ch in "/agents".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.agents_dialog().is_some());
+
+    for ch in "plan".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    assert_eq!(app.agents_dialog().unwrap().filter, "plan");
+    let filtered = app.agents_dialog().unwrap().filtered_items();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].id, "plan");
+
+    // Render agents dialog test
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        lines.push(line);
+    }
+    let text = lines.join("\n");
+    assert!(text.contains("Select Agent Mode"));
+    assert!(text.contains("Filter:"));
+    assert!(text.contains("Plan Agent"));
+
+    // Select Plan
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.agents_dialog().is_none());
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Plan);
+}
+
+#[test]
+fn which_key_shortcuts_cheatsheet_toggle_and_direct_key_actions() {
+    let mut app = App::default();
+    assert!(!app.which_key().visible);
+
+    // Trigger via Ctrl+X (WhichKey)
+    app.apply(UiEvent::Input(Input::WhichKey));
+    assert!(app.which_key().visible);
+
+    // Render WhichKey test
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        lines.push(line);
+    }
+    let text = lines.join("\n");
+    assert!(text.contains("Keyboard Shortcuts (Cheatsheet)"));
+    assert!(text.contains("Toggle Plan/Build"));
+    assert!(text.contains("Open Agents dialog"));
+
+    // Direct key 'a' opens agents dialog and closes which_key
+    app.apply(UiEvent::Input(Input::Character('a')));
+    assert!(!app.which_key().visible);
+    assert!(app.agents_dialog().is_some());
+
+    // Close agents dialog
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.agents_dialog().is_none());
+
+    // Trigger via /keys
+    for ch in "/keys".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.which_key().visible);
+
+    // Direct key 't' opens themes dialog
+    app.apply(UiEvent::Input(Input::Character('t')));
+    assert!(!app.which_key().visible);
+    assert!(app.themes_dialog().is_some());
+
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.themes_dialog().is_none());
+
+    // Direct mode toggle via 'b' and 'p'
+    app.apply(UiEvent::Input(Input::WhichKey));
+    app.apply(UiEvent::Input(Input::Character('b')));
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Build);
+
+    app.apply(UiEvent::Input(Input::WhichKey));
+    app.apply(UiEvent::Input(Input::Character('p')));
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Plan);
+
+    // Esc dismisses which_key
+    app.apply(UiEvent::Input(Input::WhichKey));
+    assert!(app.which_key().visible);
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(!app.which_key().visible);
+}
+
+#[test]
+fn status_dialog_clear_compact_and_copy_parity() {
+    let mut app = App::default();
+
+    // 1. /status opens status dialog
+    for ch in "/status".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.status_dialog().is_some());
+
+    // 2. Render status dialog
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut lines = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        lines.push(line);
+    }
+    let text = lines.join("\n");
+    assert!(text.contains("System Status & Diagnostics"));
+    assert!(text.contains("Agent Mode"));
+    assert!(text.contains("Active Model"));
+    assert!(text.contains("Git Branch"));
+
+    // 3. Esc dismisses status dialog
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.status_dialog().is_none());
+
+    // 4. WhichKey 's' also opens status dialog
+    app.apply(UiEvent::Input(Input::WhichKey));
+    app.apply(UiEvent::Input(Input::Character('s')));
+    assert!(app.status_dialog().is_some());
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.status_dialog().is_none());
+
+    // 5. Add transcript content and test /copy
+    app.apply(UiEvent::StreamDelta(
+        "Generated AI reply text for testing".to_string(),
+    ));
+    assert!(!app.transcript().is_empty());
+
+    for ch in "/copy".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.diagnostic().contains("transcript copied"));
+
+    // 6. Test /compact
+    let large_transcript = "x".repeat(2000);
+    app.apply(UiEvent::StreamDelta(large_transcript));
+    assert!(app.transcript().len() > 1500);
+
+    for ch in "/compact".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.diagnostic().contains("compacted"));
+    assert!(app.transcript().contains("[earlier transcript compacted]"));
+
+    // 7. Clear via Ctrl+L (Input::Clear)
+    app.apply(UiEvent::Input(Input::Clear));
+    assert!(app.transcript().is_empty());
+    assert_eq!(app.diagnostic(), "screen cleared");
+
+    // 8. Clear via /clear command
+    app.apply(UiEvent::StreamDelta("New response".to_string()));
+    assert!(!app.transcript().is_empty());
+
+    for ch in "/clear".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.transcript().is_empty());
+    assert_eq!(app.diagnostic(), "screen cleared");
 }

@@ -24,6 +24,10 @@ fn translate_key(key: KeyEvent) -> Option<Input> {
         KeyCode::Down if key.modifiers.is_empty() => Some(Input::Down),
         KeyCode::Esc | KeyCode::Char('q') if key.modifiers.is_empty() => Some(Input::Quit),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Cancel),
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Clear),
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Input::WhichKey)
+        }
         KeyCode::Char(character)
             if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
         {
@@ -43,6 +47,20 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
 
         assert_eq!(translate_key(key), Some(Input::Cancel));
+    }
+
+    #[test]
+    fn ctrl_l_translates_to_clear() {
+        let key = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+
+        assert_eq!(translate_key(key), Some(Input::Clear));
+    }
+
+    #[test]
+    fn ctrl_x_translates_to_which_key() {
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+
+        assert_eq!(translate_key(key), Some(Input::WhichKey));
     }
 
     #[test]

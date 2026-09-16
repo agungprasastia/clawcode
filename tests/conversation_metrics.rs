@@ -30,11 +30,7 @@ impl Provider for FakeProvider {
 }
 
 fn request() -> StreamRequest {
-    StreamRequest {
-        model: "model-a".into(),
-        prompt: "hello".into(),
-        max_output_tokens: 16,
-    }
+    StreamRequest::new("model-a", "hello", 16)
 }
 
 #[test]

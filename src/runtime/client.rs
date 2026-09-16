@@ -356,13 +356,34 @@ fn run_generation(
         }),
     );
 
+    let mut messages: Vec<crate::provider::ChatMessage> = ctx
+        .db
+        .with(|db| db.messages(ctx.session_id))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| crate::provider::ChatMessage {
+            role: m.role,
+            content: m.content,
+        })
+        .collect();
+
+    if messages.last().map(|m| (m.role.as_str(), m.content.as_str())) != Some(("user", prompt)) {
+        let _ = ctx.writer.append(ctx.session_id, "user", prompt);
+        messages.push(crate::provider::ChatMessage {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        });
+    }
+
     let request = StreamRequest {
         model: model.to_string(),
         prompt: prompt.to_string(),
         max_output_tokens: MAX_OUTPUT_TOKENS,
+        messages,
+        provider: Some(provider_name.to_string()),
     };
-    let response = match provider.send(&request) {
-        Ok(response) => response,
+    let mut stream = match provider.stream(&request) {
+        Ok(stream) => stream,
         Err(error) => {
             ctx.db.last_error(ctx.session_id, &error.to_string());
             fail_generation(ctx, &error.to_string());
@@ -376,7 +397,7 @@ fn run_generation(
     let mut finish_reason = None;
     let mut failed = false;
     let mut provider_cancelled = false;
-    for event in response.events {
+    for event in &mut stream {
         if cancel_requested(&ctx.db, ctx.generation_id) {
             break;
         }

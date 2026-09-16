@@ -31,12 +31,14 @@ pub enum ConversationStatus {
 pub enum Input {
     Quit,
     Cancel,
+    Clear,
     Character(char),
     Backspace,
     Submit,
     ToggleMode,
     Up,
     Down,
+    WhichKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,9 +75,49 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
         template: "/models refresh",
     },
     CommandSuggestion {
+        name: "/agents",
+        description: "Interactive agent picker & mode switcher",
+        template: "/agents",
+    },
+    CommandSuggestion {
+        name: "/themes",
+        description: "Interactive theme selector & color palette",
+        template: "/themes",
+    },
+    CommandSuggestion {
+        name: "/theme",
+        description: "Switch color theme (e.g. /theme catppuccin)",
+        template: "/theme ",
+    },
+    CommandSuggestion {
+        name: "/keys",
+        description: "Keyboard shortcuts cheatsheet (Ctrl+X)",
+        template: "/keys",
+    },
+    CommandSuggestion {
+        name: "/status",
+        description: "Show session status & diagnostics",
+        template: "/status",
+    },
+    CommandSuggestion {
         name: "/connect",
         description: "Connect configured AI provider",
         template: "/connect",
+    },
+    CommandSuggestion {
+        name: "/clear",
+        description: "Clear conversation & return to home",
+        template: "/clear",
+    },
+    CommandSuggestion {
+        name: "/compact",
+        description: "Compact session context",
+        template: "/compact",
+    },
+    CommandSuggestion {
+        name: "/copy",
+        description: "Copy transcript or session status",
+        template: "/copy",
     },
     CommandSuggestion {
         name: "/sessions",
@@ -196,6 +238,295 @@ impl ModelsDialogState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentItem {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub mode: ConversationMode,
+    pub shortcut: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsDialogState {
+    pub items: Vec<AgentItem>,
+    pub selected: usize,
+    pub filter: String,
+    pub scroll_offset: usize,
+}
+
+impl AgentsDialogState {
+    pub fn new(active_agent: &str) -> Self {
+        let items = Self::default_items();
+        let selected = items.iter().position(|a| a.id == active_agent).unwrap_or(0);
+        Self {
+            items,
+            selected,
+            filter: String::new(),
+            scroll_offset: 0,
+        }
+    }
+
+    pub fn default_items() -> Vec<AgentItem> {
+        vec![
+            AgentItem {
+                id: "plan".to_string(),
+                name: "Plan Agent".to_string(),
+                description: "Read-only exploration, architecture analysis, and safe plans"
+                    .to_string(),
+                mode: ConversationMode::Plan,
+                shortcut: Some("Tab /plan".to_string()),
+            },
+            AgentItem {
+                id: "build".to_string(),
+                name: "Build Agent".to_string(),
+                description: "Autonomous code editing, tool execution, and verified mutations"
+                    .to_string(),
+                mode: ConversationMode::Build,
+                shortcut: Some("Tab /build".to_string()),
+            },
+            AgentItem {
+                id: "review".to_string(),
+                name: "Review Agent".to_string(),
+                description: "Code review, security checks, and PR readiness verification"
+                    .to_string(),
+                mode: ConversationMode::Plan,
+                shortcut: Some("/review".to_string()),
+            },
+            AgentItem {
+                id: "compact".to_string(),
+                name: "Compact Agent".to_string(),
+                description: "Terse output, minimal tokens, low-latency execution".to_string(),
+                mode: ConversationMode::Build,
+                shortcut: Some("/compact".to_string()),
+            },
+        ]
+    }
+
+    pub fn filtered_items(&self) -> Vec<&AgentItem> {
+        if self.filter.is_empty() {
+            self.items.iter().collect()
+        } else {
+            let q = self.filter.to_lowercase();
+            self.items
+                .iter()
+                .filter(|a| {
+                    a.name.to_lowercase().contains(&q)
+                        || a.description.to_lowercase().contains(&q)
+                        || a.id.to_lowercase().contains(&q)
+                })
+                .collect()
+        }
+    }
+
+    pub fn selected_agent(&self) -> Option<&AgentItem> {
+        let filtered = self.filtered_items();
+        filtered.get(self.selected).copied()
+    }
+
+    pub fn next(&mut self) {
+        let count = self.filtered_items().len();
+        if count > 0 {
+            self.selected = (self.selected + 1) % count;
+        }
+    }
+
+    pub fn previous(&mut self) {
+        let count = self.filtered_items().len();
+        if count > 0 {
+            self.selected = if self.selected == 0 {
+                count - 1
+            } else {
+                self.selected - 1
+            };
+        }
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.filter.push(c);
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+
+    pub fn pop_char(&mut self) {
+        self.filter.pop();
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemesDialogState {
+    pub items: Vec<crate::tui::ThemeKind>,
+    pub selected: usize,
+    pub filter: String,
+    pub scroll_offset: usize,
+}
+
+impl ThemesDialogState {
+    pub fn new(active_theme: crate::tui::ThemeKind) -> Self {
+        let items = crate::tui::ThemeKind::ALL.to_vec();
+        let selected = items.iter().position(|t| *t == active_theme).unwrap_or(0);
+        Self {
+            items,
+            selected,
+            filter: String::new(),
+            scroll_offset: 0,
+        }
+    }
+
+    pub fn filtered_items(&self) -> Vec<crate::tui::ThemeKind> {
+        if self.filter.is_empty() {
+            self.items.clone()
+        } else {
+            let q = self.filter.to_lowercase();
+            self.items
+                .iter()
+                .filter(|t| {
+                    t.name().to_lowercase().contains(&q)
+                        || t.description().to_lowercase().contains(&q)
+                        || t.id().to_lowercase().contains(&q)
+                })
+                .copied()
+                .collect()
+        }
+    }
+
+    pub fn selected_theme(&self) -> Option<crate::tui::ThemeKind> {
+        let filtered = self.filtered_items();
+        filtered.get(self.selected).copied()
+    }
+
+    pub fn next(&mut self) {
+        let count = self.filtered_items().len();
+        if count > 0 {
+            self.selected = (self.selected + 1) % count;
+        }
+    }
+
+    pub fn previous(&mut self) {
+        let count = self.filtered_items().len();
+        if count > 0 {
+            self.selected = if self.selected == 0 {
+                count - 1
+            } else {
+                self.selected - 1
+            };
+        }
+    }
+
+    pub fn push_char(&mut self, c: char) {
+        self.filter.push(c);
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+
+    pub fn pop_char(&mut self) {
+        self.filter.pop();
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusDialogState {
+    pub mode: String,
+    pub provider: String,
+    pub model: String,
+    pub theme: String,
+    pub branch: String,
+    pub cwd: String,
+    pub transcript_bytes: usize,
+    pub status: String,
+}
+
+impl StatusDialogState {
+    pub fn new(
+        mode: &str,
+        provider: &str,
+        model: &str,
+        theme: &str,
+        branch: &str,
+        cwd: &str,
+    ) -> Self {
+        Self {
+            mode: mode.to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            theme: theme.to_string(),
+            branch: branch.to_string(),
+            cwd: cwd.to_string(),
+            transcript_bytes: 0,
+            status: String::new(),
+        }
+    }
+
+    pub fn with_details(mut self, transcript_bytes: usize, status: &str) -> Self {
+        self.transcript_bytes = transcript_bytes;
+        self.status = status.to_string();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WhichKeyState {
+    pub visible: bool,
+}
+
+impl WhichKeyState {
+    pub fn new() -> Self {
+        Self { visible: false }
+    }
+
+    pub fn show(&mut self) {
+        self.visible = true;
+    }
+
+    pub fn hide(&mut self) {
+        self.visible = false;
+    }
+
+    pub fn toggle(&mut self) {
+        self.visible = !self.visible;
+    }
+}
+
+const PHASE_DURATIONS: [u32; 5] = [14, 7, 7, 7, 14];
+const PHASE_FRAMES: [usize; 5] = [0, 1, 0, 1, 0];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeState {
+    pub phase: u8,
+    pub tick_count: u32,
+}
+
+impl Default for HomeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HomeState {
+    pub fn new() -> Self {
+        Self {
+            phase: 0,
+            tick_count: 0,
+        }
+    }
+
+    pub fn tick(&mut self) {
+        self.tick_count += 1;
+        if self.tick_count >= PHASE_DURATIONS[self.phase as usize] {
+            self.tick_count = 0;
+            self.phase = (self.phase + 1) % (PHASE_DURATIONS.len() as u8);
+        }
+    }
+
+    pub fn frame(&self) -> usize {
+        PHASE_FRAMES[self.phase as usize]
+    }
+}
+
 pub struct App {
     running: bool,
     cancellation_pending: bool,
@@ -218,15 +549,35 @@ pub struct App {
     session_listings: Vec<crate::persistence::Session>,
     /// Active interactive model selection dialog, if opened.
     models_dialog: Option<ModelsDialogState>,
+    /// Active interactive agent mode selection dialog, if opened.
+    agents_dialog: Option<AgentsDialogState>,
+    /// Active interactive theme selection dialog, if opened.
+    themes_dialog: Option<ThemesDialogState>,
+    /// Active interactive system status dialog, if opened.
+    status_dialog: Option<StatusDialogState>,
+    /// Active theme color scheme.
+    theme: crate::tui::ThemeKind,
+    /// Quick keyboard shortcuts popup status.
+    which_key: WhichKeyState,
     /// Cached list of discovered models for suggestions and selection.
     available_models: Vec<crate::provider::ModelInfo>,
     /// Cached git branch of the workspace
     git_branch: Option<String>,
+    /// Animated mascot state for the home landing empty state.
+    home_state: HomeState,
+    /// Timestamp of last animation tick.
+    last_animation_tick: std::time::Instant,
     /// Optional runtime client wiring prompt submissions to generation
     /// threads. Inactive until a provider-backed runtime is attached.
     runtime: Option<RuntimeClient>,
     /// Live events from the runtime for the active session.
     runtime_events: Option<std::sync::mpsc::Receiver<RuntimeEvent>>,
+    /// Submitted prompt history for Up/Down arrow recall in the input card.
+    prompt_history: Vec<String>,
+    /// Active index into prompt history during navigation (None = typing new prompt).
+    history_index: Option<usize>,
+    /// Saved draft when user was typing and started navigating history with Up arrow.
+    draft_prompt: String,
 }
 
 /// View state isolated per session: switching sessions must not reset the
@@ -252,7 +603,8 @@ impl App {
     pub fn new() -> Self {
         let config = crate::config::ConfigLoader.load().unwrap_or_default();
         let (initial_p, initial_m) = config.initial_provider_and_model();
-        let mut command_service = cli::runtime_service_with_config(&config).expect("in-memory runtime database");
+        let mut command_service =
+            cli::runtime_service_with_config(&config).expect("in-memory runtime database");
         let available_models = command_service.models().unwrap_or_default();
         Self {
             running: true,
@@ -272,10 +624,20 @@ impl App {
             sessions: std::collections::HashMap::new(),
             session_listings: Vec::new(),
             models_dialog: None,
+            agents_dialog: None,
+            themes_dialog: None,
+            status_dialog: None,
+            theme: crate::tui::ThemeKind::default(),
+            which_key: WhichKeyState::default(),
             available_models,
             git_branch: crate::platform::get_current_branch(),
+            home_state: HomeState::new(),
+            last_animation_tick: std::time::Instant::now(),
             runtime: None,
             runtime_events: None,
+            prompt_history: Vec::new(),
+            history_index: None,
+            draft_prompt: String::new(),
         }
     }
 
@@ -283,6 +645,159 @@ impl App {
     pub const TRUNCATION_MARKER: &str = "[earlier transcript truncated]\n";
 
     pub fn apply(&mut self, event: UiEvent) {
+        if self.which_key.visible {
+            match event {
+                UiEvent::Input(Input::WhichKey)
+                | UiEvent::Input(Input::Quit)
+                | UiEvent::Input(Input::Cancel) => {
+                    self.which_key.hide();
+                }
+                UiEvent::Input(Input::Character('a')) => {
+                    self.which_key.hide();
+                    let current = match self.mode {
+                        ConversationMode::Plan => "plan",
+                        ConversationMode::Build => "build",
+                    };
+                    self.agents_dialog = Some(AgentsDialogState::new(current));
+                }
+                UiEvent::Input(Input::Character('t')) => {
+                    self.which_key.hide();
+                    self.themes_dialog = Some(ThemesDialogState::new(self.theme));
+                }
+                UiEvent::Input(Input::Character('m')) => {
+                    self.which_key.hide();
+                    let models = self.available_models.clone();
+                    self.models_dialog = Some(ModelsDialogState::new(models, &self.model));
+                }
+                UiEvent::Input(Input::Character('p')) => {
+                    self.which_key.hide();
+                    self.set_mode(ConversationMode::Plan);
+                }
+                UiEvent::Input(Input::Character('b')) => {
+                    self.which_key.hide();
+                    self.set_mode(ConversationMode::Build);
+                }
+                UiEvent::Input(Input::Character('s')) => {
+                    self.which_key.hide();
+                    self.open_status_dialog();
+                }
+                UiEvent::Input(Input::Character('c')) => {
+                    self.which_key.hide();
+                    self.transcript.clear();
+                    self.status = ConversationStatus::Idle;
+                    self.diagnostic = "screen cleared".to_string();
+                }
+                UiEvent::Input(Input::ToggleMode) => {
+                    self.which_key.hide();
+                    self.toggle_mode();
+                }
+                _ => {
+                    self.which_key.hide();
+                }
+            }
+            return;
+        }
+
+        if self.agents_dialog.is_some() {
+            match event {
+                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
+                    self.agents_dialog = None;
+                }
+                UiEvent::Input(Input::Character(character)) => {
+                    if let Some(dialog) = &mut self.agents_dialog {
+                        dialog.push_char(character);
+                    }
+                }
+                UiEvent::Input(Input::Backspace) => {
+                    if let Some(dialog) = &mut self.agents_dialog {
+                        dialog.pop_char();
+                    }
+                }
+                UiEvent::Input(Input::Up) => {
+                    if let Some(dialog) = &mut self.agents_dialog {
+                        dialog.previous();
+                    }
+                }
+                UiEvent::Input(Input::Down) => {
+                    if let Some(dialog) = &mut self.agents_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Input(Input::Submit) => {
+                    let chosen_agent = self
+                        .agents_dialog
+                        .as_ref()
+                        .and_then(|d| d.selected_agent().cloned());
+                    self.agents_dialog = None;
+                    if let Some(chosen) = chosen_agent {
+                        self.set_mode(chosen.mode);
+                        self.diagnostic = format!("agent selected: {}", chosen.name);
+                    }
+                }
+                UiEvent::Input(Input::ToggleMode) => {
+                    if let Some(dialog) = &mut self.agents_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Resize { .. } => {}
+                UiEvent::StreamDelta(delta) => {
+                    self.transcript.push_str(&delta);
+                    self.truncate_transcript();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.themes_dialog.is_some() {
+            match event {
+                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
+                    self.themes_dialog = None;
+                }
+                UiEvent::Input(Input::Character(character)) => {
+                    if let Some(dialog) = &mut self.themes_dialog {
+                        dialog.push_char(character);
+                    }
+                }
+                UiEvent::Input(Input::Backspace) => {
+                    if let Some(dialog) = &mut self.themes_dialog {
+                        dialog.pop_char();
+                    }
+                }
+                UiEvent::Input(Input::Up) => {
+                    if let Some(dialog) = &mut self.themes_dialog {
+                        dialog.previous();
+                    }
+                }
+                UiEvent::Input(Input::Down) => {
+                    if let Some(dialog) = &mut self.themes_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Input(Input::Submit) => {
+                    if let Some(dialog) = &self.themes_dialog
+                        && let Some(chosen) = dialog.selected_theme()
+                    {
+                        self.theme = chosen;
+                        self.diagnostic = format!("theme switched to: {}", chosen.name());
+                    }
+                    self.themes_dialog = None;
+                }
+                UiEvent::Input(Input::ToggleMode) => {
+                    if let Some(dialog) = &mut self.themes_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Resize { .. } => {}
+                UiEvent::StreamDelta(delta) => {
+                    self.transcript.push_str(&delta);
+                    self.truncate_transcript();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.models_dialog.is_some() {
             match event {
                 UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
@@ -309,12 +824,12 @@ impl App {
                     }
                 }
                 UiEvent::Input(Input::Submit) => {
-                    if let Some(dialog) = &self.models_dialog {
-                        if let Some(chosen) = dialog.selected_model() {
-                            let chosen_id = chosen.id.clone();
-                            self.model = bounded(chosen_id.clone(), MAX_IDENTITY_BYTES);
-                            self.diagnostic = format!("model switched to: {chosen_id}");
-                        }
+                    if let Some(dialog) = &self.models_dialog
+                        && let Some(chosen) = dialog.selected_model()
+                    {
+                        let chosen_id = chosen.id.clone();
+                        self.model = bounded(chosen_id.clone(), MAX_IDENTITY_BYTES);
+                        self.diagnostic = format!("model switched to: {chosen_id}");
                     }
                     self.models_dialog = None;
                 }
@@ -328,6 +843,25 @@ impl App {
                     self.transcript.push_str(&delta);
                     self.truncate_transcript();
                 }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.status_dialog.is_some() {
+            match event {
+                UiEvent::Input(Input::Quit)
+                | UiEvent::Input(Input::Cancel)
+                | UiEvent::Input(Input::Submit)
+                | UiEvent::Input(Input::Clear) => {
+                    self.status_dialog = None;
+                }
+                UiEvent::Resize { .. } => {}
+                UiEvent::StreamDelta(delta) => {
+                    self.transcript.push_str(&delta);
+                    self.truncate_transcript();
+                }
+                _ => {}
             }
             return;
         }
@@ -341,21 +875,39 @@ impl App {
                 }
             }
             UiEvent::Input(Input::Cancel) => self.cancellation_pending = true,
+            UiEvent::Input(Input::Clear) => {
+                self.transcript.clear();
+                self.status = ConversationStatus::Idle;
+                self.diagnostic = "screen cleared".to_string();
+            }
             UiEvent::Input(Input::Character(character)) => {
+                self.history_index = None;
                 self.prompt.push(character);
                 self.selected_suggestion = 0;
             }
             UiEvent::Input(Input::Backspace) => {
+                self.history_index = None;
                 self.prompt.pop();
                 self.selected_suggestion = 0;
             }
             UiEvent::Input(Input::Up) => {
-                self.previous_suggestion();
+                if self.suggestion_count() > 0 {
+                    self.previous_suggestion();
+                } else {
+                    self.navigate_history_up();
+                }
             }
             UiEvent::Input(Input::Down) => {
-                self.next_suggestion();
+                if self.suggestion_count() > 0 {
+                    self.next_suggestion();
+                } else {
+                    self.navigate_history_down();
+                }
             }
             UiEvent::Input(Input::Submit) => self.submit_prompt(),
+            UiEvent::Input(Input::WhichKey) => {
+                self.which_key.toggle();
+            }
             UiEvent::Input(Input::ToggleMode) => {
                 if !self.matching_suggestions().is_empty() || self.prompt.starts_with("/model ") {
                     self.autocomplete_selected_command();
@@ -383,7 +935,11 @@ impl App {
 
         let quitting = event == UiEvent::Input(Input::Quit)
             && self.session_listings.is_empty()
-            && self.models_dialog.is_none();
+            && self.models_dialog.is_none()
+            && self.agents_dialog.is_none()
+            && self.themes_dialog.is_none()
+            && self.status_dialog.is_none()
+            && !self.which_key.visible;
         self.apply(event);
         if quitting {
             events.clear();
@@ -552,6 +1108,32 @@ impl App {
         self.git_branch = branch;
     }
 
+    pub fn home_state(&self) -> &HomeState {
+        &self.home_state
+    }
+
+    pub fn home_state_mut(&mut self) -> &mut HomeState {
+        &mut self.home_state
+    }
+
+    /// Advances periodic UI animations (such as the mascot blinking).
+    /// Returns true if a visual frame changed and redraw is needed.
+    pub fn tick(&mut self) -> bool {
+        const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        if self.last_animation_tick.elapsed() >= ANIMATION_INTERVAL {
+            self.last_animation_tick = std::time::Instant::now();
+            if self.transcript.is_empty() {
+                let old_frame = self.home_state.frame();
+                self.home_state.tick();
+                return old_frame != self.home_state.frame();
+            }
+            if matches!(self.status, ConversationStatus::Active) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn placeholder(&self) -> &str {
         &self.placeholder
     }
@@ -604,6 +1186,79 @@ impl App {
         self.models_dialog.as_mut()
     }
 
+    pub fn agents_dialog(&self) -> Option<&AgentsDialogState> {
+        self.agents_dialog.as_ref()
+    }
+
+    pub fn agents_dialog_mut(&mut self) -> Option<&mut AgentsDialogState> {
+        self.agents_dialog.as_mut()
+    }
+
+    pub fn themes_dialog(&self) -> Option<&ThemesDialogState> {
+        self.themes_dialog.as_ref()
+    }
+
+    pub fn themes_dialog_mut(&mut self) -> Option<&mut ThemesDialogState> {
+        self.themes_dialog.as_mut()
+    }
+
+    pub fn status_dialog(&self) -> Option<&StatusDialogState> {
+        self.status_dialog.as_ref()
+    }
+
+    pub fn status_dialog_mut(&mut self) -> Option<&mut StatusDialogState> {
+        self.status_dialog.as_mut()
+    }
+
+    pub fn open_status_dialog(&mut self) {
+        let mode = match self.mode {
+            ConversationMode::Plan => "Plan (Read-only)",
+            ConversationMode::Build => "Build (Edits enabled)",
+        };
+        let branch = self.git_branch.clone().unwrap_or_else(|| {
+            crate::platform::get_current_branch().unwrap_or_else(|| "detached".into())
+        });
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".into());
+        let status_str = match self.status {
+            ConversationStatus::Idle => "Idle",
+            ConversationStatus::Active => "Active (Generating)",
+            ConversationStatus::Finished(_) => "Finished",
+            ConversationStatus::Cancelled => "Cancelled",
+            ConversationStatus::Rejected => "Rejected",
+            ConversationStatus::Error => "Error",
+        };
+        self.status_dialog = Some(
+            StatusDialogState::new(
+                mode,
+                &self.provider,
+                &self.model,
+                self.theme.name(),
+                &branch,
+                &cwd,
+            )
+            .with_details(self.transcript.len(), status_str),
+        );
+        self.diagnostic = "System status".to_string();
+    }
+
+    pub fn theme(&self) -> crate::tui::ThemeKind {
+        self.theme
+    }
+
+    pub fn set_theme(&mut self, theme: crate::tui::ThemeKind) {
+        self.theme = theme;
+    }
+
+    pub fn which_key(&self) -> &WhichKeyState {
+        &self.which_key
+    }
+
+    pub fn which_key_mut(&mut self) -> &mut WhichKeyState {
+        &mut self.which_key
+    }
+
     pub fn available_models(&self) -> &[crate::provider::ModelInfo] {
         &self.available_models
     }
@@ -646,6 +1301,44 @@ impl App {
         }
     }
 
+    pub fn prompt_history(&self) -> &[String] {
+        &self.prompt_history
+    }
+
+    pub fn navigate_history_up(&mut self) {
+        if self.prompt_history.is_empty() {
+            return;
+        }
+        match self.history_index {
+            None => {
+                self.draft_prompt = self.prompt.clone();
+                let last_idx = self.prompt_history.len() - 1;
+                self.history_index = Some(last_idx);
+                self.prompt = self.prompt_history[last_idx].clone();
+            }
+            Some(idx) => {
+                if idx > 0 {
+                    let next_idx = idx - 1;
+                    self.history_index = Some(next_idx);
+                    self.prompt = self.prompt_history[next_idx].clone();
+                }
+            }
+        }
+    }
+
+    pub fn navigate_history_down(&mut self) {
+        if let Some(idx) = self.history_index {
+            if idx + 1 < self.prompt_history.len() {
+                let next_idx = idx + 1;
+                self.history_index = Some(next_idx);
+                self.prompt = self.prompt_history[next_idx].clone();
+            } else {
+                self.history_index = None;
+                self.prompt = std::mem::take(&mut self.draft_prompt);
+            }
+        }
+    }
+
     pub fn autocomplete_selected_command(&mut self) -> bool {
         if self.prompt.starts_with("/model ") {
             let model_suggestions = self.matching_model_suggestions();
@@ -679,20 +1372,94 @@ impl App {
         if trimmed.is_empty() {
             return;
         }
+        if self.prompt_history.last().map(|s| s.as_str()) != Some(trimmed) {
+            self.prompt_history.push(trimmed.to_string());
+            if self.prompt_history.len() > 100 {
+                self.prompt_history.remove(0);
+            }
+        }
+        self.history_index = None;
+        self.draft_prompt.clear();
         self.rotate_placeholder();
 
         if trimmed.starts_with('/') {
-            if trimmed.starts_with("/model ") {
-                let arg = trimmed[7..].trim();
+            if trimmed == "/agents" {
+                let current_agent = match self.mode {
+                    ConversationMode::Plan => "plan",
+                    ConversationMode::Build => "build",
+                };
+                self.agents_dialog = Some(AgentsDialogState::new(current_agent));
+                self.diagnostic = "Select agent mode".to_string();
+                return;
+            }
+            if trimmed == "/themes" {
+                self.themes_dialog = Some(ThemesDialogState::new(self.theme));
+                self.diagnostic = "Select theme".to_string();
+                return;
+            }
+            if let Some(stripped) = trimmed.strip_prefix("/theme ") {
+                let name = stripped.trim();
+                if let Some(kind) = crate::tui::ThemeKind::from_name(name) {
+                    self.theme = kind;
+                    self.diagnostic = format!("theme switched to: {}", kind.name());
+                } else {
+                    self.diagnostic = format!("unknown theme: {name} (run /themes to list)");
+                }
+                return;
+            }
+            if trimmed == "/keys" {
+                self.which_key.show();
+                self.diagnostic = "Shortcuts cheatsheet (Ctrl+X or Esc to dismiss)".to_string();
+                return;
+            }
+            if trimmed == "/status" {
+                self.open_status_dialog();
+                return;
+            }
+            if trimmed == "/clear" || trimmed == "/home" {
+                self.transcript.clear();
+                self.status = ConversationStatus::Idle;
+                self.diagnostic = "screen cleared".to_string();
+                return;
+            }
+            if trimmed == "/compact" {
+                if self.transcript.len() > 1024 {
+                    let keep_bytes = 1024.min(self.transcript.len());
+                    let split_idx = self.transcript.len() - keep_bytes;
+                    let mut boundary = split_idx;
+                    while boundary < self.transcript.len()
+                        && !self.transcript.is_char_boundary(boundary)
+                    {
+                        boundary += 1;
+                    }
+                    let tail = self.transcript[boundary..].to_string();
+                    self.transcript = format!("[earlier transcript compacted]\n{tail}");
+                    self.diagnostic = "session context compacted".to_string();
+                } else {
+                    self.diagnostic = "transcript is already compact".to_string();
+                }
+                return;
+            }
+            if trimmed == "/copy" {
+                if !self.transcript.is_empty() {
+                    self.diagnostic =
+                        format!("transcript copied ({} bytes)", self.transcript.len());
+                } else {
+                    self.diagnostic = format!("copied status: {} ({})", self.model, self.provider);
+                }
+                return;
+            }
+            if let Some(stripped) = trimmed.strip_prefix("/model ") {
+                let arg = stripped.trim();
                 if arg.is_empty() {
                     let model_suggestions = self.matching_model_suggestions();
-                    if let Some(first) = model_suggestions.get(self.selected_suggestion) {
-                        if was_suggestion_focused {
-                            let chosen = first.clone();
-                            self.model = bounded(chosen.clone(), MAX_IDENTITY_BYTES);
-                            self.diagnostic = format!("model switched to: {chosen}");
-                            return;
-                        }
+                    if let Some(first) = model_suggestions.get(self.selected_suggestion)
+                        && was_suggestion_focused
+                    {
+                        let chosen = first.clone();
+                        self.model = bounded(chosen.clone(), MAX_IDENTITY_BYTES);
+                        self.diagnostic = format!("model switched to: {chosen}");
+                        return;
                     }
                 }
             }
@@ -809,11 +1576,13 @@ impl App {
     /// Drain pending runtime events into the live transcript view.
     /// Unbounded growth is impossible: the bus prunes closed/full receivers,
     /// and this drains to exhaustion each call.
-    pub fn poll_runtime(&mut self) {
+    pub fn poll_runtime(&mut self) -> bool {
         let Some(receiver) = self.runtime_events.take() else {
-            return;
+            return false;
         };
+        let mut had_events = false;
         while let Ok(event) = receiver.try_recv() {
+            had_events = true;
             match event.kind.as_str() {
                 "text_delta" => {
                     if let Ok(payload) =
@@ -851,6 +1620,7 @@ impl App {
             }
         }
         self.runtime_events = Some(receiver);
+        had_events
     }
 
     pub fn active_session_id(&self) -> Option<i64> {
@@ -957,6 +1727,13 @@ impl App {
         let client = RuntimeClient::spawn(db, writer, provider, bus);
         self.runtime_events = Some(receiver);
         self.runtime = Some(client);
+    }
+
+    pub fn set_command_service(
+        &mut self,
+        service: crate::cli::CommandService<crate::cli::CliDiscovery>,
+    ) {
+        self.command_service = service;
     }
 
     pub fn transcript(&self) -> &str {

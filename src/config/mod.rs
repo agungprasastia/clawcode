@@ -126,7 +126,11 @@ impl Config {
                     return (p.clone(), rest.to_string());
                 }
             }
-            if let Some((p, _)) = self.providers.iter().find(|(_, cfg)| cfg.models.contains_key(m)) {
+            if let Some((p, _)) = self
+                .providers
+                .iter()
+                .find(|(_, cfg)| cfg.models.contains_key(m))
+            {
                 return (p.clone(), m.clone());
             }
             if self.providers.len() == 1 {

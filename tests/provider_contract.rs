@@ -6,11 +6,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 fn request() -> StreamRequest {
-    StreamRequest {
-        model: "test-model".into(),
-        prompt: "hello".into(),
-        max_output_tokens: 256,
-    }
+    StreamRequest::new("test-model", "hello", 256)
 }
 
 #[test]

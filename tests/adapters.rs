@@ -4,11 +4,7 @@ use clawcode::adapters::{
 use clawcode::provider::{Provider, StreamRequest};
 
 fn request() -> StreamRequest {
-    StreamRequest {
-        model: "mock".into(),
-        prompt: "hello".into(),
-        max_output_tokens: 32,
-    }
+    StreamRequest::new("mock", "hello", 32)
 }
 
 #[test]
@@ -45,4 +41,44 @@ fn provider_errors_are_not_silenced() {
         MockTransport("data: {\"error\":\"quota\"}".into()),
     );
     assert!(provider.send(&request()).is_err());
+}
+
+#[test]
+fn openai_compatible_streams_sse_deltas() {
+    let provider = OpenAiCompatible::new(
+        "openai",
+        "https://example.test/v1/chat/completions",
+        MockTransport("data: {\"choices\":[{\"delta\":{\"content\":\"streamed \"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\"response\"}}]}\ndata: [DONE]".into()),
+    );
+    let mut stream = provider.stream(&request()).expect("stream start");
+    let mut tokens = String::new();
+    for event in &mut stream {
+        if let clawcode::provider::StreamEvent::TextDelta(delta) = event {
+            tokens.push_str(&delta);
+        }
+    }
+    assert_eq!(tokens, "streamed response");
+}
+
+#[test]
+fn configured_router_resolves_and_discovers_models() {
+    let mut config = clawcode::config::Config::default();
+    let mut custom = clawcode::config::CustomProviderConfig {
+        name: Some("9router".into()),
+        base_url: Some("http://127.0.0.1:20128/v1".into()),
+        api_key: Some("test-key".into()),
+        npm: Some("@ai-sdk/openai-compatible".into()),
+        models: std::collections::BTreeMap::new(),
+    };
+    custom.models.insert(
+        "ag/gemini-3.8-flash-high".into(),
+        clawcode::config::CustomModelConfig {
+            name: Some("Gemini 3.8 Flash High".into()),
+            ..Default::default()
+        },
+    );
+    config.providers.insert("9router".into(), custom);
+    let router = clawcode::adapters::ConfiguredRouter::new(config);
+    let models = router.models();
+    assert!(models.iter().any(|m| m.id == "9router/ag/gemini-3.8-flash-high"));
 }

@@ -5,12 +5,47 @@ use super::events::{FinishReason, StreamEvent, Usage};
 use std::fmt;
 use std::time::Duration;
 
+/// A single message in a chat conversation.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
 /// A streaming completion request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamRequest {
     pub model: String,
     pub prompt: String,
     pub max_output_tokens: u32,
+    pub messages: Vec<ChatMessage>,
+    pub provider: Option<String>,
+}
+
+impl StreamRequest {
+    pub fn new(model: impl Into<String>, prompt: impl Into<String>, max_output_tokens: u32) -> Self {
+        let p = prompt.into();
+        Self {
+            model: model.into(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: p.clone(),
+            }],
+            prompt: p,
+            max_output_tokens,
+            provider: None,
+        }
+    }
+
+    pub fn with_messages(mut self, messages: Vec<ChatMessage>) -> Self {
+        self.messages = messages;
+        self
+    }
+
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
 }
 
 /// The full event stream for one request, in order.
@@ -88,4 +123,14 @@ pub trait Provider: fmt::Debug {
     fn capabilities(&self) -> ProviderCapabilities;
     fn models(&self) -> Vec<super::registry::ModelInfo>;
     fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError>;
+
+    fn stream(&self, request: &StreamRequest) -> Result<super::stream::ProviderStream, ProviderError> {
+        let response = self.send(request)?;
+        let (sender, stream) = super::stream::ProviderStream::channel(response.events.len().max(1));
+        for event in response.events {
+            let _ = sender.send(event);
+        }
+        let _ = sender.flush();
+        Ok(stream)
+    }
 }

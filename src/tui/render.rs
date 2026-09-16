@@ -13,6 +13,7 @@ use ratatui::{
 use crate::persistence::SessionStatus;
 
 use super::App;
+use super::theme::{Theme, darken_color};
 
 const LOGO: [&str; 6] = [
     " ██████╗██╗      █████╗ ██╗    ██╗ ██████╗ ██████╗ ██████╗ ███████╗",
@@ -23,38 +24,13 @@ const LOGO: [&str; 6] = [
     " ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝  ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
 ];
 
-struct Theme {
-    bg_element: Color,
-    ink: Color,
-    quiet: Color,
-    dim: Color,
-    amber: Color,
-    teal: Color,
-    panel: Color,
-    success: Color,
-    error: Color,
-    warning: Color,
-}
-
-impl Theme {
-    const fn new() -> Self {
-        Self {
-            bg_element: Color::Rgb(24, 28, 30),
-            ink: Color::Rgb(240, 238, 233),
-            quiet: Color::Rgb(140, 148, 144),
-            dim: Color::Rgb(85, 95, 92),
-            amber: Color::Rgb(232, 181, 84),
-            teal: Color::Rgb(102, 190, 174),
-            panel: Color::Rgb(48, 56, 60),
-            success: Color::Rgb(74, 222, 128),
-            error: Color::Rgb(248, 113, 113),
-            warning: Color::Rgb(251, 191, 36),
-        }
-    }
-}
+const MASCOT_FRAMES: [[&str; 3]; 2] = [
+    ["   ▃▃▛████▜▃▃", "█▟▟▜████████▛▙▙█", "   ▞ ▘    ▝ ▚"],
+    ["   ▃▃▛████▜▃▃", "█▙▟▜████████▛▙▟█", "   ▞ ▘    ▝ ▚"],
+];
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
-    let theme = Theme::new();
+    let theme = app.theme().to_theme();
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -81,7 +57,15 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
     render_status_bar(frame, status_bar_area, app, &theme);
 
-    if let Some(dialog) = app.models_dialog() {
+    if app.which_key().visible {
+        render_which_key(frame, area, &theme);
+    } else if let Some(dialog) = app.status_dialog() {
+        render_status_dialog(frame, area, dialog, &theme);
+    } else if let Some(dialog) = app.agents_dialog() {
+        render_agents_dialog(frame, area, dialog, app.mode(), &theme);
+    } else if let Some(dialog) = app.themes_dialog() {
+        render_themes_dialog(frame, area, dialog, app.theme(), &theme);
+    } else if let Some(dialog) = app.models_dialog() {
         render_models_dialog(frame, area, dialog, app.selected_model(), &theme);
     } else if !app.session_listings().is_empty() {
         render_sessions_panel(frame, area, app, &theme);
@@ -187,10 +171,10 @@ fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
     let input_area = home_chunks[1];
     let hints_area = home_chunks[2];
 
-    let show_big_logo = top_canvas.height >= 13 && area.width >= 70;
-    let show_cards = top_canvas.height >= 16 && area.width >= 70;
+    let show_big_logo = top_canvas.height >= 11 && area.width >= 70;
+    let show_cards = top_canvas.height >= 15 && area.width >= 70;
 
-    let hero_height = if show_big_logo { 8 } else { 3 };
+    let hero_height = if show_big_logo { 10 } else { 3 };
     let cards_height = if show_cards { 4 } else { 0 };
     let gap_height = if show_cards { 1 } else { 0 };
     let content_height = hero_height + gap_height + cards_height;
@@ -234,7 +218,13 @@ fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
     let centered_x = h_chunks[1].x;
     let centered_w = h_chunks[1].width;
 
-    render_hero(frame, hero_area, show_big_logo, theme);
+    render_hero(
+        frame,
+        hero_area,
+        show_big_logo,
+        app.home_state().frame(),
+        theme,
+    );
     if show_cards {
         let centered_cards = Rect {
             x: centered_x,
@@ -293,6 +283,8 @@ fn render_compact_home(
         ),
         Span::raw(" "),
         Span::styled(status_label(app), Style::default().fg(theme.quiet)),
+        Span::raw(" "),
+        Span::styled("clawcode v0.1.0", Style::default().fg(theme.dim)),
     ]);
     frame.render_widget(Paragraph::new(brand_line), chunks[0]);
 
@@ -301,22 +293,49 @@ fn render_compact_home(
     render_hints_row(frame, chunks[3], app, theme);
 }
 
-fn render_hero(frame: &mut Frame<'_>, area: Rect, show_big_logo: bool, theme: &Theme) {
+fn render_hero(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    show_big_logo: bool,
+    mascot_frame: usize,
+    theme: &Theme,
+) {
     if show_big_logo {
         let hero_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(3),
                 Constraint::Length(6),
-                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(area);
+
+        let mascot = MASCOT_FRAMES[mascot_frame % 2];
+        let mascot_lines: Vec<Line> = mascot
+            .iter()
+            .map(|l| {
+                Line::from(Span::styled(
+                    *l,
+                    Style::default()
+                        .fg(theme.amber)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            })
+            .collect();
+        frame.render_widget(
+            Paragraph::new(mascot_lines).alignment(Alignment::Center),
+            hero_chunks[0],
+        );
 
         let logo_lines: Vec<Line> = LOGO
             .iter()
             .enumerate()
             .map(|(i, l)| {
-                let color = if i == 5 { theme.quiet } else { theme.amber };
+                let color = if i == 5 {
+                    darken_color(theme.amber, 0.7)
+                } else {
+                    theme.amber
+                };
                 Line::from(Span::styled(
                     *l,
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -325,7 +344,7 @@ fn render_hero(frame: &mut Frame<'_>, area: Rect, show_big_logo: bool, theme: &T
             .collect();
         frame.render_widget(
             Paragraph::new(logo_lines).alignment(Alignment::Center),
-            hero_chunks[0],
+            hero_chunks[1],
         );
 
         let subtitle = Line::from(vec![
@@ -341,14 +360,21 @@ fn render_hero(frame: &mut Frame<'_>, area: Rect, show_big_logo: bool, theme: &T
                 Style::default().fg(theme.quiet),
             ),
             Span::styled("  ·  ", Style::default().fg(theme.panel)),
-            Span::styled("v0.1.0", Style::default().fg(theme.dim)),
+            Span::styled("clawcode v0.1.0", Style::default().fg(theme.dim)),
         ]);
         frame.render_widget(
             Paragraph::new(subtitle).alignment(Alignment::Center),
             hero_chunks[2],
         );
     } else {
+        let mascot = MASCOT_FRAMES[mascot_frame % 2];
         let logo_lines = vec![
+            Line::from(Span::styled(
+                mascot[1],
+                Style::default()
+                    .fg(theme.amber)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::from(vec![
                 Span::styled(
                     " CLAWCODE ",
@@ -360,11 +386,8 @@ fn render_hero(frame: &mut Frame<'_>, area: Rect, show_big_logo: bool, theme: &T
                     "· AUTONOMOUS AGENT WORKBENCH",
                     Style::default().fg(theme.quiet),
                 ),
+                Span::styled(" · clawcode v0.1.0", Style::default().fg(theme.dim)),
             ]),
-            Line::from(Span::styled(
-                "Local architecture & verified execution",
-                Style::default().fg(theme.dim),
-            )),
         ];
         frame.render_widget(
             Paragraph::new(logo_lines).alignment(Alignment::Center),
@@ -1142,19 +1165,25 @@ fn render_model_suggestions_popup(
             let active_dot = if is_active { "● " } else { "  " };
 
             let cursor_style = if is_selected {
-                Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.amber)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
 
             let dot_style = if is_active {
-                Style::default().fg(theme.success).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.dim)
             };
 
             let name_style = if is_selected {
-                Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.amber)
+                    .add_modifier(Modifier::BOLD)
             } else if is_active {
                 Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)
             } else {
@@ -1202,7 +1231,7 @@ fn render_models_dialog(
     active_model: &str,
     theme: &Theme,
 ) {
-    let width = area.width.min(74).max(36);
+    let width = area.width.clamp(36, 74);
     let filtered = dialog.filtered_items();
     let max_items_visible = 12.min(area.height.saturating_sub(8) as usize).max(3);
     let visible_items_count = filtered.len().min(max_items_visible).max(1);
@@ -1232,7 +1261,9 @@ fn render_models_dialog(
         .style(Style::default().bg(theme.panel))
         .title(Span::styled(
             title_text,
-            Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
         ));
     frame.render_widget(block, dialog_area);
 
@@ -1263,13 +1294,23 @@ fn render_models_dialog(
             Span::styled("Search: ", Style::default().fg(theme.dim)),
             Span::styled(
                 "type to filter...",
-                Style::default().fg(theme.quiet).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(theme.quiet)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ])
     } else {
         Line::from(vec![
-            Span::styled("Search: ", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
-            Span::styled(&dialog.filter, Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Search: ",
+                Style::default()
+                    .fg(theme.amber)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &dialog.filter,
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(theme.amber)),
         ])
     };
@@ -1295,7 +1336,9 @@ fn render_models_dialog(
     let item_lines: Vec<Line> = if filtered.is_empty() {
         vec![Line::from(Span::styled(
             format!("  No models matching \"{}\"", dialog.filter),
-            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
         ))]
     } else {
         filtered
@@ -1312,19 +1355,25 @@ fn render_models_dialog(
                 let active_dot = if is_active { "● " } else { "  " };
 
                 let cursor_style = if is_selected {
-                    Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.amber)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
 
                 let dot_style = if is_active {
-                    Style::default().fg(theme.success).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.dim)
                 };
 
                 let name_style = if is_selected {
-                    Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.amber)
+                        .add_modifier(Modifier::BOLD)
                 } else if is_active {
                     Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)
                 } else {
@@ -1348,7 +1397,9 @@ fn render_models_dialog(
                 };
 
                 let badge_style = if is_active {
-                    Style::default().fg(theme.success).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.quiet)
                 };
@@ -1358,7 +1409,8 @@ fn render_models_dialog(
                 let badge_len = badge.len();
                 let available_for_name = row_width.saturating_sub(prefix_len + badge_len + 2);
 
-                let display_name = if model.id.len() > available_for_name && available_for_name > 4 {
+                let display_name = if model.id.len() > available_for_name && available_for_name > 4
+                {
                     format!("{}…", &model.id[..available_for_name - 1])
                 } else {
                     model.id.clone()
@@ -1394,14 +1446,746 @@ fn render_models_dialog(
     );
 
     let footer_line = Line::from(vec![
-        Span::styled("↑/↓ ", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "↑/↓ ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("navigate  ", Style::default().fg(theme.dim)),
-        Span::styled("Enter ", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Enter ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("select  ", Style::default().fg(theme.dim)),
-        Span::styled("Esc ", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Esc ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("close  ", Style::default().fg(theme.dim)),
-        Span::styled("Type ", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Type ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("filter", Style::default().fg(theme.dim)),
+    ]);
+    frame.render_widget(Paragraph::new(footer_line), chunks[4]);
+}
+
+fn render_agents_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &super::app::AgentsDialogState,
+    active_mode: super::ConversationMode,
+    theme: &Theme,
+) {
+    let width = area.width.clamp(36, 74);
+    let filtered = dialog.filtered_items();
+    let max_items_visible = 8.min(area.height.saturating_sub(8) as usize).max(2);
+    let visible_items_count = filtered.len().min(max_items_visible).max(1);
+    let height = (visible_items_count as u16 * 2 + 6).min(area.height.saturating_sub(2));
+
+    let dialog_area = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, dialog_area);
+
+    let total_count = dialog.items.len();
+    let filtered_count = filtered.len();
+    let title_text = if dialog.filter.is_empty() {
+        format!(" Select Agent Mode ({total_count}) ")
+    } else {
+        format!(" Select Agent Mode ({filtered_count}/{total_count}) ")
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.teal))
+        .style(Style::default().bg(theme.panel))
+        .title(Span::styled(
+            title_text,
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+        ));
+    frame.render_widget(block, dialog_area);
+
+    let inner = Rect {
+        x: dialog_area.x + 2,
+        y: dialog_area.y + 1,
+        width: dialog_area.width.saturating_sub(4),
+        height: dialog_area.height.saturating_sub(2),
+    };
+
+    if inner.width < 10 || inner.height < 4 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // search input
+            Constraint::Length(1), // top divider
+            Constraint::Min(1),    // items
+            Constraint::Length(1), // bottom divider
+            Constraint::Length(1), // footer hints
+        ])
+        .split(inner);
+
+    let search_line = if dialog.filter.is_empty() {
+        Line::from(vec![
+            Span::styled("Filter: ", Style::default().fg(theme.dim)),
+            Span::styled(
+                "type to filter agents...",
+                Style::default()
+                    .fg(theme.quiet)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                "Filter: ",
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &dialog.filter,
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(theme.teal)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(search_line), chunks[0]);
+
+    let divider_str = "─".repeat(chunks[1].width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            &divider_str,
+            Style::default().fg(theme.quiet),
+        ))),
+        chunks[1],
+    );
+
+    let selected_idx = dialog.selected;
+    let item_lines: Vec<Line> = if filtered.is_empty() {
+        vec![Line::from(Span::styled(
+            format!("  No agents matching \"{}\"", dialog.filter),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        ))]
+    } else {
+        let mut lines = Vec::new();
+        for (idx, agent) in filtered.iter().enumerate() {
+            let is_selected = idx == selected_idx;
+            let is_active = agent.mode == active_mode;
+
+            let cursor = if is_selected { " › " } else { "   " };
+            let active_dot = if is_active { "● " } else { "  " };
+
+            let cursor_style = if is_selected {
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+
+            let dot_style = if is_active {
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.dim)
+            };
+
+            let name_style = if is_selected {
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
+            } else if is_active {
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.ink)
+            };
+
+            let shortcut_badge = agent
+                .shortcut
+                .as_deref()
+                .map(|s| format!("[{s}]"))
+                .unwrap_or_default();
+
+            let row_width = chunks[2].width as usize;
+            let prefix_len = cursor.len() + active_dot.len();
+            let badge_len = shortcut_badge.len();
+            let available_for_name = row_width.saturating_sub(prefix_len + badge_len + 2);
+            let display_name = if agent.name.len() > available_for_name && available_for_name > 4 {
+                format!("{}…", &agent.name[..available_for_name - 1])
+            } else {
+                agent.name.clone()
+            };
+
+            let pad_len = row_width.saturating_sub(prefix_len + display_name.len() + badge_len);
+
+            let line_style = if is_selected {
+                Style::default().bg(theme.bg_element)
+            } else {
+                Style::default()
+            };
+
+            lines.push(
+                Line::from(vec![
+                    Span::styled(cursor, cursor_style),
+                    Span::styled(active_dot, dot_style),
+                    Span::styled(display_name, name_style),
+                    Span::raw(" ".repeat(pad_len)),
+                    Span::styled(shortcut_badge, Style::default().fg(theme.quiet)),
+                ])
+                .style(line_style),
+            );
+
+            // Description line
+            let desc_pad = "      ";
+            let avail_desc = row_width.saturating_sub(desc_pad.len());
+            let display_desc = if agent.description.len() > avail_desc && avail_desc > 4 {
+                format!("{}…", &agent.description[..avail_desc - 1])
+            } else {
+                agent.description.clone()
+            };
+
+            lines.push(
+                Line::from(vec![
+                    Span::raw(desc_pad),
+                    Span::styled(display_desc, Style::default().fg(theme.dim)),
+                ])
+                .style(line_style),
+            );
+        }
+        lines
+    };
+    frame.render_widget(Paragraph::new(item_lines), chunks[2]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            &divider_str,
+            Style::default().fg(theme.quiet),
+        ))),
+        chunks[3],
+    );
+
+    let footer_line = Line::from(vec![
+        Span::styled(
+            "↑/↓ ",
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("navigate  ", Style::default().fg(theme.dim)),
+        Span::styled(
+            "Enter ",
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("select  ", Style::default().fg(theme.dim)),
+        Span::styled(
+            "Esc ",
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("close  ", Style::default().fg(theme.dim)),
+        Span::styled(
+            "Type ",
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("filter", Style::default().fg(theme.dim)),
+    ]);
+    frame.render_widget(Paragraph::new(footer_line), chunks[4]);
+}
+
+fn render_themes_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &super::app::ThemesDialogState,
+    active_theme: super::ThemeKind,
+    theme: &Theme,
+) {
+    let width = area.width.clamp(36, 74);
+    let filtered = dialog.filtered_items();
+    let max_items_visible = 10.min(area.height.saturating_sub(8) as usize).max(3);
+    let visible_items_count = filtered.len().min(max_items_visible).max(1);
+    let height = (visible_items_count as u16 + 6).min(area.height.saturating_sub(2));
+
+    let dialog_area = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, dialog_area);
+
+    let total_count = dialog.items.len();
+    let filtered_count = filtered.len();
+    let title_text = if dialog.filter.is_empty() {
+        format!(" Color Theme ({total_count}) ")
+    } else {
+        format!(" Color Theme ({filtered_count}/{total_count}) ")
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.amber))
+        .style(Style::default().bg(theme.panel))
+        .title(Span::styled(
+            title_text,
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ));
+    frame.render_widget(block, dialog_area);
+
+    let inner = Rect {
+        x: dialog_area.x + 2,
+        y: dialog_area.y + 1,
+        width: dialog_area.width.saturating_sub(4),
+        height: dialog_area.height.saturating_sub(2),
+    };
+
+    if inner.width < 10 || inner.height < 4 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // search input
+            Constraint::Length(1), // top divider
+            Constraint::Min(1),    // items
+            Constraint::Length(1), // bottom divider
+            Constraint::Length(1), // footer hints
+        ])
+        .split(inner);
+
+    let search_line = if dialog.filter.is_empty() {
+        Line::from(vec![
+            Span::styled("Filter: ", Style::default().fg(theme.dim)),
+            Span::styled(
+                "type to filter themes...",
+                Style::default()
+                    .fg(theme.quiet)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                "Filter: ",
+                Style::default()
+                    .fg(theme.amber)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &dialog.filter,
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(theme.amber)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(search_line), chunks[0]);
+
+    let divider_str = "─".repeat(chunks[1].width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            &divider_str,
+            Style::default().fg(theme.quiet),
+        ))),
+        chunks[1],
+    );
+
+    let list_height = chunks[2].height as usize;
+    let selected_idx = dialog.selected;
+    let scroll_offset = if selected_idx >= list_height {
+        selected_idx + 1 - list_height
+    } else {
+        0
+    };
+
+    let item_lines: Vec<Line> = if filtered.is_empty() {
+        vec![Line::from(Span::styled(
+            format!("  No themes matching \"{}\"", dialog.filter),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        ))]
+    } else {
+        filtered
+            .iter()
+            .skip(scroll_offset)
+            .take(list_height)
+            .enumerate()
+            .map(|(rel_idx, &theme_kind)| {
+                let actual_idx = scroll_offset + rel_idx;
+                let is_selected = actual_idx == selected_idx;
+                let is_active = theme_kind == active_theme;
+
+                let cursor = if is_selected { " › " } else { "   " };
+                let active_dot = if is_active { "● " } else { "  " };
+
+                let cursor_style = if is_selected {
+                    Style::default()
+                        .fg(theme.amber)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+
+                let dot_style = if is_active {
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.dim)
+                };
+
+                let name_style = if is_selected {
+                    Style::default()
+                        .fg(theme.amber)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_active {
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.ink)
+                };
+
+                let preview_theme = theme_kind.to_theme();
+                let swatches = vec![
+                    Span::styled("█", Style::default().fg(preview_theme.bg_element)),
+                    Span::styled("█", Style::default().fg(preview_theme.panel)),
+                    Span::styled("█", Style::default().fg(preview_theme.amber)),
+                    Span::styled("█", Style::default().fg(preview_theme.teal)),
+                    Span::styled("█", Style::default().fg(preview_theme.ink)),
+                    Span::raw(" "),
+                ];
+
+                let badge = if is_active {
+                    format!("{} [active]", theme_kind.description())
+                } else {
+                    theme_kind.description().to_string()
+                };
+
+                let badge_style = if is_active {
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.quiet)
+                };
+
+                let row_width = chunks[2].width as usize;
+                let prefix_len = cursor.len() + active_dot.len();
+                let swatch_len = 6;
+                let badge_len = badge.len();
+                let available_for_name =
+                    row_width.saturating_sub(prefix_len + swatch_len + badge_len + 2);
+
+                let display_name =
+                    if theme_kind.name().len() > available_for_name && available_for_name > 4 {
+                        format!("{}…", &theme_kind.name()[..available_for_name - 1])
+                    } else {
+                        theme_kind.name().to_string()
+                    };
+
+                let pad_len = row_width
+                    .saturating_sub(prefix_len + swatch_len + display_name.len() + badge_len);
+
+                let line_style = if is_selected {
+                    Style::default().bg(theme.bg_element)
+                } else {
+                    Style::default()
+                };
+
+                let mut spans = vec![
+                    Span::styled(cursor, cursor_style),
+                    Span::styled(active_dot, dot_style),
+                ];
+                spans.extend(swatches);
+                spans.push(Span::styled(display_name, name_style));
+                spans.push(Span::raw(" ".repeat(pad_len)));
+                spans.push(Span::styled(badge, badge_style));
+
+                Line::from(spans).style(line_style)
+            })
+            .collect()
+    };
+    frame.render_widget(Paragraph::new(item_lines), chunks[2]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            &divider_str,
+            Style::default().fg(theme.quiet),
+        ))),
+        chunks[3],
+    );
+
+    let footer_line = Line::from(vec![
+        Span::styled(
+            "↑/↓ ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("navigate  ", Style::default().fg(theme.dim)),
+        Span::styled(
+            "Enter ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("select  ", Style::default().fg(theme.dim)),
+        Span::styled(
+            "Esc ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("close  ", Style::default().fg(theme.dim)),
+        Span::styled(
+            "Type ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("filter", Style::default().fg(theme.dim)),
+    ]);
+    frame.render_widget(Paragraph::new(footer_line), chunks[4]);
+}
+
+fn render_which_key(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    let width = area.width.clamp(36, 72);
+    let height = 14.min(area.height.saturating_sub(2));
+
+    let popup_area = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.amber))
+        .style(Style::default().bg(theme.panel))
+        .title(Span::styled(
+            " Keyboard Shortcuts (Cheatsheet) ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ));
+    frame.render_widget(block, popup_area);
+
+    let inner = Rect {
+        x: popup_area.x + 2,
+        y: popup_area.y + 1,
+        width: popup_area.width.saturating_sub(4),
+        height: popup_area.height.saturating_sub(2),
+    };
+
+    if inner.width < 10 || inner.height < 4 {
+        return;
+    }
+
+    let shortcuts: [(&str, &str, &str, &str); 7] = [
+        ("Tab", "Toggle Plan/Build", "a", "Open Agents dialog"),
+        ("Ctrl+X", "Toggle Shortcuts", "t", "Open Themes dialog"),
+        ("Ctrl+C", "Cancel Turn", "m", "Open Models dialog"),
+        ("Ctrl+L", "Clear Screen", "s", "System Status dialog"),
+        ("Esc", "Dismiss Dialog / Panel", "p", "Switch to Plan mode"),
+        ("↑ / ↓", "History & Selection", "b", "Switch to Build mode"),
+        (
+            "/connect",
+            "Connect AI provider",
+            "/sessions",
+            "List saved sessions",
+        ),
+    ];
+
+    let col_w = (inner.width as usize).saturating_sub(2) / 2;
+    let mut lines = Vec::new();
+
+    for (k1, d1, k2, d2) in shortcuts {
+        let left_key_w = 8.min(col_w.saturating_sub(1));
+        let left_desc_w = col_w.saturating_sub(left_key_w + 3);
+        let right_key_w = 8.min(col_w.saturating_sub(1));
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:<width$}", k1, width = left_key_w),
+                Style::default()
+                    .fg(theme.amber)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<width$}", d1, width = left_desc_w),
+                Style::default().fg(theme.ink),
+            ),
+            Span::styled(" │ ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!("{:<width$}", k2, width = right_key_w),
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(d2, Style::default().fg(theme.ink)),
+        ]));
+    }
+
+    // Add footer
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Press ", Style::default().fg(theme.dim)),
+        Span::styled(
+            "Esc",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" or ", Style::default().fg(theme.dim)),
+        Span::styled(
+            "Ctrl+X",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " to dismiss, or press highlighted keys directly.",
+            Style::default().fg(theme.dim),
+        ),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_status_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &super::app::StatusDialogState,
+    theme: &Theme,
+) {
+    let width = area.width.clamp(40, 72);
+    let height = 13.min(area.height.saturating_sub(2));
+
+    let dialog_area = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.amber))
+        .style(Style::default().bg(theme.panel))
+        .title(Span::styled(
+            " System Status & Diagnostics ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ));
+    frame.render_widget(block, dialog_area);
+
+    let inner = Rect {
+        x: dialog_area.x + 2,
+        y: dialog_area.y + 1,
+        width: dialog_area.width.saturating_sub(4),
+        height: dialog_area.height.saturating_sub(2),
+    };
+
+    if inner.width < 12 || inner.height < 6 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Subtitle
+            Constraint::Length(1), // Divider
+            Constraint::Min(4),    // Key-value pairs
+            Constraint::Length(1), // Divider
+            Constraint::Length(1), // Footer
+        ])
+        .split(inner);
+
+    let header_line = Line::from(vec![
+        Span::styled(
+            "CLAWCODE",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " • Autonomous Agent Workbench v0.1.0",
+            Style::default().fg(theme.dim),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(header_line), chunks[0]);
+
+    let divider_char = "─".repeat(inner.width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            &divider_char,
+            Style::default().fg(theme.dim),
+        ))),
+        chunks[1],
+    );
+
+    let label_w = 14;
+    let rows = [
+        ("Agent Mode", dialog.mode.as_str(), theme.teal),
+        ("Active Model", dialog.model.as_str(), theme.amber),
+        ("AI Provider", dialog.provider.as_str(), theme.teal),
+        ("Color Theme", dialog.theme.as_str(), theme.warning),
+        ("Git Branch", dialog.branch.as_str(), theme.success),
+        ("Working Dir", dialog.cwd.as_str(), theme.ink),
+    ];
+
+    let mut lines = Vec::new();
+    for (label, val, val_color) in rows {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:<width$}", label, width = label_w),
+                Style::default().fg(theme.dim),
+            ),
+            Span::styled(" : ", Style::default().fg(theme.dim)),
+            Span::styled(
+                val,
+                Style::default().fg(val_color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), chunks[2]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            &divider_char,
+            Style::default().fg(theme.dim),
+        ))),
+        chunks[3],
+    );
+
+    let footer_line = Line::from(vec![
+        Span::styled(
+            " Esc / Enter ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Close status dialog", Style::default().fg(theme.dim)),
     ]);
     frame.render_widget(Paragraph::new(footer_line), chunks[4]);
 }

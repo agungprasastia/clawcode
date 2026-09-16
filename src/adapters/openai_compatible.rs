@@ -9,13 +9,13 @@ use crate::provider::{
 #[derive(Debug)]
 pub struct OpenAiCompatible<T>(JsonProvider<T>);
 
-impl<T: super::Transport + 'static> OpenAiCompatible<T> {
+impl<T: super::Transport + Clone + 'static> OpenAiCompatible<T> {
     pub fn new(id: impl Into<String>, endpoint: impl Into<String>, transport: T) -> Self {
         Self(JsonProvider::new(id, endpoint, transport))
     }
 }
 
-impl<T: super::Transport + 'static> Provider for OpenAiCompatible<T> {
+impl<T: super::Transport + Clone + 'static> Provider for OpenAiCompatible<T> {
     fn id(&self) -> &ProviderId {
         self.0.id()
     }
@@ -26,7 +26,10 @@ impl<T: super::Transport + 'static> Provider for OpenAiCompatible<T> {
         self.0.models()
     }
     fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
-        JsonProvider::<T>::parse_openai(&self.0.request_body(request)?)
+        self.0.send(request)
+    }
+    fn stream(&self, request: &StreamRequest) -> Result<crate::provider::ProviderStream, ProviderError> {
+        self.0.stream(request)
     }
 }
 

@@ -103,7 +103,9 @@ impl CliDiscovery {
         Self::default()
     }
 
-    pub fn with_models(custom_models: std::collections::HashMap<ProviderId, Vec<ModelInfo>>) -> Self {
+    pub fn with_models(
+        custom_models: std::collections::HashMap<ProviderId, Vec<ModelInfo>>,
+    ) -> Self {
         Self { custom_models }
     }
 
@@ -115,13 +117,20 @@ impl CliDiscovery {
 pub fn runtime_service_with_config(
     config: &crate::config::Config,
 ) -> Result<CommandService<CliDiscovery>, rusqlite::Error> {
+    runtime_service_with_config_and_db(config, Db::open_in_memory()?)
+}
+
+pub fn runtime_service_with_config_and_db(
+    config: &crate::config::Config,
+    db: Db,
+) -> Result<CommandService<CliDiscovery>, rusqlite::Error> {
     let mut custom_models = std::collections::HashMap::new();
     for (name, provider_cfg) in &config.providers {
         let pid = ProviderId::new(name);
         custom_models.insert(pid, provider_cfg.to_model_infos());
     }
     let discovery_source = CliDiscovery::with_models(custom_models.clone());
-    let mut service = CommandService::with_db(discovery_source, Db::open_in_memory()?);
+    let mut service = CommandService::with_db(discovery_source, db);
     for (pid, models) in custom_models {
         service.discovery.apply(pid, Ok(models));
     }

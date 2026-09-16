@@ -13,4 +13,4 @@ pub use events::{FinishReason, StreamEvent, ToolCallAssembler, Usage};
 pub use metrics::{ProviderMetrics, TurnMetrics};
 pub use registry::{ModelInfo, ProviderId, ProviderRegistry};
 pub use stream::{MAX_COALESCED_DELTA_BYTES, ProviderStream, StreamSender};
-pub use traits::{Provider, ProviderCapabilities, ProviderError, StreamRequest, StreamResponse};
+pub use traits::{ChatMessage, Provider, ProviderCapabilities, ProviderError, StreamRequest, StreamResponse};

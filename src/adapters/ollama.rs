@@ -9,13 +9,13 @@ use crate::provider::{
 #[derive(Debug)]
 pub struct Ollama<T>(JsonProvider<T>);
 
-impl<T: super::Transport + 'static> Ollama<T> {
+impl<T: super::Transport + Clone + 'static> Ollama<T> {
     pub fn new(id: impl Into<String>, endpoint: impl Into<String>, transport: T) -> Self {
         Self(JsonProvider::new(id, endpoint, transport))
     }
 }
 
-impl<T: super::Transport + 'static> Provider for Ollama<T> {
+impl<T: super::Transport + Clone + 'static> Provider for Ollama<T> {
     fn id(&self) -> &ProviderId {
         self.0.id()
     }
@@ -26,7 +26,10 @@ impl<T: super::Transport + 'static> Provider for Ollama<T> {
         self.0.models()
     }
     fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
-        JsonProvider::<T>::parse_ollama(&self.0.request_body(request)?)
+        self.0.send(request)
+    }
+    fn stream(&self, request: &StreamRequest) -> Result<crate::provider::ProviderStream, ProviderError> {
+        self.0.stream(request)
     }
 }
 
