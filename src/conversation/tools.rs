@@ -345,7 +345,7 @@ pub fn coding_tools_schemas() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "Create a new file or completely overwrite an existing file in the workspace. Only available in BUILD mode.",
+                "description": "Create a NEW file in the workspace. For updating, modifying, or appending to existing files, ALWAYS use 'edit_file' instead.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -366,7 +366,7 @@ pub fn coding_tools_schemas() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "edit_file",
-                "description": "Perform an exact literal substring replacement in an existing file. Only available in BUILD mode.",
+                "description": "Perform an exact literal substring replacement in an existing file. Always prefer this tool over 'write_file' when modifying existing code or documents.",
                 "parameters": {
                     "type": "object",
                     "properties": {

@@ -2356,3 +2356,104 @@ fn test_edit_file_opencode_side_by_side_diff_in_transcript() {
     assert!(text.contains("• Edit src/main.rs"));
     assert!(text.contains("│"));
 }
+
+#[test]
+fn test_write_file_clean_summary_no_diff() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    let payload_args = serde_json::json!({
+        "path": "README.md",
+        "content": "# Title\nFirst line\nSecond line\n",
+    });
+
+    let payload = serde_json::json!({
+        "name": "write_file",
+        "arguments": payload_args,
+        "success": true,
+        "output": "Successfully wrote 32 bytes to 'README.md'",
+    });
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executed".to_string(),
+        payload_json: payload.to_string(),
+    })
+    .unwrap();
+
+    app.poll_runtime();
+
+    let transcript = app.transcript();
+    assert!(transcript.contains("• Write README.md (3 lines)"));
+    assert!(transcript.contains("  └ Successfully wrote 32 bytes to 'README.md'"));
+    // Must NOT contain raw diff marker rows
+    assert!(!transcript.contains("    + # Title"));
+
+    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
+    let lines = clawcode::tui::format_transcript_lines(app.transcript(), &theme, ratatui::style::Color::Cyan);
+    let write_line = lines.iter().find(|l| l.spans.iter().any(|s| s.content == "• "));
+    assert!(write_line.is_some());
+    let spans = &write_line.unwrap().spans;
+    assert_eq!(spans[0].content, "• ");
+    assert_eq!(spans[0].style.fg, Some(theme.teal));
+    assert!(spans.iter().any(|s| s.content == "Write"));
+    assert!(spans.iter().any(|s| s.content == "README.md"));
+}
+
+#[test]
+fn test_generation_finished_clears_streaming_status() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.switch_session(42);
+
+    // Provider starts delta stream
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 42,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "text_delta".to_string(),
+        payload_json: serde_json::json!({ "delta": "Hello from model" }).to_string(),
+    })
+    .unwrap();
+    app.poll_runtime();
+
+    assert!(app.is_streaming_active());
+    assert!(app.streaming_elapsed_seconds().is_some());
+
+    // Finish generation
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 42,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "generation_finished".to_string(),
+        payload_json: serde_json::json!({ "status": "completed" }).to_string(),
+    })
+    .unwrap();
+
+    // Poll until drained
+    while app.poll_runtime() {}
+
+    assert_eq!(
+        app.conversation_status(),
+        clawcode::tui::ConversationStatus::Finished(clawcode::provider::FinishReason::Stop)
+    );
+    assert!(!app.is_streaming_active());
+    assert!(app.streaming_elapsed_seconds().is_none());
+
+    // Render and check status label does not show STREAMING
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!text.contains("STREAMING"));
+    assert!(!text.contains("streaming "));
+}

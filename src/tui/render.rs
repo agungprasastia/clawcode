@@ -313,12 +313,8 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
         super::ConversationMode::Plan => theme.amber,
         super::ConversationMode::Build => theme.teal,
     };
-    let is_working = app.metrics().is_none()
-        && (matches!(app.conversation_status(), super::ConversationStatus::Active)
-            || app.is_streaming_active()
-            || app.is_typing()
-            || app.is_reasoning()
-            || app.active_tool().is_some());
+    let is_working = matches!(app.conversation_status(), super::ConversationStatus::Active)
+        || app.is_streaming_active();
 
     let left_spans = if matches!(app.conversation_status(), super::ConversationStatus::Error) {
         vec![
@@ -512,7 +508,9 @@ pub(crate) fn status_label(app: &App) -> String {
         }
     } else if app.is_reasoning() {
         "THINKING".to_string()
-    } else if app.metrics().is_none() && (app.is_typing() || app.is_streaming_active()) {
+    } else if matches!(app.conversation_status(), super::ConversationStatus::Active)
+        || app.is_typing()
+    {
         "STREAMING".to_string()
     } else {
         format!("{:?}", app.conversation_status()).to_ascii_uppercase()

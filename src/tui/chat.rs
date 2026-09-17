@@ -53,12 +53,8 @@ pub fn render_chat(
         Span::styled(identity_label(app), Style::default().fg(theme.ink)),
     ]);
 
-    let is_working = app.metrics().is_none()
-        && (matches!(app.conversation_status(), super::ConversationStatus::Active)
-            || app.is_streaming_active()
-            || app.is_typing()
-            || app.is_reasoning()
-            || app.active_tool().is_some());
+    let is_working = matches!(app.conversation_status(), super::ConversationStatus::Active)
+        || app.is_streaming_active();
     let status_color = if is_working {
         mode_color
     } else {
@@ -715,6 +711,7 @@ pub fn format_transcript_lines(
             ]));
         } else if line.starts_with("⬢ ")
             || line.starts_with("• Edit")
+            || line.starts_with("• Write")
             || (line.starts_with("• ") && parse_diff_badge(line.strip_prefix("• ").unwrap_or("")).is_some())
         {
             in_thought = false;
@@ -809,6 +806,15 @@ pub fn format_transcript_lines(
                     spans.push(Span::styled("(", Style::default().fg(theme.dim)));
                     let exit_color = if code_str == "0" { theme.success } else { theme.error };
                     spans.push(Span::styled(format!("exit {code_str}"), Style::default().fg(exit_color).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::styled(")", Style::default().fg(theme.dim)));
+                } else if let Some((file, lines_part)) = target.rsplit_once(" (")
+                    && lines_part.ends_with(" lines)")
+                {
+                    spans.push(Span::styled(file.to_string(), Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled("(", Style::default().fg(theme.dim)));
+                    let count_str = lines_part.strip_suffix(')').unwrap_or(lines_part);
+                    spans.push(Span::styled(count_str.to_string(), Style::default().fg(theme.dim)));
                     spans.push(Span::styled(")", Style::default().fg(theme.dim)));
                 } else {
                     spans.push(Span::styled(

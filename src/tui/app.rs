@@ -298,11 +298,20 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
             }
         }
         "write_file" => {
-            let count = output.lines().count();
-            if count <= 1 {
-                "succeeded".to_string()
+            let trimmed = output.trim();
+            if trimmed.starts_with("Successfully wrote") {
+                trimmed.to_string()
             } else {
-                format!("{count} lines")
+                let count = output.lines().count();
+                if count <= 1 {
+                    if !trimmed.is_empty() && trimmed.len() < 80 {
+                        trimmed.to_string()
+                    } else {
+                        "succeeded".to_string()
+                    }
+                } else {
+                    format!("{count} lines")
+                }
             }
         }
         "edit_file" => "succeeded".to_string(),
@@ -1222,7 +1231,8 @@ impl App {
     /// Whether the typewriter buffer has pending characters, active status, or a tool is running.
     pub fn is_streaming_active(&self) -> bool {
         matches!(self.status, ConversationStatus::Active)
-            || self.typewriter.is_active()
+            || self.typewriter.is_typing()
+            || self.typewriter.pending_status().is_some()
             || self.is_reasoning()
             || self.active_tool.is_some()
     }
@@ -1344,6 +1354,7 @@ impl App {
                 if !self.typewriter.is_typing()
                     && let Some(target) = self.typewriter.take_pending_status()
                 {
+                    self.typewriter.reset();
                     self.status = target;
                 }
                 redraw = true;
@@ -2265,44 +2276,38 @@ impl App {
                             snippet.push('\n');
                             self.transcript.push_str(&snippet);
                             self.truncate_transcript();
-                        } else {
-                            let diff_info = if success && name == "write_file" {
-                                args.and_then(|a| a.get("content"))
-                                    .and_then(|v| v.as_str())
-                                    .map(|content| crate::tui::diff::compute_diff("", content, 20))
+                        } else if name == "write_file" {
+                            let line_count = args
+                                .and_then(|a| a.get("content"))
+                                .and_then(|v| v.as_str())
+                                .map(|c| c.lines().count())
+                                .unwrap_or_else(|| output.lines().count());
+                            let header = if line_count > 0 {
+                                format!("• Write {target} ({line_count} lines)")
                             } else {
-                                None
+                                format!("• Write {target}")
                             };
-
-                            let header = if let Some(diff) = &diff_info {
-                                if target.is_empty() {
-                                    format!("⬢ {verb} (+{} -{})", diff.added, diff.removed)
-                                } else {
-                                    format!("⬢ {verb} {target} (+{} -{})", diff.added, diff.removed)
-                                }
-                            } else if target.is_empty() {
+                            let branch = format!("  └ {detail}");
+                            let mut snippet = String::new();
+                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                snippet.push('\n');
+                            }
+                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                                snippet.push('\n');
+                            }
+                            snippet.push_str(&header);
+                            snippet.push('\n');
+                            snippet.push_str(&branch);
+                            snippet.push_str("\n\n");
+                            self.transcript.push_str(&snippet);
+                            self.truncate_transcript();
+                        } else {
+                            let header = if target.is_empty() {
                                 format!("⬢ {verb}")
                             } else {
                                 format!("⬢ {verb} {target}")
                             };
                             let branch = format!("  └ {detail}");
-
-                            let mut diff_lines_str = String::new();
-                            if let Some(diff) = &diff_info {
-                                for line in &diff.lines {
-                                    match line.op {
-                                        crate::tui::diff::DiffOp::Remove => {
-                                            diff_lines_str.push_str(&format!("    - {}\n", line.text));
-                                        }
-                                        crate::tui::diff::DiffOp::Add => {
-                                            diff_lines_str.push_str(&format!("    + {}\n", line.text));
-                                        }
-                                        crate::tui::diff::DiffOp::Same => {
-                                            diff_lines_str.push_str(&format!("      {}\n", line.text));
-                                        }
-                                    }
-                                }
-                            }
 
                             let mut snippet = String::new();
                             if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
@@ -2313,9 +2318,6 @@ impl App {
                             }
                             snippet.push_str(&header);
                             snippet.push('\n');
-                            if !diff_lines_str.is_empty() {
-                                snippet.push_str(&diff_lines_str);
-                            }
                             snippet.push_str(&branch);
                             snippet.push_str("\n\n");
                             self.transcript.push_str(&snippet);
@@ -2340,6 +2342,7 @@ impl App {
                         if self.typewriter.is_typing() {
                             self.typewriter.set_pending_status(target_status);
                         } else {
+                            self.typewriter.reset();
                             self.status = target_status;
                         }
                     }
@@ -2369,6 +2372,7 @@ impl App {
             if !self.typewriter.is_typing()
                 && let Some(target) = self.typewriter.take_pending_status()
             {
+                self.typewriter.reset();
                 self.status = target;
                 had_events = true;
             }
