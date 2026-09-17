@@ -11,6 +11,7 @@ use super::dialogs::{
     AgentsDialogState, ModelsDialogState, SessionsDialogState, StatusDialogState,
     ThemesDialogState, WhichKeyState,
 };
+use super::home::HomeState;
 
 const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 const MAX_IDENTITY_BYTES: usize = 256;
@@ -292,43 +293,6 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
                 "succeeded".to_string()
             }
         }
-    }
-}
-
-
-const PHASE_DURATIONS: [u32; 5] = [14, 7, 7, 7, 14];
-const PHASE_FRAMES: [usize; 5] = [0, 1, 0, 1, 0];
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HomeState {
-    pub phase: u8,
-    pub tick_count: u32,
-}
-
-impl Default for HomeState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl HomeState {
-    pub fn new() -> Self {
-        Self {
-            phase: 0,
-            tick_count: 0,
-        }
-    }
-
-    pub fn tick(&mut self) {
-        self.tick_count += 1;
-        if self.tick_count >= PHASE_DURATIONS[self.phase as usize] {
-            self.tick_count = 0;
-            self.phase = (self.phase + 1) % (PHASE_DURATIONS.len() as u8);
-        }
-    }
-
-    pub fn frame(&self) -> usize {
-        PHASE_FRAMES[self.phase as usize]
     }
 }
 

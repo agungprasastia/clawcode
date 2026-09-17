@@ -16,21 +16,9 @@ use super::dialogs::{
     render_sessions_dialog, render_sessions_panel, render_status_dialog, render_themes_dialog,
     render_which_key,
 };
-use super::theme::{Theme, darken_color};
+use super::home::render_home;
+use super::theme::Theme;
 
-const LOGO: [&str; 6] = [
-    " ██████╗██╗      █████╗ ██╗    ██╗ ██████╗ ██████╗ ██████╗ ███████╗",
-    "██╔════╝██║     ██╔══██╗██║    ██║██╔════╝██╔═══██╗██╔══██╗██╔════╝",
-    "██║     ██║     ███████║██║ █╗ ██║██║     ██║   ██║██║  ██║█████╗  ",
-    "██║     ██║     ██╔══██║██║███╗██║██║     ██║   ██║██║  ██║██╔══╝  ",
-    "╚██████╗███████╗██║  ██║╚███╔███╔╝╚██████╗╚██████╔╝██████╔╝███████╗",
-    " ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝  ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
-];
-
-const MASCOT_FRAMES: [[&str; 3]; 2] = [
-    ["   ▃▃▛████▜▃▃", "█▟▟▜████████▛▙▙█", "   ▞ ▘    ▝ ▚"],
-    ["   ▃▃▛████▜▃▃", "█▙▟▜████████▛▙▟█", "   ▞ ▘    ▝ ▚"],
-];
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let theme = app.theme().to_theme();
@@ -78,304 +66,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 
-fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode_color: Color) {
-    if area.height < 14 || area.width < 50 {
-        render_compact_home(frame, area, app, theme, mode_color);
-        return;
-    }
-
-    let input_height = 5;
-    let hints_height = 1;
-
-    // Match Crabcode dock layout: top canvas stretches, input card & hints dock at bottom
-    let home_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(input_height),
-            Constraint::Length(hints_height),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    let top_canvas = home_chunks[0];
-    let input_area = home_chunks[1];
-    let hints_area = home_chunks[2];
-
-    let show_big_logo = top_canvas.height >= 11 && area.width >= 70;
-    let show_cards = top_canvas.height >= 15 && area.width >= 70;
-
-    let hero_height = if show_big_logo { 10 } else { 3 };
-    let cards_height = if show_cards { 4 } else { 0 };
-    let gap_height = if show_cards { 1 } else { 0 };
-    let content_height = hero_height + gap_height + cards_height;
-
-    // Center logo and quick action cards vertically within the top canvas
-    let v_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(content_height),
-            Constraint::Min(0),
-        ])
-        .split(top_canvas);
-
-    let hero_cards_canvas = v_chunks[1];
-    let inner_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(hero_height),
-            Constraint::Length(gap_height),
-            Constraint::Length(cards_height),
-        ])
-        .split(hero_cards_canvas);
-
-    let hero_area = inner_chunks[0];
-    let cards_area = inner_chunks[2];
-
-    let content_width = if area.width >= 106 {
-        100
-    } else {
-        area.width.saturating_sub(4)
-    };
-    let h_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(content_width),
-            Constraint::Min(0),
-        ])
-        .split(area);
-    let centered_x = h_chunks[1].x;
-    let centered_w = h_chunks[1].width;
-
-    render_hero(
-        frame,
-        hero_area,
-        show_big_logo,
-        app.home_state().frame(),
-        theme,
-    );
-    if show_cards {
-        let centered_cards = Rect {
-            x: centered_x,
-            y: cards_area.y,
-            width: centered_w,
-            height: cards_area.height,
-        };
-        render_quick_actions(frame, centered_cards, theme);
-    }
-
-    let centered_input = Rect {
-        x: centered_x,
-        y: input_area.y,
-        width: centered_w,
-        height: input_area.height,
-    };
-    render_input_card(frame, centered_input, app, theme, mode_color);
-    render_command_popup(frame, centered_input, app, theme);
-
-    let centered_hints = Rect {
-        x: centered_x,
-        y: hints_area.y,
-        width: centered_w,
-        height: hints_area.height,
-    };
-    render_hints_row(frame, centered_hints, app, theme);
-}
-
-fn render_compact_home(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &App,
-    theme: &Theme,
-    mode_color: Color,
-) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(0),
-            Constraint::Length(5),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    let brand_line = Line::from(vec![
-        Span::styled(
-            " CLAWCODE ",
-            Style::default()
-                .fg(theme.amber)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("[{}]", mode_label(app)),
-            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(status_label(app), Style::default().fg(theme.quiet)),
-        Span::raw(" "),
-        Span::styled("clawcode v0.1.0", Style::default().fg(theme.dim)),
-    ]);
-    frame.render_widget(Paragraph::new(brand_line), chunks[0]);
-
-    render_input_card(frame, chunks[2], app, theme, mode_color);
-    render_command_popup(frame, chunks[2], app, theme);
-    render_hints_row(frame, chunks[3], app, theme);
-}
-
-fn render_hero(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    show_big_logo: bool,
-    mascot_frame: usize,
-    theme: &Theme,
-) {
-    if show_big_logo {
-        let hero_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(6),
-                Constraint::Length(1),
-            ])
-            .split(area);
-
-        let mascot = MASCOT_FRAMES[mascot_frame % 2];
-        let mascot_lines: Vec<Line> = mascot
-            .iter()
-            .map(|l| {
-                Line::from(Span::styled(
-                    *l,
-                    Style::default()
-                        .fg(theme.amber)
-                        .add_modifier(Modifier::BOLD),
-                ))
-            })
-            .collect();
-        frame.render_widget(
-            Paragraph::new(mascot_lines).alignment(Alignment::Center),
-            hero_chunks[0],
-        );
-
-        let logo_lines: Vec<Line> = LOGO
-            .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                let color = if i == 5 {
-                    darken_color(theme.amber, 0.7)
-                } else {
-                    theme.amber
-                };
-                Line::from(Span::styled(
-                    *l,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ))
-            })
-            .collect();
-        frame.render_widget(
-            Paragraph::new(logo_lines).alignment(Alignment::Center),
-            hero_chunks[1],
-        );
-
-        let subtitle = Line::from(vec![
-            Span::styled(
-                "CLAWCODE",
-                Style::default()
-                    .fg(theme.amber)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ·  ", Style::default().fg(theme.panel)),
-            Span::styled(
-                "AUTONOMOUS AGENT WORKBENCH",
-                Style::default().fg(theme.quiet),
-            ),
-            Span::styled("  ·  ", Style::default().fg(theme.panel)),
-            Span::styled("clawcode v0.1.0", Style::default().fg(theme.dim)),
-        ]);
-        frame.render_widget(
-            Paragraph::new(subtitle).alignment(Alignment::Center),
-            hero_chunks[2],
-        );
-    } else {
-        let mascot = MASCOT_FRAMES[mascot_frame % 2];
-        let logo_lines = vec![
-            Line::from(Span::styled(
-                mascot[1],
-                Style::default()
-                    .fg(theme.amber)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(vec![
-                Span::styled(
-                    " CLAWCODE ",
-                    Style::default()
-                        .fg(theme.amber)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "· AUTONOMOUS AGENT WORKBENCH",
-                    Style::default().fg(theme.quiet),
-                ),
-                Span::styled(" · clawcode v0.1.0", Style::default().fg(theme.dim)),
-            ]),
-        ];
-        frame.render_widget(
-            Paragraph::new(logo_lines).alignment(Alignment::Center),
-            area,
-        );
-    }
-}
-
-fn render_quick_actions(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-    let cards = Layout::default()
-        .direction(Direction::Horizontal)
-        .spacing(1)
-        .constraints([
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-            Constraint::Ratio(1, 4),
-        ])
-        .split(area);
-
-    let actions = [
-        ("/plan", "Plan & Analyze", "Read-only plan", theme.amber),
-        ("/build", "Execute & Edit", "Verified edits", theme.teal),
-        ("/models", "Models & LLMs", "Providers & IDs", theme.ink),
-        ("/help", "Manual & Keys", "Commands & tips", theme.quiet),
-    ];
-
-    for (i, &(cmd, title, desc, col)) in actions.iter().enumerate() {
-        if i >= cards.len() {
-            break;
-        }
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme.panel))
-            .style(Style::default().bg(theme.bg_element))
-            .title(Span::styled(
-                format!(" {cmd} "),
-                Style::default().fg(col).add_modifier(Modifier::BOLD),
-            ));
-
-        let content = vec![
-            Line::from(Span::styled(
-                format!(" {title}"),
-                Style::default().fg(theme.ink),
-            )),
-            Line::from(Span::styled(
-                format!(" {desc}"),
-                Style::default().fg(theme.dim),
-            )),
-        ];
-
-        frame.render_widget(Paragraph::new(content).block(block), cards[i]);
-    }
-}
-
-fn render_input_card(
+pub(crate) fn render_input_card(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
@@ -734,7 +425,7 @@ fn format_transcript_lines(
     lines
 }
 
-fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let mode_color = match app.mode() {
         super::ConversationMode::Plan => theme.amber,
         super::ConversationMode::Build => theme.teal,
@@ -1247,14 +938,14 @@ fn repo_cwd_display() -> String {
     }
 }
 
-fn mode_label(app: &App) -> &'static str {
+pub(crate) fn mode_label(app: &App) -> &'static str {
     match app.mode() {
         super::ConversationMode::Plan => "PLAN",
         super::ConversationMode::Build => "BUILD",
     }
 }
 
-fn status_label(app: &App) -> String {
+pub(crate) fn status_label(app: &App) -> String {
     if let Some(tool) = app.active_tool() {
         format!("TOOL: {}", tool.name.to_ascii_uppercase())
     } else if app.metrics().is_none() && (app.is_typing() || app.is_streaming_active()) {
@@ -1272,7 +963,7 @@ fn identity_label(app: &App) -> String {
     }
 }
 
-fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App, theme: &Theme) {
+pub(crate) fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App, theme: &Theme) {
     if app.prompt().starts_with("/model ") {
         render_model_suggestions_popup(frame, input_area, app, theme);
         return;
