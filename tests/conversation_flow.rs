@@ -29,7 +29,7 @@ fn scripted_commands_run_through_runtime_step() {
     let mut app = App::new();
     let mut events = UiEventQueue::new(16);
 
-    for command in ["/new demo", "/sessions", "/connect", "/models"] {
+    for command in ["/new demo", "/sessions", "/connect openai", "/models"] {
         type_text(&mut app, &mut events, command);
         submit(&mut app, &mut events);
     }

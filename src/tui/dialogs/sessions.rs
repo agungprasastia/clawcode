@@ -416,6 +416,13 @@ pub fn render_sessions_dialog(
         ),
         Span::styled("switch  ", Style::default().fg(theme.dim)),
         Span::styled(
+            "d ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("delete  ", Style::default().fg(theme.dim)),
+        Span::styled(
             "Esc ",
             Style::default()
                 .fg(theme.amber)

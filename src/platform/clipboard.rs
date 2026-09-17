@@ -13,6 +13,14 @@ impl SystemClipboard {
     pub fn with_backend(backend: Box<dyn ClipboardBackend>) -> BackendClipboard {
         BackendClipboard { backend }
     }
+
+    pub fn get_text(&self) -> Result<String, PlatformError> {
+        self.read()
+    }
+
+    pub fn set_text(&self, text: &str) -> Result<(), PlatformError> {
+        self.write(text)
+    }
 }
 
 impl Clipboard for SystemClipboard {

@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
 use crate::conversation::ConversationEvent;
 use crate::notify::{BestEffortNotifier, Notification, NotificationKind, Notifier};
+#[allow(unused_imports)]
+use crate::platform::{Clipboard, SystemClipboard};
 use crate::provider::FinishReason;
 use crate::provider::TurnMetrics;
 use crate::runtime::{EventBus, RuntimeEvent, client::RuntimeClient};
@@ -12,7 +14,6 @@ use super::dialogs::{
     QuestionDialogState, SessionsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState,
 };
 use super::home::HomeState;
-
 const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 const MAX_IDENTITY_BYTES: usize = 256;
 
@@ -39,6 +40,7 @@ pub enum Input {
     Cancel,
     Clear,
     Character(char),
+    Paste,
     Backspace,
     Submit,
     ToggleMode,
@@ -183,6 +185,7 @@ pub enum UiEvent {
     Input(Input),
     Resize { width: u16, height: u16 },
     StreamDelta(String),
+    Paste(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,6 +381,26 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
         }
     }
 }
+pub fn split_provider_model(id: &str) -> Option<(&str, &str)> {
+    if let Some((p, m)) = id.split_once('/') {
+        if matches!(
+            p,
+            "openai"
+                | "anthropic"
+                | "ollama"
+                | "9router"
+                | "groq"
+                | "deepseek"
+                | "gemini"
+                | "openrouter"
+                | "together"
+        ) {
+            return Some((p, m));
+        }
+    }
+    None
+}
+
 pub fn is_sensitive_command(cmd: &str) -> bool {
     let lower = cmd.trim().to_lowercase();
     const PATTERNS: &[&str] = &[
@@ -395,6 +418,7 @@ pub struct App {
     running: bool,
     cancellation_pending: bool,
     prompt: String,
+    cursor_position: usize,
     placeholder: String,
     transcript: String,
     mode: ConversationMode,
@@ -496,6 +520,7 @@ impl App {
             running: true,
             cancellation_pending: false,
             prompt: String::new(),
+            cursor_position: 0,
             placeholder: get_random_placeholder(),
             transcript: String::new(),
             mode: ConversationMode::Plan,
@@ -809,7 +834,19 @@ impl App {
                             self.session_listings.clear();
                             self.history_index = None;
                             self.prompt.push('/');
+                            self.cursor_position = 1;
                             self.selected_suggestion = 0;
+                            return;
+                        }
+                        if dialog.filter.is_empty() && character == 'd' {
+                            if let Some(session) = dialog.selected_session().cloned() {
+                                let title = session.title.clone();
+                                let id = session.id;
+                                let _ = self.command_service.delete_session(id);
+                                dialog.remove_item(id);
+                                self.session_listings.retain(|s| s.id != id);
+                                self.diagnostic = format!("session deleted: {title}");
+                            }
                             return;
                         }
                         dialog.push_char(character);
@@ -895,7 +932,12 @@ impl App {
                         && let Some(chosen) = dialog.selected_model()
                     {
                         let chosen_id = chosen.id.clone();
-                        self.model = bounded(chosen_id.clone(), MAX_IDENTITY_BYTES);
+                        if let Some((provider, model)) = split_provider_model(&chosen_id) {
+                            self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
+                            self.model = bounded(model.to_string(), MAX_IDENTITY_BYTES);
+                        } else {
+                            self.model = bounded(chosen_id.clone(), MAX_IDENTITY_BYTES);
+                        }
                         self.diagnostic = format!("model switched to: {chosen_id}");
                     }
                     self.models_dialog = None;
@@ -959,13 +1001,34 @@ impl App {
             }
             UiEvent::Input(Input::Character(character)) => {
                 self.history_index = None;
-                self.prompt.push(character);
+                let byte_idx = self
+                    .prompt
+                    .char_indices()
+                    .nth(self.cursor_position)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.prompt.len());
+                self.prompt.insert(byte_idx, character);
+                self.cursor_position += 1;
                 self.selected_suggestion = 0;
             }
             UiEvent::Input(Input::Backspace) => {
                 self.history_index = None;
-                self.prompt.pop();
+                if self.cursor_position > 0 {
+                    let prev_pos = self.cursor_position - 1;
+                    if let Some((byte_idx, _)) = self.prompt.char_indices().nth(prev_pos) {
+                        self.prompt.remove(byte_idx);
+                        self.cursor_position = prev_pos;
+                    }
+                }
                 self.selected_suggestion = 0;
+            }
+            UiEvent::Input(Input::Paste) => {
+                if let Ok(text) = SystemClipboard.get_text() {
+                    self.insert_str_at_cursor(&text);
+                }
+            }
+            UiEvent::Paste(text) => {
+                self.insert_str_at_cursor(&text);
             }
             UiEvent::Input(Input::Up) => {
                 if self.suggestion_count() > 0 {
@@ -994,18 +1057,28 @@ impl App {
                 self.scroll_down(15);
             }
             UiEvent::Input(Input::Home) => {
+                self.cursor_position = 0;
                 self.scroll_to_top();
             }
             UiEvent::Input(Input::End) => {
+                self.cursor_position = self.prompt.chars().count();
                 self.scroll_to_bottom();
             }
-            UiEvent::Input(Input::Left) | UiEvent::Input(Input::Right) => {}
+            UiEvent::Input(Input::Left) => {
+                self.cursor_position = self.cursor_position.saturating_sub(1);
+            }
+            UiEvent::Input(Input::Right) => {
+                self.cursor_position = (self.cursor_position + 1).min(self.prompt.chars().count());
+            }
             UiEvent::Input(Input::Submit) => self.submit_prompt(),
             UiEvent::Input(Input::WhichKey) => {
                 self.which_key.toggle();
             }
             UiEvent::Input(Input::ToggleMode) => {
-                if !self.matching_suggestions().is_empty() || self.prompt.starts_with("/model ") {
+                if !self.matching_suggestions().is_empty()
+                    || self.prompt.starts_with("/model ")
+                    || self.prompt.starts_with("/theme ")
+                {
                     self.autocomplete_selected_command();
                 } else {
                     self.toggle_mode();
@@ -1018,7 +1091,6 @@ impl App {
             }
         }
     }
-
     pub fn apply_pending(&mut self, events: &mut UiEventQueue) -> bool {
         let Some(event) = events.pop_priority() else {
             let pending = events.drain();
@@ -1399,11 +1471,26 @@ impl App {
     pub fn take_cancellation(&mut self) -> bool {
         std::mem::take(&mut self.cancellation_pending)
     }
-
     pub fn prompt(&self) -> &str {
         &self.prompt
     }
 
+    pub fn cursor_position(&self) -> usize {
+        self.cursor_position
+    }
+
+    pub fn insert_str_at_cursor(&mut self, text: &str) {
+        let byte_pos = self
+            .prompt
+            .char_indices()
+            .nth(self.cursor_position)
+            .map(|(i, _)| i)
+            .unwrap_or(self.prompt.len());
+        self.prompt.insert_str(byte_pos, text);
+        self.cursor_position += text.chars().count();
+        self.history_index = None;
+        self.selected_suggestion = 0;
+    }
     pub fn matching_suggestions(&self) -> Vec<&'static CommandSuggestion> {
         if !self.prompt.starts_with('/') {
             return Vec::new();
@@ -1606,9 +1693,31 @@ impl App {
             .collect()
     }
 
+    pub fn matching_theme_suggestions(&self) -> Vec<&'static str> {
+        if !self.prompt.starts_with("/theme ") {
+            return Vec::new();
+        }
+        let query = self.prompt.strip_prefix("/theme ").unwrap_or("").trim().to_lowercase();
+        crate::tui::ThemeKind::ALL
+            .iter()
+            .filter_map(|t| {
+                if query.is_empty()
+                    || t.name().to_lowercase().contains(&query)
+                    || t.id().to_lowercase().contains(&query)
+                {
+                    Some(t.name())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub fn suggestion_count(&self) -> usize {
         if self.prompt.starts_with("/model ") {
             self.matching_model_suggestions().len()
+        } else if self.prompt.starts_with("/theme ") {
+            self.matching_theme_suggestions().len()
         } else {
             self.matching_suggestions().len()
         }
@@ -1651,6 +1760,7 @@ impl App {
                 self.history_index = Some(last_idx);
                 if let Some(p) = self.prompt_history.get(last_idx) {
                     self.prompt = p.clone();
+                    self.cursor_position = self.prompt.chars().count();
                 }
             }
             Some(idx) => {
@@ -1660,10 +1770,12 @@ impl App {
                     self.history_index = Some(next_idx);
                     if let Some(p) = self.prompt_history.get(next_idx) {
                         self.prompt = p.clone();
+                        self.cursor_position = self.prompt.chars().count();
                     }
                 } else if let Some(p) = self.prompt_history.get(0) {
                     self.history_index = Some(0);
                     self.prompt = p.clone();
+                    self.cursor_position = self.prompt.chars().count();
                 }
             }
         }
@@ -1676,10 +1788,12 @@ impl App {
                 self.history_index = Some(next_idx);
                 if let Some(p) = self.prompt_history.get(next_idx) {
                     self.prompt = p.clone();
+                    self.cursor_position = self.prompt.chars().count();
                 }
             } else {
                 self.history_index = None;
                 self.prompt = std::mem::take(&mut self.draft_prompt);
+                self.cursor_position = self.prompt.chars().count();
             }
         }
     }
@@ -1689,6 +1803,16 @@ impl App {
             let model_suggestions = self.matching_model_suggestions();
             if let Some(first) = model_suggestions.get(self.selected_suggestion) {
                 self.prompt = format!("/model {first}");
+                self.cursor_position = self.prompt.chars().count();
+                self.selected_suggestion = 0;
+                return true;
+            }
+        }
+        if self.prompt.starts_with("/theme ") {
+            let theme_suggestions = self.matching_theme_suggestions();
+            if let Some(first) = theme_suggestions.get(self.selected_suggestion) {
+                self.prompt = format!("/theme {first}");
+                self.cursor_position = self.prompt.chars().count();
                 self.selected_suggestion = 0;
                 return true;
             }
@@ -1696,6 +1820,7 @@ impl App {
         let suggestions = self.matching_suggestions();
         if let Some(suggestion) = suggestions.get(self.selected_suggestion) {
             self.prompt = suggestion.template.to_string();
+            self.cursor_position = self.prompt.chars().count();
             self.selected_suggestion = 0;
             true
         } else {
@@ -1712,6 +1837,7 @@ impl App {
         };
         let was_suggestion_focused = self.selected_suggestion > 0;
         self.selected_suggestion = 0;
+        self.cursor_position = 0;
         let input = std::mem::take(&mut self.prompt);
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -1784,10 +1910,27 @@ impl App {
             }
             if trimmed == "/copy" {
                 if !self.transcript.is_empty() {
-                    self.diagnostic =
-                        format!("transcript copied ({} bytes)", self.transcript.len());
+                    match SystemClipboard.set_text(&self.transcript) {
+                        Ok(()) => {
+                            self.diagnostic = format!(
+                                "transcript copied to clipboard ({} bytes)",
+                                self.transcript.len()
+                            );
+                        }
+                        Err(err) => {
+                            self.diagnostic = format!("failed to copy transcript: {err}");
+                        }
+                    }
                 } else {
-                    self.diagnostic = format!("copied status: {} ({})", self.model, self.provider);
+                    let status = format!("{} ({})", self.model, self.provider);
+                    match SystemClipboard.set_text(&status) {
+                        Ok(()) => {
+                            self.diagnostic = format!("copied status: {} ({})", self.model, self.provider);
+                        }
+                        Err(err) => {
+                            self.diagnostic = format!("failed to copy status: {err}");
+                        }
+                    }
                 }
                 return;
             }
@@ -1799,7 +1942,12 @@ impl App {
                         && was_suggestion_focused
                     {
                         let chosen = first.clone();
-                        self.model = bounded(chosen.clone(), MAX_IDENTITY_BYTES);
+                        if let Some((provider, model)) = split_provider_model(&chosen) {
+                            self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
+                            self.model = bounded(model.to_string(), MAX_IDENTITY_BYTES);
+                        } else {
+                            self.model = bounded(chosen.clone(), MAX_IDENTITY_BYTES);
+                        }
                         self.diagnostic = format!("model switched to: {chosen}");
                         return;
                     }
@@ -1813,10 +1961,9 @@ impl App {
                     {
                         if suggestion.template.ends_with(' ') {
                             self.prompt = suggestion.template.to_string();
+                            self.cursor_position = self.prompt.chars().count();
                             self.diagnostic = format!("usage: {}<title>", suggestion.template);
                             return;
-                        } else if let Ok(command) = cli::parse_command(suggestion.template) {
-                            command
                         } else {
                             self.diagnostic = error;
                             return;
@@ -1835,6 +1982,10 @@ impl App {
                 Ok(CommandOutput::Exit) => self.running = false,
                 Ok(CommandOutput::SessionCreated(session)) => {
                     self.switch_session(session.id);
+                    self.transcript.clear();
+                    self.active_tool = None;
+                    self.typewriter.reset();
+                    self.chat_scroll = 0;
                     self.diagnostic = format!("session created: {}", session.title);
                 }
                 Ok(CommandOutput::RefreshStarted) => {
@@ -1921,6 +2072,12 @@ impl App {
     /// Unbounded growth is impossible: the bus prunes closed/full receivers,
     /// and this drains to exhaustion each call.
     pub fn poll_runtime(&mut self) -> bool {
+        self.command_service.poll_refresh();
+        if let Ok(models) = self.command_service.models() {
+            if !models.is_empty() && models != self.available_models {
+                self.available_models = models;
+            }
+        }
         let Some(receiver) = self.runtime_events.take() else {
             return false;
         };
@@ -2419,6 +2576,7 @@ impl App {
         let state = self.sessions.entry(session_id).or_default();
         self.transcript = std::mem::take(&mut state.transcript);
         self.prompt = std::mem::take(&mut state.input_draft);
+        self.cursor_position = self.prompt.chars().count();
         self.chat_scroll = state.scroll;
         self.status = state.status;
         self.current_plan = state.current_plan.clone();
@@ -2475,14 +2633,20 @@ impl App {
                 self.diagnostic = format!("provider connected: {provider}");
             }
             CommandOutput::ModelSelected(model) => {
-                let model_to_set = if !self.provider.is_empty() {
-                    let prefix = format!("{}/", self.provider);
-                    model.strip_prefix(&prefix).unwrap_or(&model).to_string()
+                let display_id = model.clone();
+                if let Some((provider, m)) = split_provider_model(&model) {
+                    self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
+                    self.model = bounded(m.to_string(), MAX_IDENTITY_BYTES);
                 } else {
-                    model
-                };
-                self.model = bounded(model_to_set.clone(), MAX_IDENTITY_BYTES);
-                self.diagnostic = format!("model switched to: {model_to_set}");
+                    let model_to_set = if !self.provider.is_empty() {
+                        let prefix = format!("{}/", self.provider);
+                        model.strip_prefix(&prefix).unwrap_or(&model).to_string()
+                    } else {
+                        model
+                    };
+                    self.model = bounded(model_to_set, MAX_IDENTITY_BYTES);
+                }
+                self.diagnostic = format!("model switched to: {display_id}");
             }
             CommandOutput::Models(models) => {
                 self.available_models = models.clone();
@@ -2777,5 +2941,98 @@ mod tests {
         app.apply(UiEvent::StreamDelta(s));
         assert!(app.transcript().len() <= App::MAX_TRANSCRIPT_BYTES);
         assert!(app.transcript().starts_with(App::TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn test_copy_command_writes_to_clipboard() {
+        let mut app = App::default();
+        app.transcript = "hello transcript".to_string();
+        app.prompt = "/copy".to_string();
+        app.submit_prompt();
+        assert!(
+            app.diagnostic.contains("transcript copied to clipboard")
+                || app.diagnostic.contains("failed to copy transcript")
+        );
+
+        let mut app_empty = App::default();
+        app_empty.prompt = "/copy".to_string();
+        app_empty.submit_prompt();
+        assert!(
+            app_empty.diagnostic.contains("copied status")
+                || app_empty.diagnostic.contains("failed to copy status")
+        );
+    }
+
+    #[test]
+    fn test_paste_input_inserts_at_cursor() {
+        let mut app = App::default();
+        app.apply(UiEvent::Paste("hello world".to_string()));
+        assert_eq!(app.prompt(), "hello world");
+        assert_eq!(app.cursor_position(), 11);
+
+        app.apply(UiEvent::Input(Input::Left));
+        app.apply(UiEvent::Input(Input::Left));
+        app.apply(UiEvent::Paste("!".to_string()));
+        assert_eq!(app.prompt(), "hello wor!ld");
+    }
+
+    #[test]
+    fn test_theme_autocompletion_and_no_mode_toggle() {
+        let mut app = App::default();
+        let original_mode = app.mode();
+        app.prompt = "/theme ".to_string();
+        app.cursor_position = app.prompt.chars().count();
+        let suggestions = app.matching_theme_suggestions();
+        assert!(!suggestions.is_empty());
+        assert_eq!(suggestions[0], "Clawcode Dark");
+
+        app.apply(UiEvent::Input(Input::ToggleMode));
+        assert_eq!(app.mode(), original_mode);
+        assert!(app.prompt().starts_with("/theme "));
+        assert_eq!(app.prompt(), "/theme Clawcode Dark");
+    }
+
+    #[test]
+    fn test_cursor_navigation_and_editing() {
+        let mut app = App::default();
+        for c in "hello".chars() {
+            app.apply(UiEvent::Input(Input::Character(c)));
+        }
+        assert_eq!(app.prompt(), "hello");
+        assert_eq!(app.cursor_position(), 5);
+
+        app.apply(UiEvent::Input(Input::Left));
+        assert_eq!(app.cursor_position(), 4);
+
+        app.apply(UiEvent::Input(Input::Character('X')));
+        assert_eq!(app.prompt(), "hellXo");
+        assert_eq!(app.cursor_position(), 5);
+
+        app.apply(UiEvent::Input(Input::Home));
+        assert_eq!(app.cursor_position(), 0);
+
+        app.apply(UiEvent::Input(Input::Right));
+        assert_eq!(app.cursor_position(), 1);
+
+        app.apply(UiEvent::Input(Input::Backspace));
+        assert_eq!(app.prompt(), "ellXo");
+        assert_eq!(app.cursor_position(), 0);
+
+        app.apply(UiEvent::Input(Input::End));
+        assert_eq!(app.cursor_position(), 5);
+    }
+
+    #[test]
+    fn test_delete_session_in_sessions_dialog() {
+        let mut app = App::default();
+        let session = app.command_service.create_session("delete me session").unwrap();
+        let id = session.id;
+        let title = session.title.clone();
+        app.sessions_dialog = Some(SessionsDialogState::new(vec![session], Some(id)));
+        assert_eq!(app.sessions_dialog.as_ref().unwrap().items.len(), 1);
+
+        app.apply(UiEvent::Input(Input::Character('d')));
+        assert_eq!(app.sessions_dialog.as_ref().unwrap().items.len(), 0);
+        assert_eq!(app.diagnostic(), format!("session deleted: {title}"));
     }
 }

@@ -177,10 +177,12 @@ pub(crate) fn render_input_card(
         ));
     }
 
+    let cursor_prefix: String = app.prompt().chars().take(app.cursor_position()).collect();
+    let cursor_width = ratatui::text::Span::raw(&cursor_prefix).width();
+
     if area.height <= 2 {
-        let prompt_width = ratatui::text::Span::raw(app.prompt()).width();
         let cursor_x =
-            content_area.x + (prompt_width as u16).min(content_area.width.saturating_sub(1));
+            content_area.x + (cursor_width as u16).min(content_area.width.saturating_sub(1));
         frame.set_cursor_position((cursor_x, inner_area.y));
 
         if inner_area.height == 1 {
@@ -222,9 +224,8 @@ pub(crate) fn render_input_card(
             ])
             .split(inner_area);
 
-        let prompt_width = ratatui::text::Span::raw(app.prompt()).width();
         let cursor_x =
-            content_area.x + (prompt_width as u16).min(content_area.width.saturating_sub(1));
+            content_area.x + (cursor_width as u16).min(content_area.width.saturating_sub(1));
         frame.set_cursor_position((cursor_x, mini_chunks[0].y));
 
         frame.render_widget(
@@ -271,9 +272,8 @@ pub(crate) fn render_input_card(
         .split(inner_area);
 
     // Hardware terminal cursor positioning
-    let prompt_width = ratatui::text::Span::raw(app.prompt()).width();
     let cursor_x =
-        content_area.x + (prompt_width as u16).min(content_area.width.saturating_sub(1));
+        content_area.x + (cursor_width as u16).min(content_area.width.saturating_sub(1));
     let cursor_y = v_chunks[1].y;
     frame.set_cursor_position((cursor_x, cursor_y));
 
@@ -540,6 +540,10 @@ pub(crate) fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app:
         render_model_suggestions_popup(frame, input_area, app, theme);
         return;
     }
+    if app.prompt().starts_with("/theme ") {
+        render_theme_suggestions_popup(frame, input_area, app, theme);
+        return;
+    }
 
     let suggestions = app.matching_suggestions();
     if suggestions.is_empty() {
@@ -626,6 +630,70 @@ pub(crate) fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app:
                 .add_modifier(Modifier::BOLD),
         ));
 
+    frame.render_widget(Paragraph::new(items).block(block), popup_area);
+}
+
+fn render_theme_suggestions_popup(
+    frame: &mut Frame<'_>,
+    input_area: Rect,
+    app: &App,
+    theme: &Theme,
+) {
+    let suggestions = app.matching_theme_suggestions();
+    if suggestions.is_empty() || input_area.width < 10 || input_area.y < 3 {
+        return;
+    }
+    let max_visible = 8.min((input_area.y as usize).saturating_sub(2));
+    let visible_count = suggestions.len().min(max_visible);
+    if visible_count == 0 {
+        return;
+    }
+    let popup_height = (visible_count as u16) + 2;
+    let popup_y = input_area.y.saturating_sub(popup_height);
+    let popup_width = input_area.width.min(50);
+    let popup_area = Rect {
+        x: input_area.x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+    frame.render_widget(Clear, popup_area);
+    let selected_idx = app.selected_suggestion_index();
+    let scroll_offset = if selected_idx >= visible_count {
+        (selected_idx + 1).saturating_sub(visible_count)
+    } else {
+        0
+    };
+    let items: Vec<Line> = suggestions
+        .iter()
+        .skip(scroll_offset)
+        .take(visible_count)
+        .enumerate()
+        .map(|(rel_idx, &name)| {
+            let actual_idx = scroll_offset + rel_idx;
+            let is_selected = actual_idx == selected_idx;
+            if is_selected {
+                Line::from(vec![
+                    Span::styled(" › ", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
+                    Span::styled(name, Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(name, Style::default().fg(theme.ink)),
+                ])
+            }
+        })
+        .collect();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.amber))
+        .style(Style::default().bg(theme.bg_element))
+        .title(Span::styled(
+            " Themes (Tab complete) ",
+            Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+        ));
     frame.render_widget(Paragraph::new(items).block(block), popup_area);
 }
 

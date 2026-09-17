@@ -39,6 +39,12 @@ impl std::error::Error for PlatformError {}
 pub trait Clipboard {
     fn read(&self) -> Result<String, PlatformError>;
     fn write(&self, text: &str) -> Result<(), PlatformError>;
+    fn get_text(&self) -> Result<String, PlatformError> {
+        self.read()
+    }
+    fn set_text(&self, text: &str) -> Result<(), PlatformError> {
+        self.write(text)
+    }
 }
 
 pub trait ShellDiscovery {

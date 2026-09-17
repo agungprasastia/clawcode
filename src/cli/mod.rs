@@ -6,9 +6,10 @@ use std::time::Duration;
 type RefreshResult = Result<Vec<ModelInfo>, ProviderError>;
 type PendingRefresh = (ProviderId, Receiver<RefreshResult>);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq)]
 pub enum Command {
     New(String),
+    NewSession(String),
     Sessions,
     Exit,
     Mode(ConversationMode),
@@ -20,6 +21,24 @@ pub enum Command {
     Help,
 }
 
+impl PartialEq for Command {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Command::New(a) | Command::NewSession(a), Command::New(b) | Command::NewSession(b)) => a == b,
+            (Command::Sessions, Command::Sessions) => true,
+            (Command::Exit, Command::Exit) => true,
+            (Command::Mode(a), Command::Mode(b)) => a == b,
+            (Command::Connect, Command::Connect) => true,
+            (Command::ConnectProvider(a), Command::ConnectProvider(b)) => a == b,
+            (Command::Model(a), Command::Model(b)) => a == b,
+            (Command::Models, Command::Models) => true,
+            (Command::ModelsRefresh, Command::ModelsRefresh) => true,
+            (Command::Help, Command::Help) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversationMode {
     Plan,
@@ -27,6 +46,15 @@ pub enum ConversationMode {
 }
 
 pub fn parse_command(input: &str) -> Result<Command, String> {
+    let trimmed_start = input.trim_start();
+    if trimmed_start.starts_with("/new ") {
+        let title = trimmed_start[5..].trim();
+        if title.is_empty() {
+            return Err("usage: /new <title>; title cannot be empty".into());
+        } else {
+            return Ok(Command::NewSession(title.to_owned()));
+        }
+    }
     match input.trim() {
         "/sessions" | "/session" | "/resume" => Ok(Command::Sessions),
         "/exit" => Ok(Command::Exit),
@@ -36,16 +64,8 @@ pub fn parse_command(input: &str) -> Result<Command, String> {
         "/models" => Ok(Command::Models),
         "/models refresh" => Ok(Command::ModelsRefresh),
         "/help" => Ok(Command::Help),
-        "/new" => Err("usage: /new <title>".into()),
+        "/new" => Ok(Command::NewSession("New session".to_string())),
         "/model" => Ok(Command::Models),
-        value if value.starts_with("/new ") => {
-            let title = value[5..].trim();
-            if title.is_empty() {
-                Err("usage: /new <title>; title cannot be empty".into())
-            } else {
-                Ok(Command::New(title.to_owned()))
-            }
-        }
         value if value.starts_with("/model ") => {
             let model = value[7..].trim();
             if model.is_empty() {
@@ -195,7 +215,7 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
     pub fn execute(&mut self, command: Command) -> Result<CommandOutput, ProviderError> {
         self.poll_refresh();
         match command {
-            Command::New(title) => {
+            Command::New(title) | Command::NewSession(title) => {
                 let title = bounded_title(&title);
                 let session = self
                     .db
@@ -222,7 +242,10 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
                 Ok(CommandOutput::Mode(mode))
             }
             Command::Connect => {
-                let provider = ProviderId::new("openai");
+                let provider = self
+                    .default_provider
+                    .clone()
+                    .unwrap_or_else(|| ProviderId::new("openai"));
                 self.provider = Some(provider.clone());
                 Ok(CommandOutput::Connected(provider))
             }
@@ -250,7 +273,7 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
                 Ok(CommandOutput::RefreshStarted)
             }
             Command::Help => Ok(CommandOutput::Help(
-                "available commands: /plan, /build, /connect, /model <id>, /models, /sessions, /new <title>, /help, /exit".into(),
+                "available commands: /plan, /build, /model <id>, /models, /models refresh, /connect [provider], /agents, /themes, /theme <name>, /sessions, /new [title], /clear, /compact, /copy, /keys, /status, /help, /exit".into(),
             )),
         }
     }
@@ -439,5 +462,62 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("refresh result was not applied");
+    }
+
+    #[test]
+    fn parses_new_command_with_and_without_title() {
+        assert_eq!(
+            parse_command("/new"),
+            Ok(Command::NewSession("New session".to_string()))
+        );
+        assert_eq!(
+            parse_command("/new my custom session"),
+            Ok(Command::NewSession("my custom session".to_string()))
+        );
+        assert!(parse_command("/new   ").is_err());
+    }
+
+    #[test]
+    fn parses_connect_with_provider() {
+        assert_eq!(
+            parse_command("/connect anthropic"),
+            Ok(Command::ConnectProvider("anthropic".to_string()))
+        );
+        assert_eq!(parse_command("/connect"), Ok(Command::Connect));
+    }
+
+    #[test]
+    fn connect_uses_configured_default_provider_or_openai() {
+        let mut service = CommandService::new(Source);
+        assert_eq!(
+            service.execute(Command::Connect).unwrap(),
+            CommandOutput::Connected(ProviderId::new("openai"))
+        );
+        service.set_default_provider(ProviderId::new("anthropic"));
+        assert_eq!(
+            service.execute(Command::Connect).unwrap(),
+            CommandOutput::Connected(ProviderId::new("anthropic"))
+        );
+        assert_eq!(
+            service.execute(Command::ConnectProvider("ollama".into())).unwrap(),
+            CommandOutput::Connected(ProviderId::new("ollama"))
+        );
+    }
+
+    #[test]
+    fn help_lists_all_comprehensive_commands() {
+        let mut service = CommandService::new(Source);
+        let output = service.execute(Command::Help).unwrap();
+        let CommandOutput::Help(text) = output else {
+            panic!("expected Help output");
+        };
+        for cmd in [
+            "/plan", "/build", "/model <id>", "/models", "/models refresh",
+            "/connect [provider]", "/agents", "/themes", "/theme <name>",
+            "/sessions", "/new [title]", "/clear", "/compact", "/copy",
+            "/keys", "/status", "/help", "/exit",
+        ] {
+            assert!(text.contains(cmd), "help output missing command `{cmd}`");
+        }
     }
 }
