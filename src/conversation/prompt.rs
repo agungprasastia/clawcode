@@ -189,7 +189,8 @@ You are currently operating in BUILD mode.
 - CRITICAL: Always use `edit_file` with precise string replacement to update or modify existing files. Use `write_file` ONLY when creating brand-new files or completely replacing a whole file from scratch.
 - Inspect files thoroughly using `read_file` or search tools before applying edits.
 - When referencing code in responses, use `file_path:line_number` format.
-- Call `update_plan` before starting multi-step tasks and as milestones are reached to update the visual checklist."#.to_string()
+- Call `update_plan` before starting multi-step tasks and as milestones are reached to update the visual checklist.
+- After receiving tool call results, you MUST ALWAYS provide a comprehensive text response explaining your findings, code changes, or next steps. NEVER end a turn with empty content or silence after executing tools."#.to_string()
     }
 
     fn resolve_local_rules(&self) -> Option<(PathBuf, String)> {

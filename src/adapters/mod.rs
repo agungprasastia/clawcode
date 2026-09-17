@@ -245,12 +245,19 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                 .map(|m| {
                     let mut obj = serde_json::json!({
                         "role": m.role,
-                        "content": m.content,
+                        "content": if m.role == "assistant" && m.tool_calls.is_some() && m.content.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::Value::String(m.content.clone())
+                        },
                     });
-                    if let Some(ref tid) = m.tool_call_id {
+                    if let Some(name) = &m.name {
+                        obj["name"] = serde_json::Value::String(name.clone());
+                    }
+                    if let Some(tid) = &m.tool_call_id {
                         obj["tool_call_id"] = serde_json::Value::String(tid.clone());
                     }
-                    if let Some(ref tcalls) = m.tool_calls {
+                    if let Some(tcalls) = &m.tool_calls {
                         obj["tool_calls"] = serde_json::Value::Array(tcalls.clone());
                     }
                     obj
@@ -768,5 +775,56 @@ mod tests {
                 .text(),
             "b"
         );
+    }
+
+    #[test]
+    fn build_payload_serializes_assistant_tool_calls_with_null_content() {
+        let provider = JsonProvider::new(
+            "openai",
+            "https://api.openai.com/v1/chat/completions",
+            MockTransport("".into()),
+        );
+        let request = StreamRequest::new("gpt-4o", "", 100).with_messages(vec![
+            crate::provider::ChatMessage {
+                role: "assistant".into(),
+                content: "".into(),
+                tool_call_id: None,
+                tool_calls: Some(vec![serde_json::json!({
+                    "id": "call_123",
+                    "type": "function",
+                    "function": { "name": "read_file", "arguments": "{}" }
+                })]),
+                name: None,
+            },
+        ]);
+        let (body, _) = provider.build_payload(&request);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let msgs = parsed["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["content"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn build_payload_serializes_tool_message_with_name() {
+        let provider = JsonProvider::new(
+            "openai",
+            "https://api.openai.com/v1/chat/completions",
+            MockTransport("".into()),
+        );
+        let request = StreamRequest::new("gpt-4o", "", 100).with_messages(vec![
+            crate::provider::ChatMessage {
+                role: "tool".into(),
+                content: "file content".into(),
+                tool_call_id: Some("call_123".into()),
+                tool_calls: None,
+                name: Some("read_file".into()),
+            },
+        ]);
+        let (body, _) = provider.build_payload(&request);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let msgs = parsed["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[0]["name"], "read_file");
+        assert_eq!(msgs[0]["tool_call_id"], "call_123");
+        assert_eq!(msgs[0]["content"], "file content");
     }
 }

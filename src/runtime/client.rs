@@ -403,6 +403,7 @@ fn run_generation(
             content: m.content,
             tool_call_id: None,
             tool_calls: None,
+            name: None,
         })
         .collect();
 
@@ -412,6 +413,7 @@ fn run_generation(
         content: system_prompt,
         tool_call_id: None,
         tool_calls: None,
+        name: None,
     });
     messages.extend(history);
 
@@ -422,6 +424,7 @@ fn run_generation(
             content: prompt.to_string(),
             tool_call_id: None,
             tool_calls: None,
+            name: None,
         });
     }
 
@@ -432,6 +435,7 @@ fn run_generation(
         output_tokens: 0,
     };
     let mut final_finish_reason = None;
+    let mut empty_turn_retries = 0usize;
 
     for turn in 0..MAX_AGENT_TURNS {
         if cancel_requested(&ctx.db, ctx.generation_id) {
@@ -538,13 +542,28 @@ fn run_generation(
         }
 
         if turn_tool_calls.is_empty() {
-            if !text.is_empty() {
+            if !text.trim().is_empty() {
                 let _ = ctx.writer.append(ctx.session_id, "assistant", &text);
                 ctx.emit("assistant_message", &serde_json::json!({ "content": text }));
+                break;
             }
+
+            if turn > 0 && empty_turn_retries < 2 {
+                empty_turn_retries += 1;
+                messages.push(crate::provider::ChatMessage {
+                    role: "user".to_string(),
+                    content: "Please provide your response and summarize your findings or code changes based on the tool results above.".to_string(),
+                    tool_call_id: None,
+                    tool_calls: None,
+                    name: None,
+                });
+                continue;
+            }
+
             break;
         }
 
+        empty_turn_retries = 0;
         // Assistant called tools
         let tool_calls_json: Vec<serde_json::Value> = turn_tool_calls
             .iter()
@@ -570,6 +589,7 @@ fn run_generation(
             content: text,
             tool_call_id: None,
             tool_calls: Some(tool_calls_json),
+            name: None,
         });
 
         for (call_id, tool_name, args_str) in turn_tool_calls {
@@ -622,6 +642,7 @@ fn run_generation(
                 content: output,
                 tool_call_id: Some(call_id),
                 tool_calls: None,
+                name: Some(tool_name),
             });
         }
 

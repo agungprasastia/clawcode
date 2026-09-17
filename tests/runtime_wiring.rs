@@ -164,3 +164,118 @@ fn error_from_provider_surfaces_as_diagnostic() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn recovery_empty_turn_loop_recovers_after_empty_response() {
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Debug)]
+    struct ToolThenEmptyThenSummaryProvider {
+        turn: AtomicUsize,
+    }
+
+    impl Provider for ToolThenEmptyThenSummaryProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("fake"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: true,
+            }
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            match turn {
+                0 => Ok(StreamResponse {
+                    events: vec![
+                        StreamEvent::ToolCallStart {
+                            id: "call_1".into(),
+                            name: "list_dir".into(),
+                        },
+                        StreamEvent::ToolCallDelta {
+                            id: "call_1".into(),
+                            arguments: r#"{"path":"."}"#.into(),
+                        },
+                        StreamEvent::ToolCallEnd {
+                            id: "call_1".into(),
+                        },
+                        StreamEvent::Finish {
+                            reason: FinishReason::ToolCall,
+                        },
+                    ],
+                }),
+                1 => {
+                    let last_msg = request.messages.last().expect("must have tool message");
+                    assert_eq!(last_msg.role, "tool");
+                    assert_eq!(last_msg.name.as_deref(), Some("list_dir"));
+
+                    Ok(StreamResponse {
+                        events: vec![StreamEvent::Finish {
+                            reason: FinishReason::Stop,
+                        }],
+                    })
+                }
+                _ => {
+                    let last_msg = request.messages.last().expect("must have recovery message");
+                    assert_eq!(last_msg.role, "user");
+                    assert!(last_msg.content.contains("summarize your findings"));
+
+                    Ok(StreamResponse {
+                        events: vec![
+                            StreamEvent::TextDelta("Here is the recovered summary.".into()),
+                            StreamEvent::Finish {
+                                reason: FinishReason::Stop,
+                            },
+                        ],
+                    })
+                }
+            }
+        }
+    }
+
+    let path = temp_db_path("empty_turn_recovery");
+    let mut app = App::default();
+    let db = Db::open(&path).expect("runtime db");
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    app.attach_runtime(
+        db,
+        writer,
+        Box::new(ToolThenEmptyThenSummaryProvider {
+            turn: AtomicUsize::new(0),
+        }),
+    );
+
+    app.apply(UiEvent::Input(Input::Character('g')));
+    app.apply(UiEvent::Input(Input::Character('o')));
+    app.apply(UiEvent::Input(Input::Submit));
+
+    for _ in 0..500 {
+        app.poll_runtime();
+        if matches!(
+            app.conversation_status(),
+            clawcode::tui::ConversationStatus::Finished(_)
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    app.poll_runtime();
+
+    assert!(
+        app.transcript().contains("Here is the recovered summary."),
+        "transcript should contain recovered summary, got: {}",
+        app.transcript()
+    );
+    assert!(matches!(
+        app.conversation_status(),
+        clawcode::tui::ConversationStatus::Finished(_)
+    ));
+
+    let _ = std::fs::remove_file(&path);
+}

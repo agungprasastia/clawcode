@@ -14,6 +14,8 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl ChatMessage {
@@ -23,6 +25,7 @@ impl ChatMessage {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            name: None,
         }
     }
 
@@ -32,6 +35,7 @@ impl ChatMessage {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            name: None,
         }
     }
 
@@ -41,7 +45,13 @@ impl ChatMessage {
             content: content.into(),
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: None,
+            name: None,
         }
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 }
 
@@ -66,6 +76,7 @@ impl StreamRequest {
                 content: p.clone(),
                 tool_call_id: None,
                 tool_calls: None,
+                name: None,
             }],
             prompt: p,
             max_output_tokens,
