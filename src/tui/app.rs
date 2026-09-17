@@ -1649,12 +1649,53 @@ impl App {
                             format_tool_success_detail(name, output)
                         };
 
-                        let header = if target.is_empty() {
+                        let diff_info = if success && name == "edit_file" {
+                            let old_str = args
+                                .and_then(|a| a.get("old_string"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let new_str = args
+                                .and_then(|a| a.get("new_string"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            Some(crate::tui::diff::compute_diff(old_str, new_str, 20))
+                        } else if success && name == "write_file" {
+                            args.and_then(|a| a.get("content"))
+                                .and_then(|v| v.as_str())
+                                .map(|content| crate::tui::diff::compute_diff("", content, 20))
+                        } else {
+                            None
+                        };
+
+                        let header = if let Some(diff) = &diff_info {
+                            if target.is_empty() {
+                                format!("⬢ {verb} (+{} -{})", diff.added, diff.removed)
+                            } else {
+                                format!("⬢ {verb} {target} (+{} -{})", diff.added, diff.removed)
+                            }
+                        } else if target.is_empty() {
                             format!("⬢ {verb}")
                         } else {
                             format!("⬢ {verb} {target}")
                         };
                         let branch = format!("  └ {detail}");
+
+                        let mut diff_lines_str = String::new();
+                        if let Some(diff) = &diff_info {
+                            for line in &diff.lines {
+                                match line.op {
+                                    crate::tui::diff::DiffOp::Remove => {
+                                        diff_lines_str.push_str(&format!("    - {}\n", line.text));
+                                    }
+                                    crate::tui::diff::DiffOp::Add => {
+                                        diff_lines_str.push_str(&format!("    + {}\n", line.text));
+                                    }
+                                    crate::tui::diff::DiffOp::Same => {
+                                        diff_lines_str.push_str(&format!("      {}\n", line.text));
+                                    }
+                                }
+                            }
+                        }
 
                         let mut snippet = String::new();
                         if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
@@ -1663,7 +1704,13 @@ impl App {
                         if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
                             snippet.push('\n');
                         }
-                        snippet.push_str(&format!("{header}\n{branch}\n\n"));
+                        snippet.push_str(&header);
+                        snippet.push('\n');
+                        if !diff_lines_str.is_empty() {
+                            snippet.push_str(&diff_lines_str);
+                        }
+                        snippet.push_str(&branch);
+                        snippet.push_str("\n\n");
                         self.transcript.push_str(&snippet);
                         self.truncate_transcript();
                     }

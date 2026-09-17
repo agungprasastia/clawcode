@@ -373,6 +373,54 @@ pub(crate) fn visual_line_count(lines: &[Line], width: u16) -> usize {
     count
 }
 
+fn parse_diff_badge(s: &str) -> Option<(&str, &str, &str)> {
+    let open_idx = s.rfind("(+")?;
+    let close_idx = s[open_idx..].find(')')? + open_idx;
+    let badge_content = &s[open_idx + 2..close_idx];
+    let (add_part, rem_part) = badge_content.split_once(" -")?;
+    if !add_part.chars().all(|c| c.is_ascii_digit()) || !rem_part.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let before = s[..open_idx].trim_end();
+    Some((before, add_part, rem_part))
+}
+fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
+    if !text.contains('`') {
+        return vec![Span::styled(text.to_string(), Style::default().fg(theme.ink))];
+    }
+
+    let mut spans = Vec::new();
+    let mut remainder = text;
+
+    while let Some(start_idx) = remainder.find('`') {
+        let before = &remainder[..start_idx];
+        if let Some(end_idx) = remainder[start_idx + 1..].find('`') {
+            if !before.is_empty() {
+                spans.push(Span::styled(before.to_string(), Style::default().fg(theme.ink)));
+            }
+            let code_content = &remainder[start_idx + 1..start_idx + 1 + end_idx];
+            spans.push(Span::styled(
+                code_content.to_string(),
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+            ));
+            remainder = &remainder[start_idx + 1 + end_idx + 1..];
+        } else {
+            break;
+        }
+    }
+
+    if !remainder.is_empty() {
+        spans.push(Span::styled(remainder.to_string(), Style::default().fg(theme.ink)));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), Style::default().fg(theme.ink)));
+    }
+
+    spans
+}
+
+
 pub(crate) fn format_transcript_lines(
     transcript: &str,
     theme: &Theme,
@@ -380,8 +428,41 @@ pub(crate) fn format_transcript_lines(
 ) -> Vec<Line<'static>> {
     let raw_lines: Vec<&str> = transcript.lines().collect();
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(raw_lines.len());
+    let mut in_code_block = false;
 
     for (i, line) in raw_lines.iter().enumerate() {
+        if line.trim_start().starts_with("```") {
+            if in_code_block {
+                in_code_block = false;
+                lines.push(Line::from(vec![
+                    Span::styled("└───", Style::default().fg(theme.dim)),
+                ]));
+            } else {
+                in_code_block = true;
+                let lang = line.trim_start().trim_start_matches('`').trim();
+                if lang.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("┌───", Style::default().fg(theme.dim)),
+                        Span::styled("─────────────────────────────────────", Style::default().fg(theme.dim)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("┌─── ", Style::default().fg(theme.dim)),
+                        Span::styled(lang.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)),
+                        Span::styled(" ─────────────────────────────", Style::default().fg(theme.dim)),
+                    ]));
+                }
+            }
+            continue;
+        }
+
+        if in_code_block {
+            lines.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(theme.dim)),
+                Span::styled(line.to_string(), Style::default().fg(theme.ink)),
+            ]));
+            continue;
+        }
         if let Some(prompt) = line.strip_prefix("> ") {
             lines.push(Line::from(vec![
                 Span::styled(
@@ -394,10 +475,20 @@ pub(crate) fn format_transcript_lines(
                 ),
             ]));
         } else if let Some(rest) = line.strip_prefix("⬢ ") {
-            let is_failed = raw_lines.get(i + 1).map(|nl| {
-                let trimmed = nl.trim_start();
-                trimmed.starts_with("└ failed:") || trimmed.starts_with("failed:")
-            }).unwrap_or(false);
+            let is_failed = {
+                let mut failed = false;
+                for next_line in raw_lines.iter().skip(i + 1).take(25) {
+                    let trimmed = next_line.trim_start();
+                    if next_line.starts_with("⬢ ") || next_line.is_empty() {
+                        break;
+                    }
+                    if trimmed.starts_with("└ failed:") || trimmed.starts_with("failed:") {
+                        failed = true;
+                        break;
+                    }
+                }
+                failed
+            };
 
             let marker_color = if is_failed { theme.error } else { theme.success };
             let mut spans = vec![
@@ -405,7 +496,36 @@ pub(crate) fn format_transcript_lines(
             ];
 
             let rest_trimmed = rest.trim();
-            if let Some((verb, target)) = rest_trimmed.split_once(' ') {
+            if let Some((before, add_part, rem_part)) = parse_diff_badge(rest_trimmed) {
+                if let Some((verb, target)) = before.split_once(' ') {
+                    spans.push(Span::styled(
+                        verb.to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        target.to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        before.to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    ));
+                }
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("(", Style::default().fg(theme.dim)));
+                spans.push(Span::styled(
+                    format!("+{add_part}"),
+                    Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    format!("-{rem_part}"),
+                    Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(")", Style::default().fg(theme.dim)));
+            } else if let Some((verb, target)) = rest_trimmed.split_once(' ') {
                 spans.push(Span::styled(
                     verb.to_string(),
                     Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
@@ -436,6 +556,45 @@ pub(crate) fn format_transcript_lines(
                 spans.push(Span::styled(rest_trimmed.to_string(), Style::default().fg(theme.quiet)));
             }
             lines.push(Line::from(spans));
+        } else if (line.starts_with(' ') || line.starts_with('\t'))
+            && (line.trim_start().starts_with("- ") || line.trim_start() == "-")
+        {
+            let trimmed = line.trim_start();
+            let indent = &line[..line.len() - trimmed.len()];
+            let removed_text = trimmed.strip_prefix("- ").unwrap_or("");
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{indent}- "),
+                    Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    removed_text.to_string(),
+                    Style::default().fg(theme.error),
+                ),
+            ]));
+        } else if (line.starts_with(' ') || line.starts_with('\t'))
+            && (line.trim_start().starts_with("+ ") || line.trim_start() == "+")
+        {
+            let trimmed = line.trim_start();
+            let indent = &line[..line.len() - trimmed.len()];
+            let added_text = trimmed.strip_prefix("+ ").unwrap_or("");
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{indent}+ "),
+                    Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    added_text.to_string(),
+                    Style::default().fg(theme.success),
+                ),
+            ]));
+        } else if (line.starts_with(' ') || line.starts_with('\t'))
+            && line.trim_start().starts_with('⋯')
+        {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(theme.dim),
+            )));
         } else if let Some(rest) = line.strip_prefix("⬡ ") {
             let spans = vec![
                 Span::styled("⬡ ", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
@@ -465,11 +624,39 @@ pub(crate) fn format_transcript_lines(
                 Span::styled("  └ failed: ", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
                 Span::styled(rest.to_string(), Style::default().fg(theme.error)),
             ]));
-        } else {
+        } else if line.starts_with("### ") {
             lines.push(Line::from(Span::styled(
                 line.to_string(),
-                Style::default().fg(theme.ink),
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
             )));
+        } else if line.starts_with("## ") {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+            )));
+        } else if line.starts_with("# ") {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+            )));
+        } else if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            let mut spans = vec![
+                Span::styled("• ", Style::default().fg(theme.amber)),
+            ];
+            spans.extend(format_inline_code(rest, theme));
+            lines.push(Line::from(spans));
+        } else if (line.starts_with(' ') || line.starts_with('\t')) && line.trim_start().starts_with("* ") {
+            let trimmed = line.trim_start();
+            let indent = &line[..line.len() - trimmed.len()];
+            let rest = &trimmed["* ".len()..];
+            let mut spans = vec![
+                Span::raw(indent.to_string()),
+                Span::styled("• ", Style::default().fg(theme.amber)),
+            ];
+            spans.extend(format_inline_code(rest, theme));
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(format_inline_code(line, theme)));
         }
     }
 
@@ -611,5 +798,134 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[0].content, "Plain response text from assistant");
         assert_eq!(lines[0].spans[0].style.fg, Some(theme.ink));
+    }
+
+    #[test]
+    fn test_format_transcript_diff_lines() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+
+        let transcript = "    - old removed line\n    + new added line";
+        let lines = format_transcript_lines(transcript, &theme, mode_color);
+        assert_eq!(lines.len(), 2);
+
+        assert_eq!(lines[0].spans[0].content, "    - ");
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.error));
+        assert_eq!(lines[0].spans[1].content, "old removed line");
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme.error));
+
+        assert_eq!(lines[1].spans[0].content, "    + ");
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.success));
+        assert_eq!(lines[1].spans[1].content, "new added line");
+        assert_eq!(lines[1].spans[1].style.fg, Some(theme.success));
+    }
+
+    #[test]
+    fn test_format_transcript_edit_diff_badge() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+
+        let transcript = "⬢ Edit src/main.rs (+3 -1)\n    - old\n    + new\n  └ succeeded";
+        let lines = format_transcript_lines(transcript, &theme, mode_color);
+        assert_eq!(lines.len(), 4);
+
+        assert_eq!(lines[0].spans[0].content, "⬢ ");
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.success));
+
+        let add_span = lines[0].spans.iter().find(|s| s.content == "+3").expect("+3 badge span");
+        assert_eq!(add_span.style.fg, Some(theme.success));
+
+        let rem_span = lines[0].spans.iter().find(|s| s.content == "-1").expect("-1 badge span");
+        assert_eq!(rem_span.style.fg, Some(theme.error));
+
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.error));
+        assert_eq!(lines[2].spans[0].style.fg, Some(theme.success));
+        assert_eq!(lines[3].spans[0].content, "  └ ");
+    }
+
+    #[test]
+    fn test_format_transcript_markdown_code_block() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+
+        let transcript = "```rust\nfn main() {}\n```";
+        let lines = format_transcript_lines(transcript, &theme, mode_color);
+        assert_eq!(lines.len(), 3);
+
+        // Header
+        assert_eq!(lines[0].spans[0].content, "┌─── ");
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[0].spans[1].content, "rust");
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme.teal));
+
+        // Content
+        assert_eq!(lines[1].spans[0].content, "│ ");
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[1].spans[1].content, "fn main() {}");
+        assert_eq!(lines[1].spans[1].style.fg, Some(theme.ink));
+
+        // Footer
+        assert_eq!(lines[2].spans[0].content, "└───");
+        assert_eq!(lines[2].spans[0].style.fg, Some(theme.dim));
+    }
+
+    #[test]
+    fn test_format_transcript_markdown_headings() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+
+        let transcript = "# Heading 1\n## Heading 2\n### Heading 3";
+        let lines = format_transcript_lines(transcript, &theme, mode_color);
+        assert_eq!(lines.len(), 3);
+
+        assert_eq!(lines[0].spans[0].content, "# Heading 1");
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.amber));
+
+        assert_eq!(lines[1].spans[0].content, "## Heading 2");
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.teal));
+
+        assert_eq!(lines[2].spans[0].content, "### Heading 3");
+        assert_eq!(lines[2].spans[0].style.fg, Some(theme.ink));
+    }
+
+    #[test]
+    fn test_format_transcript_inline_code() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+
+        let transcript = "Run `hello_world` now";
+        let lines = format_transcript_lines(transcript, &theme, mode_color);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans.len(), 3);
+
+        assert_eq!(lines[0].spans[0].content, "Run ");
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.ink));
+
+        assert_eq!(lines[0].spans[1].content, "hello_world");
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme.teal));
+
+        assert_eq!(lines[0].spans[2].content, " now");
+        assert_eq!(lines[0].spans[2].style.fg, Some(theme.ink));
+    }
+
+    #[test]
+    fn test_format_transcript_bullet_list() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+
+        let transcript = "- First item\n* Second item with `code`";
+        let lines = format_transcript_lines(transcript, &theme, mode_color);
+        assert_eq!(lines.len(), 2);
+
+        assert_eq!(lines[0].spans[0].content, "• ");
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.amber));
+        assert_eq!(lines[0].spans[1].content, "First item");
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme.ink));
+
+        assert_eq!(lines[1].spans[0].content, "• ");
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.amber));
+        assert_eq!(lines[1].spans[1].content, "Second item with ");
+        assert_eq!(lines[1].spans[2].content, "code");
+        assert_eq!(lines[1].spans[2].style.fg, Some(theme.teal));
     }
 }
