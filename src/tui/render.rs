@@ -936,7 +936,137 @@ fn render_input_card(
     frame.render_widget(cap_row, Rect::new(area.x, v_chunks[4].y, area.width, 1));
 }
 
+fn visual_line_count(lines: &[Line], width: u16) -> usize {
+    if width == 0 {
+        return lines.len();
+    }
+    let mut count = 0;
+    for line in lines {
+        let w = line.width();
+        let rows = if w == 0 {
+            1
+        } else {
+            (w + width as usize - 1) / width as usize
+        };
+        count += rows;
+    }
+    count
+}
+
+fn format_transcript_lines(
+    transcript: &str,
+    theme: &Theme,
+    mode_color: Color,
+) -> Vec<Line<'static>> {
+    let raw_lines: Vec<&str> = transcript.lines().collect();
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(raw_lines.len());
+
+    for (i, line) in raw_lines.iter().enumerate() {
+        if let Some(prompt) = line.strip_prefix("> ") {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "┃ ",
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    prompt.to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else if let Some(rest) = line.strip_prefix("⬢ ") {
+            let is_failed = raw_lines.get(i + 1).map(|nl| {
+                let trimmed = nl.trim_start();
+                trimmed.starts_with("└ failed:") || trimmed.starts_with("failed:")
+            }).unwrap_or(false);
+
+            let marker_color = if is_failed { theme.error } else { theme.success };
+            let mut spans = vec![
+                Span::styled("⬢ ", Style::default().fg(marker_color).add_modifier(Modifier::BOLD)),
+            ];
+
+            let rest_trimmed = rest.trim();
+            if let Some((verb, target)) = rest_trimmed.split_once(' ') {
+                spans.push(Span::styled(
+                    verb.to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    target.to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    rest_trimmed.to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ));
+            }
+            lines.push(Line::from(spans));
+        } else if line.trim_start().starts_with("└ ") {
+            let trimmed = line.trim_start();
+            let rest = &trimmed["└ ".len()..];
+            let mut spans = vec![
+                Span::styled("  └ ", Style::default().fg(theme.dim)),
+            ];
+            let rest_trimmed = rest.trim();
+            if let Some(err_detail) = rest_trimmed.strip_prefix("failed:") {
+                spans.push(Span::styled("failed: ", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(err_detail.trim().to_string(), Style::default().fg(theme.error)));
+            } else {
+                spans.push(Span::styled(rest_trimmed.to_string(), Style::default().fg(theme.quiet)));
+            }
+            lines.push(Line::from(spans));
+        } else if let Some(rest) = line.strip_prefix("⬡ ") {
+            let spans = vec![
+                Span::styled("⬡ ", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
+                Span::styled(rest.to_string(), Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+            ];
+            lines.push(Line::from(spans));
+        } else if let Some(rest) = line.strip_prefix("⚙ [") {
+            let inner = rest.strip_suffix(']').unwrap_or(rest);
+            let mut spans = vec![
+                Span::styled("⚙ ", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
+            ];
+            if let Some((name, args)) = inner.split_once(':') {
+                spans.push(Span::styled(name.trim().to_string(), Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(args.trim().to_string(), Style::default().fg(theme.ink)));
+            } else {
+                spans.push(Span::styled(inner.trim().to_string(), Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)));
+            }
+            lines.push(Line::from(spans));
+        } else if let Some(rest) = line.strip_prefix("✓ ") {
+            lines.push(Line::from(vec![
+                Span::styled("  └ ", Style::default().fg(theme.dim)),
+                Span::styled(rest.to_string(), Style::default().fg(theme.quiet)),
+            ]));
+        } else if let Some(rest) = line.strip_prefix("✗ ") {
+            lines.push(Line::from(vec![
+                Span::styled("  └ failed: ", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
+                Span::styled(rest.to_string(), Style::default().fg(theme.error)),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(theme.ink),
+            )));
+        }
+    }
+
+    lines
+}
+
 fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let mode_color = match app.mode() {
+        super::ConversationMode::Plan => theme.amber,
+        super::ConversationMode::Build => theme.teal,
+    };
+    let is_working = app.metrics().is_none()
+        && (matches!(app.conversation_status(), super::ConversationStatus::Active)
+            || app.is_streaming_active()
+            || app.is_typing()
+            || app.active_tool().is_some());
+
     let left_spans = if matches!(app.conversation_status(), super::ConversationStatus::Error) {
         vec![
             Span::styled("✖ ", Style::default().fg(theme.error)),
@@ -949,6 +1079,31 @@ fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
                 Style::default().fg(theme.error),
             ),
         ]
+    } else if is_working {
+        if let Some(tool) = app.active_tool() {
+            let elapsed = tool.started_at.elapsed().as_secs_f64();
+            let action_str = if tool.desc.is_empty() {
+                tool.name.clone()
+            } else {
+                format!("{}: {}", tool.name, tool.desc)
+            };
+            vec![
+                Span::styled("⬡ ", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
+                Span::styled(action_str, Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" · {:.1}s", elapsed), Style::default().fg(theme.dim)),
+            ]
+        } else {
+            let elapsed_str = if let Some(elapsed) = app.streaming_elapsed_seconds() {
+                format!(" · {:.1}s", elapsed)
+            } else {
+                String::new()
+            };
+            vec![
+                Span::styled("● ", Style::default().fg(mode_color)),
+                Span::styled("streaming", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
+                Span::styled(elapsed_str, Style::default().fg(theme.dim)),
+            ]
+        }
     } else if !app.diagnostic().is_empty() {
         vec![
             Span::styled("! ", Style::default().fg(theme.warning)),
@@ -961,7 +1116,15 @@ fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
         ]
     };
 
-    let (right_spans, right_len) = if !app.matching_suggestions().is_empty() {
+    let (right_spans, right_len) = if is_working {
+        (
+            vec![
+                Span::styled("Esc", Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+                Span::styled(" cancel", Style::default().fg(theme.dim)),
+            ],
+            12,
+        )
+    } else if !app.matching_suggestions().is_empty() {
         (
             vec![
                 Span::styled(
@@ -1043,8 +1206,13 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         Span::styled(identity_label(app), Style::default().fg(theme.ink)),
     ]);
 
-    let status_color = if app.is_typing() || matches!(app.conversation_status(), super::ConversationStatus::Active) {
-        theme.success
+    let is_working = app.metrics().is_none()
+        && (matches!(app.conversation_status(), super::ConversationStatus::Active)
+            || app.is_streaming_active()
+            || app.is_typing()
+            || app.active_tool().is_some());
+    let status_color = if is_working {
+        mode_color
     } else {
         match app.conversation_status() {
             super::ConversationStatus::Active => theme.success,
@@ -1076,26 +1244,7 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         .borders(Borders::NONE)
         .style(Style::default().bg(theme.bg_element));
 
-    let mut lines: Vec<Line> = Vec::new();
-    for line in app.transcript().lines() {
-        if let Some(prompt) = line.strip_prefix("> ") {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "┃ ",
-                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    prompt.to_string(),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ),
-            ]));
-        } else {
-            lines.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(theme.ink),
-            )));
-        }
-    }
+    let mut lines = format_transcript_lines(app.transcript(), theme, mode_color);
 
     if app.is_typing() {
         let is_last_prompt = lines
@@ -1117,56 +1266,103 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         }
     }
 
-    if let Some(metrics) = app.metrics() {
-        let mut meta_spans = vec![
-            Span::styled(
-                "▣ ",
-                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                mode_label(app),
-                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-            ),
-        ];
-
-        let model = if !metrics.model().is_empty() {
-            metrics.model()
-        } else if !app.selected_model().is_empty() {
-            app.selected_model()
-        } else {
-            "default"
+    if let Some(active_tool) = app.active_tool() {
+        let active_verb = match active_tool.name.as_str() {
+            "read_file" => "Reading",
+            "write_file" => "Writing",
+            "edit_file" => "Editing",
+            "list_dir" => "Listing",
+            "glob_search" => "Running glob_search",
+            "grep_search" => "Running grep_search",
+            "bash" => "Running",
+            _ => "Running",
         };
-        meta_spans.push(Span::styled(" • ", Style::default().fg(theme.dim)));
-        meta_spans.push(Span::styled(
-            model.to_string(),
-            Style::default().fg(theme.dim),
-        ));
+        let action_text = if active_tool.desc.is_empty() {
+            format!("Running {}...", active_tool.name)
+        } else if active_tool.name == "grep_search" || active_tool.name == "glob_search" {
+            format!("Running {} {}...", active_tool.name, active_tool.desc)
+        } else {
+            format!("{} {}...", active_verb, active_tool.desc)
+        };
+        let mut active_spans = vec![
+            Span::styled("⬡ ", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
+            Span::styled(action_text, Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+        ];
+        let elapsed = active_tool.started_at.elapsed().as_secs_f64();
+        if elapsed >= 0.5 {
+            active_spans.push(Span::styled(
+                format!("  {:.1}s", elapsed),
+                Style::default().fg(theme.dim),
+            ));
+        }
+        if !lines.is_empty() && !lines.last().map(|l| l.spans.is_empty()).unwrap_or(false) {
+            lines.push(Line::from(String::new()));
+        }
+        lines.push(Line::from(active_spans));
+    }
 
-        if let Some(usage) = metrics.usage() {
-            let dur_secs = metrics.duration.as_secs_f64();
-            let tps = if dur_secs > 0.05 {
-                format!("{:.0}t/s", (usage.output_tokens as f64) / dur_secs)
+    if let Some(metrics) = app.metrics() {
+
+            let mut meta_spans = vec![
+                Span::styled(
+                    "▣ ",
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    mode_label(app),
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ),
+            ];
+
+            let model = if !metrics.model().is_empty() {
+                metrics.model()
+            } else if !app.selected_model().is_empty() {
+                app.selected_model()
             } else {
-                format!("{}t", usage.output_tokens)
+                "default"
             };
             meta_spans.push(Span::styled(" • ", Style::default().fg(theme.dim)));
-            meta_spans.push(Span::styled(tps, Style::default().fg(theme.dim)));
-        }
+            meta_spans.push(Span::styled(
+                model.to_string(),
+                Style::default().fg(theme.dim),
+            ));
 
-        let dur_str = if metrics.duration.as_secs() > 0 {
-            format!("{:.1}s", metrics.duration.as_secs_f64())
-        } else {
-            format!("{}ms", metrics.duration.as_millis())
-        };
-        meta_spans.push(Span::styled(" • ", Style::default().fg(theme.dim)));
-        meta_spans.push(Span::styled(dur_str, Style::default().fg(theme.dim)));
+            if let Some(usage) = metrics.usage() {
+                let dur_secs = metrics.duration.as_secs_f64();
+                let tps = if dur_secs > 0.05 {
+                    format!("{:.0}t/s", (usage.output_tokens as f64) / dur_secs)
+                } else {
+                    format!("{}t", usage.output_tokens)
+                };
+                meta_spans.push(Span::styled(" • ", Style::default().fg(theme.dim)));
+                meta_spans.push(Span::styled(tps, Style::default().fg(theme.dim)));
+            }
 
-        lines.push(Line::from(String::new()));
-        lines.push(Line::from(meta_spans));
-    } else if matches!(app.conversation_status(), super::ConversationStatus::Active)
-        || app.is_streaming_active()
-    {
-        let spinner_width = if chunks[1].width < 30 {
+            let dur_str = if metrics.duration.as_secs() > 0 {
+                format!("{:.1}s", metrics.duration.as_secs_f64())
+            } else {
+                format!("{}ms", metrics.duration.as_millis())
+            };
+            meta_spans.push(Span::styled(" • ", Style::default().fg(theme.dim)));
+            meta_spans.push(Span::styled(dur_str, Style::default().fg(theme.dim)));
+
+            lines.push(Line::from(String::new()));
+            lines.push(Line::from(meta_spans));
+
+    }
+
+    let (transcript_area, status_bar_area) = if is_working && chunks[1].height >= 3 {
+        let sub = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(chunks[1]);
+        (sub[0], Some(sub[1]))
+    } else {
+        (chunks[1], None)
+    };
+
+    if status_bar_area.is_none() && is_working {
+        let spinner_width = if transcript_area.width < 30 {
             1
         } else {
             crate::tui::WaveSpinner::WIDTH
@@ -1196,9 +1392,73 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
         lines.push(Line::from(status_spans));
     }
 
-    let total_lines = lines.len() as u16;
-    let visible_height = chunks[1].height;
-    let max_scroll = total_lines.saturating_sub(visible_height);
+    if let Some(status_area) = status_bar_area {
+        let spinner_width = if status_area.width < 30 {
+            1
+        } else {
+            crate::tui::WaveSpinner::WIDTH
+        };
+        let mut status_spans = app.wave_spinner().spans_for_width(spinner_width);
+
+        if let Some(tool) = app.active_tool() {
+            status_spans.push(Span::raw(" "));
+            status_spans.push(Span::styled(
+                "⬡ ",
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            ));
+            let tool_desc = if tool.desc.is_empty() {
+                tool.name.clone()
+            } else {
+                format!("{}: {}", tool.name, tool.desc)
+            };
+            let max_desc_len = (status_area.width as usize).saturating_sub(36).max(8);
+            let display_desc = if tool_desc.len() > max_desc_len {
+                format!("{}…", &tool_desc[..max_desc_len.saturating_sub(1)])
+            } else {
+                tool_desc
+            };
+            status_spans.push(Span::styled(
+                display_desc,
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+            ));
+        } else if let Some(tps) = app.tokens_per_second() {
+            status_spans.push(Span::raw(" "));
+            status_spans.push(Span::styled(
+                format!("{:.0}t/s", tps),
+                Style::default().fg(theme.dim),
+            ));
+        }
+
+        if let Some(elapsed) = app.streaming_elapsed_seconds() {
+            status_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+            status_spans.push(Span::styled(
+                format!("{:.1}s", elapsed),
+                Style::default().fg(theme.dim),
+            ));
+        } else if let Some(tool) = app.active_tool() {
+            let elapsed = tool.started_at.elapsed().as_secs_f64();
+            status_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+            status_spans.push(Span::styled(
+                format!("{:.1}s", elapsed),
+                Style::default().fg(theme.dim),
+            ));
+        }
+
+        status_spans.push(Span::raw("  "));
+        status_spans.push(Span::styled(
+            "esc to cancel",
+            Style::default().fg(theme.dim),
+        ));
+
+        let status_widget = Paragraph::new(Line::from(status_spans))
+            .style(Style::default().bg(theme.bg_element));
+        frame.render_widget(status_widget, status_area);
+    }
+
+    let content_width = transcript_area.width;
+    let total_visual_lines = visual_line_count(&lines, content_width) as u16;
+    let visible_height = transcript_area.height;
+    let max_scroll = total_visual_lines.saturating_sub(visible_height);
     let scroll_offset = app.chat_scroll().min(max_scroll);
     let scroll_y = max_scroll.saturating_sub(scroll_offset);
 
@@ -1208,28 +1468,28 @@ fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode
             .wrap(Wrap { trim: false })
             .scroll((scroll_y, 0))
             .block(conversation_block),
-        chunks[1],
+        transcript_area,
     );
 
-    if total_lines > visible_height && visible_height > 0 {
+    if total_visual_lines > visible_height && visible_height > 0 {
         let mut scrollbar_state =
-            ScrollbarState::new(total_lines as usize).position(scroll_y as usize);
+            ScrollbarState::new(total_visual_lines as usize).position(scroll_y as usize);
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
             .track_symbol(Some("│"))
             .thumb_symbol("┃");
-        frame.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
+        frame.render_stateful_widget(scrollbar, transcript_area, &mut scrollbar_state);
     }
 
-    if scroll_offset > 0 && chunks[1].width >= 30 && chunks[1].height >= 2 {
+    if scroll_offset > 0 && transcript_area.width >= 30 && transcript_area.height >= 2 {
         let badge_text = format!(" ↓ {scroll_offset} lines up (End to bottom) ");
         let badge_width = badge_text.len() as u16;
-        if chunks[1].width > badge_width + 2 {
+        if transcript_area.width > badge_width + 2 {
             let badge_area = Rect {
-                x: chunks[1].x + chunks[1].width - badge_width - 2,
-                y: chunks[1].y + chunks[1].height - 1,
+                x: transcript_area.x + transcript_area.width - badge_width - 2,
+                y: transcript_area.y + transcript_area.height - 1,
                 width: badge_width,
                 height: 1,
             };
@@ -1317,7 +1577,9 @@ fn mode_label(app: &App) -> &'static str {
 }
 
 fn status_label(app: &App) -> String {
-    if app.is_typing() {
+    if let Some(tool) = app.active_tool() {
+        format!("TOOL: {}", tool.name.to_ascii_uppercase())
+    } else if app.metrics().is_none() && (app.is_typing() || app.is_streaming_active()) {
         "STREAMING".to_string()
     } else {
         format!("{:?}", app.conversation_status()).to_ascii_uppercase()

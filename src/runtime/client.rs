@@ -611,6 +611,7 @@ fn run_generation(
                 &serde_json::json!({
                     "id": &call_id,
                     "name": &tool_name,
+                    "arguments": &args_val,
                     "success": success,
                     "output": &output,
                 }),

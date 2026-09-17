@@ -178,6 +178,119 @@ pub enum UiEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveToolInfo {
+    pub name: String,
+    pub desc: String,
+    pub started_at: std::time::Instant,
+}
+
+pub fn tool_target_and_verbs(name: &str, args: Option<&serde_json::Value>) -> (&'static str, &'static str, String) {
+    let desc = match (name, args) {
+        ("read_file" | "write_file" | "edit_file", Some(a)) => {
+            a.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string()
+        }
+        ("bash", Some(a)) => {
+            a.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string()
+        }
+        ("glob_search", Some(a)) => {
+            a.get("pattern").and_then(|p| p.as_str()).unwrap_or("").to_string()
+        }
+        ("grep_search", Some(a)) => {
+            a.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string()
+        }
+        ("list_dir", Some(a)) => {
+            a.get("path").and_then(|p| p.as_str()).unwrap_or(".").to_string()
+        }
+        (_, Some(a)) => {
+            if let Some(s) = a
+                .get("path")
+                .or_else(|| a.get("command"))
+                .or_else(|| a.get("query"))
+                .or_else(|| a.get("pattern"))
+                .and_then(|v| v.as_str())
+            {
+                s.to_string()
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    };
+
+    match name {
+        "read_file" => ("Read", "Reading", desc),
+        "write_file" => ("Write", "Writing", desc),
+        "edit_file" => ("Edit", "Editing", desc),
+        "list_dir" => ("List", "Listing", desc),
+        "glob_search" => ("Glob", "Running glob_search", desc),
+        "grep_search" => ("Grep", "Running grep_search", desc),
+        "bash" => ("Ran", "Running", desc),
+        _ => ("Tool", "Running", desc),
+    }
+}
+
+pub fn format_tool_success_detail(name: &str, output: &str) -> String {
+    match name {
+        "read_file" => {
+            let lines = output.lines().count();
+            if lines == 1 {
+                "1 line".to_string()
+            } else {
+                format!("{lines} lines")
+            }
+        }
+        "grep_search" => {
+            let lines = output.lines().count();
+            if lines == 0 || output.trim().is_empty() {
+                "0 matches".to_string()
+            } else if lines == 1 {
+                "1 line".to_string()
+            } else {
+                format!("{lines} lines")
+            }
+        }
+        "glob_search" => "succeeded".to_string(),
+        "list_dir" => {
+            let count = output.lines().count();
+            if count == 1 {
+                "1 entry".to_string()
+            } else {
+                format!("{count} entries")
+            }
+        }
+        "write_file" => {
+            let count = output.lines().count();
+            if count <= 1 {
+                "succeeded".to_string()
+            } else {
+                format!("{count} lines")
+            }
+        }
+        "edit_file" => "succeeded".to_string(),
+        "bash" => {
+            let count = output.lines().count();
+            if output.trim().is_empty() {
+                "succeeded".to_string()
+            } else if count == 1 && output.trim().len() < 60 {
+                output.trim().to_string()
+            } else {
+                format!("{count} lines")
+            }
+        }
+        _ => {
+            let count = output.lines().count();
+            if count <= 1 && output.trim().len() < 60 && !output.trim().is_empty() {
+                output.trim().to_string()
+            } else if count > 1 {
+                format!("{count} lines")
+            } else {
+                "succeeded".to_string()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelsDialogState {
     pub items: Vec<crate::provider::ModelInfo>,
     pub selected: usize,
@@ -675,6 +788,7 @@ pub struct App {
     history_index: Option<usize>,
     /// Saved draft when user was typing and started navigating history with Up arrow.
     draft_prompt: String,
+    active_tool: Option<ActiveToolInfo>,
 }
 
 /// View state isolated per session: switching sessions must not reset the
@@ -739,6 +853,7 @@ impl App {
             prompt_history: Vec::new(),
             history_index: None,
             draft_prompt: String::new(),
+            active_tool: None,
         }
     }
 
@@ -1058,6 +1173,7 @@ impl App {
             }
             UiEvent::Input(Input::Cancel) => {
                 self.cancellation_pending = true;
+                self.active_tool = None;
                 if let Some(runtime) = self.runtime.as_ref()
                     && let Some(session_id) = self.active_session_id
                 {
@@ -1068,6 +1184,7 @@ impl App {
                 self.transcript.clear();
                 self.chat_scroll = 0;
                 self.status = ConversationStatus::Idle;
+                self.active_tool = None;
                 self.diagnostic = "screen cleared".to_string();
             }
             UiEvent::Input(Input::Character(character)) => {
@@ -1338,9 +1455,15 @@ impl App {
         self.typewriter.is_typing() || matches!(self.status, ConversationStatus::Active)
     }
 
-    /// Whether the typewriter buffer has pending characters or status.
+    /// Whether the typewriter buffer has pending characters, active status, or a tool is running.
     pub fn is_streaming_active(&self) -> bool {
-        matches!(self.status, ConversationStatus::Active) || self.typewriter.is_active()
+        matches!(self.status, ConversationStatus::Active)
+            || self.typewriter.is_active()
+            || self.active_tool.is_some()
+    }
+
+    pub fn active_tool(&self) -> Option<&ActiveToolInfo> {
+        self.active_tool.as_ref()
     }
 
     pub fn wave_spinner(&self) -> &crate::tui::WaveSpinner {
@@ -1393,8 +1516,11 @@ impl App {
                     redraw = true;
                 }
             }
-            if self.is_typing() || self.typewriter.is_active() {
-                self.wave_spinner.tick();
+            if self.is_typing()
+                || self.typewriter.is_active()
+                || self.active_tool.is_some()
+                || matches!(self.status, ConversationStatus::Active)
+            {
                 if let Some(chunk) = self.typewriter.drain_step() {
                     self.transcript.push_str(&chunk);
                     self.truncate_transcript();
@@ -1740,6 +1866,7 @@ impl App {
             if trimmed == "/clear" || trimmed == "/home" {
                 self.transcript.clear();
                 self.status = ConversationStatus::Idle;
+                self.active_tool = None;
                 self.diagnostic = "screen cleared".to_string();
                 return;
             }
@@ -1921,55 +2048,61 @@ impl App {
                     {
                         let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                         let args = payload.get("arguments");
-                        let desc = match (name, args) {
-                            ("read_file" | "write_file" | "edit_file", Some(a)) => {
-                                a.get("path").and_then(|p| p.as_str()).unwrap_or("")
-                            }
-                            ("bash", Some(a)) => {
-                                a.get("command").and_then(|c| c.as_str()).unwrap_or("")
-                            }
-                            ("glob_search", Some(a)) => {
-                                a.get("pattern").and_then(|p| p.as_str()).unwrap_or("")
-                            }
-                            ("grep_search", Some(a)) => {
-                                a.get("query").and_then(|q| q.as_str()).unwrap_or("")
-                            }
-                            ("list_dir", Some(a)) => {
-                                a.get("path").and_then(|p| p.as_str()).unwrap_or(".")
-                            }
-                            _ => "",
-                        };
-                        let line = if desc.is_empty() {
-                            format!("\n\n⚙ [{name}]\n")
-                        } else {
-                            format!("\n\n⚙ [{name}: {desc}]\n")
-                        };
-                        self.transcript.push_str(&line);
-                        self.truncate_transcript();
+                        let (_verb, _active_verb, desc) = tool_target_and_verbs(name, args);
+                        self.active_tool = Some(ActiveToolInfo {
+                            name: name.to_string(),
+                            desc,
+                            started_at: std::time::Instant::now(),
+                        });
                     }
                 }
                 "tool_executed" => {
                     self.flush_typewriter();
+                    let prev_active = self.active_tool.take();
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                     {
                         let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                         let success = payload.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
                         let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
-                        let mark = if success { "✓" } else { "✗" };
+                        let args = payload.get("arguments");
 
-                        let snippet = if !success {
-                            format!("{mark} {name} failed: {output}\n\n")
-                        } else if output.lines().count() <= 5 && output.len() < 300 {
-                            format!("{mark} {name} succeeded\n\n")
+                        let (verb, _active_verb, mut target) = tool_target_and_verbs(name, args);
+                        if target.is_empty() {
+                            if let Some(prev) = prev_active {
+                                target = prev.desc;
+                            }
+                        }
+
+                        let detail = if !success {
+                            let err_line = output.lines().next().unwrap_or("error").trim();
+                            let cleaned = err_line.strip_prefix(&format!("Error executing {name}: ")).unwrap_or(err_line);
+                            format!("failed: {cleaned}")
                         } else {
-                            format!("{mark} {name} succeeded ({} lines)\n\n", output.lines().count())
+                            format_tool_success_detail(name, output)
                         };
+
+                        let header = if target.is_empty() {
+                            format!("⬢ {verb}")
+                        } else {
+                            format!("⬢ {verb} {target}")
+                        };
+                        let branch = format!("  └ {detail}");
+
+                        let mut snippet = String::new();
+                        if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                            snippet.push('\n');
+                        }
+                        if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                            snippet.push('\n');
+                        }
+                        snippet.push_str(&format!("{header}\n{branch}\n\n"));
                         self.transcript.push_str(&snippet);
                         self.truncate_transcript();
                     }
                 }
                 "generation_finished" => {
+                    self.active_tool = None;
                     if let Some(session_id) = self.active_session_id
                         && event.session_id == session_id
                         && let Ok(payload) =
@@ -1990,6 +2123,7 @@ impl App {
                 }
                 "error" => {
                     self.flush_typewriter();
+                    self.active_tool = None;
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(message) = payload.get("message").and_then(|v| v.as_str())
@@ -2150,6 +2284,9 @@ impl App {
         let client = RuntimeClient::spawn(db, writer, provider, bus);
         self.runtime_events = Some(receiver);
         self.runtime = Some(client);
+    }
+    pub fn set_runtime_receiver(&mut self, receiver: std::sync::mpsc::Receiver<RuntimeEvent>) {
+        self.runtime_events = Some(receiver);
     }
 
     pub fn set_command_service(

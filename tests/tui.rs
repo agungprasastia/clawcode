@@ -1558,3 +1558,212 @@ fn which_key_r_opens_sessions_dialog() {
     assert!(!app.which_key().visible);
     assert!(app.sessions_dialog().is_some());
 }
+
+#[test]
+fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    // Submit user prompt so chat view is active
+    app.apply(UiEvent::Input(Input::Character('r')));
+    app.apply(UiEvent::Input(Input::Submit));
+    // 1. Tool starts executing
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".to_string(),
+        payload_json: serde_json::json!({
+            "name": "read_file",
+            "arguments": { "path": "src/cli/mod.rs" }
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+    assert!(app.active_tool().is_some());
+    let active = app.active_tool().unwrap();
+    assert_eq!(active.name, "read_file");
+    assert_eq!(active.desc, "src/cli/mod.rs");
+
+    // Rendering while tool is active displays the ⬡ marker and "Reading src/cli/mod.rs..."
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("⬡"));
+    assert!(text.contains("Reading src/cli/mod.rs..."));
+    // Hints row shows active tool line, not "ready"
+    assert!(!text.contains("● ready"));
+    assert!(text.contains("read_file: src/cli/mod.rs"));
+
+    // 2. Tool finishes execution with 71 lines output
+    let dummy_output = (0..71).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "read_file",
+            "arguments": { "path": "src/cli/mod.rs" },
+            "success": true,
+            "output": dummy_output
+        }).to_string(),
+    }).unwrap();
+    app.poll_runtime();
+    assert!(app.active_tool().is_none());
+
+    // Clean Crabcode-style format in transcript:
+    // ⬢ Read src/cli/mod.rs
+    //   └ 71 lines
+    assert!(app.transcript().contains("⬢ Read src/cli/mod.rs"));
+    assert!(app.transcript().contains("  └ 71 lines"));
+
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("⬢ Read src/cli/mod.rs"));
+    assert!(text.contains("└ 71 lines"));
+}
+
+#[test]
+fn tool_failure_formats_cleanly_with_error_branch() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".to_string(),
+        payload_json: serde_json::json!({
+            "name": "read_file",
+            "arguments": { "path": "foo.rs" }
+        }).to_string(),
+    }).unwrap();
+    app.poll_runtime();
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "read_file",
+            "arguments": { "path": "foo.rs" },
+            "success": false,
+            "output": "Error executing read_file: file not found"
+        }).to_string(),
+    }).unwrap();
+    app.poll_runtime();
+
+    assert!(app.transcript().contains("⬢ Read foo.rs"));
+    assert!(app.transcript().contains("  └ failed: file not found"));
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("⬢ Read foo.rs"));
+    assert!(text.contains("└ failed: file not found"));
+}
+
+#[test]
+fn various_tool_entries_format_matching_crabcode_spec() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    // grep_search
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "grep_search",
+            "arguments": { "query": "/" },
+            "success": true,
+            "output": (0..100).map(|i| format!("match {i}")).collect::<Vec<_>>().join("\n")
+        }).to_string(),
+    }).unwrap();
+
+    // glob_search
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "glob_search",
+            "arguments": { "pattern": "*ui*" },
+            "success": true,
+            "output": "src/ui/mod.rs\nsrc/ui/render.rs"
+        }).to_string(),
+    }).unwrap();
+
+    // list_dir
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 3,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "list_dir",
+            "arguments": { "path": "src" },
+            "success": true,
+            "output": (0..14).map(|i| format!("entry {i}")).collect::<Vec<_>>().join("\n")
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+
+    assert!(app.transcript().contains("⬢ Grep /"));
+    assert!(app.transcript().contains("  └ 100 lines"));
+
+    assert!(app.transcript().contains("⬢ Glob *ui*"));
+    assert!(app.transcript().contains("  └ succeeded"));
+
+    assert!(app.transcript().contains("⬢ List src"));
+    assert!(app.transcript().contains("  └ 14 entries"));
+}
+
+#[test]
+fn historical_tool_lines_render_with_clean_styles() {
+    let mut app = App::default();
+    app.apply(UiEvent::Input(Input::Character('h')));
+    app.apply(UiEvent::Input(Input::Submit));
+
+    // Simulate historical transcript format
+    app.apply(UiEvent::StreamDelta("\n⚙ [grep_search: /]\n✓ grep_search succeeded (100 lines)\n\n".into()));
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("⚙"));
+    assert!(text.contains("grep_search"));
+    assert!(text.contains("└"));
+    assert!(text.contains("grep_search succeeded (100 lines)"));
+}
