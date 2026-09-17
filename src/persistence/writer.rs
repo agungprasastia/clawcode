@@ -202,11 +202,10 @@ impl WriterHandle {
     /// Wait until all queued writes before this call are committed.
     pub fn flush(&self) {
         let (ack_tx, ack_rx) = mpsc::channel();
-        if let Ok(sender) = self.sender() {
-            if sender.send(Command::Flush(ack_tx)).is_ok() {
+        if let Ok(sender) = self.sender()
+            && sender.send(Command::Flush(ack_tx)).is_ok() {
                 let _ = ack_rx.recv();
             }
-        }
     }
 
     /// Stop the worker and take back the `Db`. Blocks until all other

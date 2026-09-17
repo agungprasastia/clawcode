@@ -50,8 +50,8 @@ pub enum ConversationMode {
 
 pub fn parse_command(input: &str) -> Result<Command, String> {
     let trimmed_start = input.trim_start();
-    if trimmed_start.starts_with("/new ") {
-        let title = trimmed_start[5..].trim();
+    if let Some(rest) = trimmed_start.strip_prefix("/new ") {
+        let title = rest.trim();
         if title.is_empty() {
             return Err("usage: /new <title>; title cannot be empty".into());
         } else {

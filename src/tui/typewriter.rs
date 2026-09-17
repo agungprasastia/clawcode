@@ -48,7 +48,7 @@ impl TypewriterState {
         if self.stream_start.is_none() {
             self.stream_start = Some(Instant::now());
         }
-        let est_tokens = (delta.len() + 3) / 4;
+        let est_tokens = delta.len().div_ceil(4);
         self.token_count += est_tokens.max(1);
         self.queue.push_str(delta);
     }
@@ -123,13 +123,11 @@ impl TypewriterState {
             }
         };
 
-        let mut char_count = 0;
         let mut byte_idx = 0;
-        for (idx, ch) in self.queue.char_indices() {
+        for (char_count, (idx, ch)) in self.queue.char_indices().enumerate() {
             if char_count >= count {
                 break;
             }
-            char_count += 1;
             byte_idx = idx + ch.len_utf8();
         }
 

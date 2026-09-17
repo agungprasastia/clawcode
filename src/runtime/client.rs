@@ -819,8 +819,8 @@ mod tests {
         let mut target_generation_id = None;
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(2) {
-            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                if event.kind == "generation_finished" {
+            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+                && event.kind == "generation_finished" {
                     target_generation_id = event.generation_id;
                     if event.payload_json.contains("cancelled") {
                         got_cancelled = true;
@@ -830,7 +830,6 @@ mod tests {
                     }
                     break;
                 }
-            }
         }
 
         assert!(got_cancelled, "generation should emit cancelled event");
@@ -867,12 +866,11 @@ mod tests {
         let mut error_seen = false;
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(1) {
-            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                if event.kind == "error" && event.payload_json.contains("already in progress") {
+            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+                && event.kind == "error" && event.payload_json.contains("already in progress") {
                     error_seen = true;
                     break;
                 }
-            }
         }
         assert!(
             error_seen,

@@ -137,9 +137,7 @@ pub fn compute_side_by_side_diff(
     for &idx in &change_indices {
         let start = idx.saturating_sub(CONTEXT_LINES);
         let end = (idx + CONTEXT_LINES + 1).min(all_rows.len());
-        for j in start..end {
-            keep[j] = true;
-        }
+        keep[start..end].fill(true);
     }
 
     let mut filtered = Vec::new();
@@ -261,7 +259,7 @@ fn lcs_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
         let n = mid_old.len();
         let m = mid_new.len();
 
-        if n.checked_mul(m).map_or(true, |prod| prod > 250_000) {
+        if n.checked_mul(m).is_none_or(|prod| prod > 250_000) {
             for &line in mid_old {
                 result.push(DiffLine {
                     op: DiffOp::Remove,
@@ -380,9 +378,7 @@ pub fn compute_diff(old_text: &str, new_text: &str, max_lines: usize) -> DiffRes
     for &idx in &change_indices {
         let start = idx.saturating_sub(CONTEXT_LINES);
         let end = (idx + CONTEXT_LINES + 1).min(all_lines.len());
-        for i in start..end {
-            keep[i] = true;
-        }
+        keep[start..end].fill(true);
     }
 
     let mut filtered = Vec::new();

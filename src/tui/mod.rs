@@ -38,29 +38,25 @@ const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const UI_EVENT_QUEUE_CAPACITY: usize = 64;
 
 pub fn default_data_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("CLAWCODE_DATA_DIR") {
-        if !dir.is_empty() {
+    if let Ok(dir) = std::env::var("CLAWCODE_DATA_DIR")
+        && !dir.is_empty() {
             return std::path::PathBuf::from(dir);
         }
-    }
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        if !local_app_data.is_empty() {
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA")
+        && !local_app_data.is_empty() {
             return std::path::PathBuf::from(local_app_data).join("clawcode");
         }
-    }
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
+        && !xdg.is_empty() {
             return std::path::PathBuf::from(xdg).join("clawcode");
         }
-    }
-    if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-        if !home.is_empty() {
+    if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
+        && !home.is_empty() {
             return std::path::PathBuf::from(home)
                 .join(".local")
                 .join("share")
                 .join("clawcode");
         }
-    }
     std::env::temp_dir().join("clawcode")
 }
 

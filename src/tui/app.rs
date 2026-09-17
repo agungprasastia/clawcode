@@ -3,8 +3,7 @@ use std::collections::VecDeque;
 use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
 use crate::conversation::ConversationEvent;
 use crate::notify::{BestEffortNotifier, Notification, NotificationKind, Notifier};
-#[allow(unused_imports)]
-use crate::platform::{Clipboard, SystemClipboard};
+use crate::platform::SystemClipboard;
 use crate::provider::FinishReason;
 use crate::provider::TurnMetrics;
 use crate::runtime::{EventBus, RuntimeEvent, client::RuntimeClient};
@@ -403,8 +402,8 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
     }
 }
 pub fn split_provider_model(id: &str) -> Option<(&str, &str)> {
-    if let Some((p, m)) = id.split_once('/') {
-        if matches!(
+    if let Some((p, m)) = id.split_once('/')
+        && matches!(
             p,
             "openai"
                 | "anthropic"
@@ -418,7 +417,6 @@ pub fn split_provider_model(id: &str) -> Option<(&str, &str)> {
         ) {
             return Some((p, m));
         }
-    }
     None
 }
 
@@ -658,18 +656,16 @@ impl App {
                     }
                 }
                 UiEvent::Input(Input::Character(c)) => {
-                    if let Some(dialog) = &mut self.question_dialog {
-                        if dialog.typing_custom || dialog.selected_option == dialog.options.len() {
+                    if let Some(dialog) = &mut self.question_dialog
+                        && (dialog.typing_custom || dialog.selected_option == dialog.options.len()) {
                             dialog.push_char(c);
                         }
-                    }
                 }
                 UiEvent::Input(Input::Backspace) => {
-                    if let Some(dialog) = &mut self.question_dialog {
-                        if dialog.typing_custom || dialog.selected_option == dialog.options.len() {
+                    if let Some(dialog) = &mut self.question_dialog
+                        && (dialog.typing_custom || dialog.selected_option == dialog.options.len()) {
                             dialog.pop_char();
                         }
-                    }
                 }
                 UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
                     self.diagnostic = "Question dismissed".to_string();
@@ -1815,7 +1811,7 @@ impl App {
                         self.prompt = p.clone();
                         self.cursor_position = self.prompt.chars().count();
                     }
-                } else if let Some(p) = self.prompt_history.get(0) {
+                } else if let Some(p) = self.prompt_history.first() {
                     self.history_index = Some(0);
                     self.prompt = p.clone();
                     self.cursor_position = self.prompt.chars().count();
@@ -2117,11 +2113,10 @@ impl App {
     /// and this drains to exhaustion each call.
     pub fn poll_runtime(&mut self) -> bool {
         self.command_service.poll_refresh();
-        if let Ok(models) = self.command_service.models() {
-            if !models.is_empty() && models != self.available_models {
+        if let Ok(models) = self.command_service.models()
+            && !models.is_empty() && models != self.available_models {
                 self.available_models = models;
             }
-        }
         let Some(receiver) = self.runtime_events.take() else {
             return false;
         };
@@ -2226,11 +2221,10 @@ impl App {
                         let args = payload.get("arguments");
 
                         let (verb, _active_verb, mut target) = tool_target_and_verbs(name, args);
-                        if target.is_empty() {
-                            if let Some(prev) = prev_active {
+                        if target.is_empty()
+                            && let Some(prev) = prev_active {
                                 target = prev.desc;
                             }
-                        }
 
                         let detail = if !success {
                             let err_line = output.lines().next().unwrap_or("error").trim();
@@ -2664,8 +2658,8 @@ impl App {
         self.diagnostic.clear();
         self.selected_suggestion = 0;
 
-        if self.transcript.is_empty() {
-            if let Ok(messages) = self.command_service.session_messages(session_id) {
+        if self.transcript.is_empty()
+            && let Ok(messages) = self.command_service.session_messages(session_id) {
                 for msg in messages {
                     if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
                         if self.transcript.ends_with('\n') {
@@ -2691,7 +2685,6 @@ impl App {
                 self.truncate_transcript();
                 self.scroll_to_bottom();
             }
-        }
     }
 
     /// Switch the live view to `session_id`, stashing the current one first.
@@ -3034,17 +3027,21 @@ mod tests {
 
     #[test]
     fn test_copy_command_writes_to_clipboard() {
-        let mut app = App::default();
-        app.transcript = "hello transcript".to_string();
-        app.prompt = "/copy".to_string();
+        let mut app = App {
+            transcript: "hello transcript".to_string(),
+            prompt: "/copy".to_string(),
+            ..App::default()
+        };
         app.submit_prompt();
         assert!(
             app.diagnostic.contains("transcript copied to clipboard")
                 || app.diagnostic.contains("failed to copy transcript")
         );
 
-        let mut app_empty = App::default();
-        app_empty.prompt = "/copy".to_string();
+        let mut app_empty = App {
+            prompt: "/copy".to_string(),
+            ..App::default()
+        };
         app_empty.submit_prompt();
         assert!(
             app_empty.diagnostic.contains("copied status")

@@ -1054,12 +1054,6 @@ pub fn format_transcript_lines(
                     rest.to_string(),
                     Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
                 ));
-            } else if rest.contains("□ ") || rest.contains("[ ]") {
-                spans.push(Span::styled(
-                    rest.to_string(),
-                    Style::default().fg(theme.quiet),
-                ));
-            } else {
                 spans.push(Span::styled(
                     rest.to_string(),
                     Style::default().fg(theme.quiet),

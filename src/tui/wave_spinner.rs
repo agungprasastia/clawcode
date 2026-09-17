@@ -91,83 +91,42 @@ impl WaveSpinner {
     }
 
     fn generate_frames(base_color: Color) -> Vec<Vec<Span<'static>>> {
-        let mut frames = Vec::new();
-
-        // Moving right (frames 0-12) - 5 block wave
-        frames.push(Self::create_frame(&[(0, 0)], base_color));
-        frames.push(Self::create_frame(&[(0, 1), (1, 0)], base_color));
-        frames.push(Self::create_frame(&[(0, 2), (1, 1), (2, 0)], base_color));
-        frames.push(Self::create_frame(
-            &[(0, 3), (1, 2), (2, 1), (3, 0)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(
-            &[(0, 4), (1, 3), (2, 2), (3, 1), (4, 0)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(
-            &[(1, 4), (2, 3), (3, 2), (4, 1), (5, 0)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(
-            &[(2, 4), (3, 3), (4, 2), (5, 1), (6, 0)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(
-            &[(3, 4), (4, 3), (5, 2), (6, 1), (7, 0)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(
-            &[(4, 3), (5, 2), (6, 1), (7, 0)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(&[(5, 2), (6, 1), (7, 0)], base_color));
-        frames.push(Self::create_frame(&[(6, 1), (7, 0)], base_color));
-        frames.push(Self::create_frame(&[(7, 0)], base_color));
-
-        // PAUSE: Hold empty before bouncing back
-        frames.push(Self::create_empty_frame());
-        frames.push(Self::create_empty_frame());
-        frames.push(Self::create_empty_frame());
-
-        // Moving left (frames 15-26) - fade direction reverses
-        frames.push(Self::create_frame(&[(7, 0)], base_color));
-        frames.push(Self::create_frame(&[(6, 1), (7, 0)], base_color));
-        frames.push(Self::create_frame(&[(5, 2), (6, 1), (7, 0)], base_color));
-        frames.push(Self::create_frame(
-            &[(4, 3), (5, 2), (6, 1), (7, 0)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(
-            &[(3, 0), (4, 1), (5, 2), (6, 3), (7, 4)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(
-            &[(2, 0), (3, 1), (4, 2), (5, 3), (6, 4)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(
-            &[(1, 0), (2, 1), (3, 2), (4, 3), (5, 4)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(
-            &[(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(
-            &[(0, 0), (1, 1), (2, 2), (3, 3)],
-            base_color,
-        ));
-        frames.push(Self::create_frame(&[(0, 0), (1, 1), (2, 2)], base_color));
-        frames.push(Self::create_frame(&[(0, 0), (1, 1)], base_color));
-
-        // PAUSE: Hold empty before looping
-        frames.push(Self::create_empty_frame());
-        frames.push(Self::create_empty_frame());
-        frames.push(Self::create_empty_frame());
-        frames.push(Self::create_empty_frame());
-
-        frames
+        vec![
+            // Moving right (frames 0-12) - 5 block wave
+            Self::create_frame(&[(0, 0)], base_color),
+            Self::create_frame(&[(0, 1), (1, 0)], base_color),
+            Self::create_frame(&[(0, 2), (1, 1), (2, 0)], base_color),
+            Self::create_frame(&[(0, 3), (1, 2), (2, 1), (3, 0)], base_color),
+            Self::create_frame(&[(0, 4), (1, 3), (2, 2), (3, 1), (4, 0)], base_color),
+            Self::create_frame(&[(1, 4), (2, 3), (3, 2), (4, 1), (5, 0)], base_color),
+            Self::create_frame(&[(2, 4), (3, 3), (4, 2), (5, 1), (6, 0)], base_color),
+            Self::create_frame(&[(3, 4), (4, 3), (5, 2), (6, 1), (7, 0)], base_color),
+            Self::create_frame(&[(4, 3), (5, 2), (6, 1), (7, 0)], base_color),
+            Self::create_frame(&[(5, 2), (6, 1), (7, 0)], base_color),
+            Self::create_frame(&[(6, 1), (7, 0)], base_color),
+            Self::create_frame(&[(7, 0)], base_color),
+            // PAUSE: Hold empty before bouncing back
+            Self::create_empty_frame(),
+            Self::create_empty_frame(),
+            Self::create_empty_frame(),
+            // Moving left (frames 15-26) - fade direction reverses
+            Self::create_frame(&[(7, 0)], base_color),
+            Self::create_frame(&[(6, 1), (7, 0)], base_color),
+            Self::create_frame(&[(5, 2), (6, 1), (7, 0)], base_color),
+            Self::create_frame(&[(4, 3), (5, 2), (6, 1), (7, 0)], base_color),
+            Self::create_frame(&[(3, 0), (4, 1), (5, 2), (6, 3), (7, 4)], base_color),
+            Self::create_frame(&[(2, 0), (3, 1), (4, 2), (5, 3), (6, 4)], base_color),
+            Self::create_frame(&[(1, 0), (2, 1), (3, 2), (4, 3), (5, 4)], base_color),
+            Self::create_frame(&[(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)], base_color),
+            Self::create_frame(&[(0, 0), (1, 1), (2, 2), (3, 3)], base_color),
+            Self::create_frame(&[(0, 0), (1, 1), (2, 2)], base_color),
+            Self::create_frame(&[(0, 0), (1, 1)], base_color),
+            // PAUSE: Hold empty before looping
+            Self::create_empty_frame(),
+            Self::create_empty_frame(),
+            Self::create_empty_frame(),
+            Self::create_empty_frame(),
+        ]
     }
 
     fn create_frame(positions: &[(usize, usize)], base_color: Color) -> Vec<Span<'static>> {

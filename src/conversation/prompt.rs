@@ -64,20 +64,16 @@ impl SystemPromptComposer {
     }
 
     pub fn compose(&self) -> String {
-        let mut sections = Vec::new();
-
-        // 1. Core provider instructions
-        sections.push(self.get_core_prompt());
-
-        // 2. Environment context
-        sections.push(self.get_environment_context());
-
-        // 3. Mode instructions (Plan vs Build)
-        sections.push(self.get_mode_instructions());
-
-        // 4. Tools usage instructions
-        sections.push(self.get_tools_guidance());
-
+        let mut sections = vec![
+            // 1. Core provider instructions
+            self.get_core_prompt(),
+            // 2. Environment context
+            self.get_environment_context(),
+            // 3. Mode instructions (Plan vs Build)
+            self.get_mode_instructions(),
+            // 4. Tools usage instructions
+            self.get_tools_guidance(),
+        ];
         // 5. Local project rules (AGENTS.md, CLAUDE.md)
         if let Some((path, content)) = self.resolve_local_rules() {
             sections.push(format!(
@@ -88,11 +84,10 @@ impl SystemPromptComposer {
         }
 
         // 6. Custom extra instructions if any
-        if let Some(ref extra) = self.custom_instructions {
-            if !extra.trim().is_empty() {
+        if let Some(ref extra) = self.custom_instructions
+            && !extra.trim().is_empty() {
                 sections.push(format!("# Additional Instructions\n{}", extra.trim()));
             }
-        }
 
         sections.join("\n\n---\n\n")
     }
@@ -219,13 +214,12 @@ You are currently operating in BUILD mode.
             ];
             for name in &candidates {
                 let p = cur.join(name);
-                if p.is_file() {
-                    if let Ok(bytes) = fs::read(&p) {
+                if p.is_file()
+                    && let Ok(bytes) = fs::read(&p) {
                         let len = bytes.len().min(DEFAULT_MAX_RULE_BYTES);
                         let s = String::from_utf8_lossy(&bytes[..len]).to_string();
                         return Some((p, s));
                     }
-                }
             }
             if !cur.pop() {
                 break;
@@ -242,13 +236,12 @@ You are currently operating in BUILD mode.
                 home.join(".claude").join("CLAUDE.md"),
             ];
             for p in &global_candidates {
-                if p.is_file() {
-                    if let Ok(bytes) = fs::read(p) {
+                if p.is_file()
+                    && let Ok(bytes) = fs::read(p) {
                         let len = bytes.len().min(DEFAULT_MAX_RULE_BYTES);
                         let s = String::from_utf8_lossy(&bytes[..len]).to_string();
                         return Some((p.clone(), s));
                     }
-                }
             }
         }
 
