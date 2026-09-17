@@ -450,6 +450,8 @@ pub struct App {
     /// Saved draft when user was typing and started navigating history with Up arrow.
     draft_prompt: String,
     active_tool: Option<ActiveToolInfo>,
+    reasoning_buffer: String,
+    reasoning_start: Option<std::time::Instant>,
     /// Snapshot of latest task plan: list of (step, status).
     pub current_plan: Vec<(String, String)>,
 }
@@ -522,6 +524,8 @@ impl App {
             history_index: None,
             draft_prompt: String::new(),
             active_tool: None,
+            reasoning_buffer: String::new(),
+            reasoning_start: None,
             current_plan: Vec::new(),
         }
     }
@@ -1219,7 +1223,59 @@ impl App {
     pub fn is_streaming_active(&self) -> bool {
         matches!(self.status, ConversationStatus::Active)
             || self.typewriter.is_active()
+            || self.is_reasoning()
             || self.active_tool.is_some()
+    }
+
+    pub fn reasoning_buffer(&self) -> &str {
+        &self.reasoning_buffer
+    }
+
+    pub fn is_reasoning(&self) -> bool {
+        !self.reasoning_buffer.is_empty() && self.active_tool.is_none()
+    }
+
+    pub fn reasoning_elapsed_seconds(&self) -> Option<f64> {
+        self.reasoning_start.map(|t| t.elapsed().as_secs_f64())
+    }
+
+    pub fn flush_reasoning(&mut self) {
+        if self.reasoning_buffer.trim().is_empty() {
+            self.reasoning_buffer.clear();
+            self.reasoning_start = None;
+            return;
+        }
+        let duration = self
+            .reasoning_start
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let dur_str = format!("{:.1}s", duration.max(0.1));
+        let reasoning = self.reasoning_buffer.trim();
+        let raw_lines: Vec<&str> = reasoning.lines().collect();
+
+        let mut snippet = String::new();
+        if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+            snippet.push('\n');
+        }
+        if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+            snippet.push('\n');
+        }
+        snippet.push_str(&format!("💭 Thought for {dur_str}\n"));
+        if raw_lines.len() <= 10 {
+            for l in raw_lines {
+                snippet.push_str(&format!("  │ {l}\n"));
+            }
+        } else {
+            for l in &raw_lines[..5] {
+                snippet.push_str(&format!("  │ {l}\n"));
+            }
+            snippet.push_str("  │ ...\n");
+        }
+        snippet.push('\n');
+        self.transcript.push_str(&snippet);
+        self.truncate_transcript();
+        self.reasoning_buffer.clear();
+        self.reasoning_start = None;
     }
 
     pub fn active_tool(&self) -> Option<&ActiveToolInfo> {
@@ -1774,6 +1830,7 @@ impl App {
     }
 
     pub fn submit_user_prompt(&mut self, prompt: &str) {
+        self.flush_reasoning();
         self.flush_typewriter();
         self.session_listings.clear();
         if self.active_session_id.is_none() {
@@ -1846,7 +1903,30 @@ impl App {
         while let Ok(event) = receiver.try_recv() {
             had_events = true;
             match event.kind.as_str() {
+                "reasoning_delta" => {
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                        && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
+                    {
+                        if self.reasoning_start.is_none() {
+                            self.reasoning_start = Some(std::time::Instant::now());
+                        }
+                        self.reasoning_buffer.push_str(delta);
+                    }
+                }
+                "tool_call_start" => {
+                    self.flush_reasoning();
+                    self.flush_typewriter();
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json) {
+                        let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                        self.active_tool = Some(ActiveToolInfo {
+                            name: name.to_string(),
+                            desc: "preparing arguments...".to_string(),
+                            started_at: std::time::Instant::now(),
+                        });
+                    }
+                }
                 "text_delta" => {
+                    self.flush_reasoning();
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
@@ -1855,6 +1935,7 @@ impl App {
                     }
                 }
                 "tool_executing" => {
+                    self.flush_reasoning();
                     self.flush_typewriter();
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
@@ -1892,6 +1973,7 @@ impl App {
                     }
                 }
                 "tool_executed" => {
+                    self.flush_reasoning();
                     self.flush_typewriter();
                     let prev_active = self.active_tool.take();
                     if let Ok(payload) =
@@ -2016,12 +2098,134 @@ impl App {
                             snippet.push_str("\n\n");
                             self.transcript.push_str(&snippet);
                             self.truncate_transcript();
+                        } else if name == "bash" {
+                            let exit_code: i32 = if let Some(idx) = output.rfind("[Process exited with code ") {
+                                let after = &output[idx + "[Process exited with code ".len()..];
+                                after.split(']').next().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(if success { 0 } else { 1 })
+                            } else if success {
+                                0
+                            } else {
+                                1
+                            };
+
+                            let header = format!("⬢ Ran {target} (exit {exit_code})");
+                            let branch = format!("  └ {detail}");
+
+                            let mut cleaned_lines: Vec<&str> = Vec::new();
+                            for l in output.lines() {
+                                let t = l.trim();
+                                if t.starts_with("[Process exited with code ") && t.ends_with(']') {
+                                    continue;
+                                }
+                                if t == "[Command finished with no output]" {
+                                    continue;
+                                }
+                                cleaned_lines.push(l);
+                            }
+
+                            let mut snippet = String::new();
+                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                snippet.push('\n');
+                            }
+                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                                snippet.push('\n');
+                            }
+                            snippet.push_str(&header);
+                            snippet.push('\n');
+
+                            if !cleaned_lines.is_empty() {
+                                snippet.push_str("  ┌── Output ────────────────────────────────────────\n");
+                                let max_lines = 25;
+                                if cleaned_lines.len() <= max_lines {
+                                    for l in &cleaned_lines {
+                                        snippet.push_str(&format!("  │ {l}\n"));
+                                    }
+                                } else {
+                                    for l in &cleaned_lines[..max_lines] {
+                                        snippet.push_str(&format!("  │ {l}\n"));
+                                    }
+                                    snippet.push_str(&format!("  │ ... ({} more lines)\n", cleaned_lines.len() - max_lines));
+                                }
+                                snippet.push_str("  └───\n");
+                            }
+                            snippet.push_str(&branch);
+                            snippet.push_str("\n\n");
+                            self.transcript.push_str(&snippet);
+                            self.truncate_transcript();
+                        } else if name == "websearch" {
+                            let header = if target.starts_with('"') {
+                                format!("⬢ Searched {target}")
+                            } else {
+                                format!("⬢ Searched \"{target}\"")
+                            };
+
+                            let mut results = Vec::new();
+                            let mut current_title: Option<String> = None;
+                            let mut current_url: Option<String> = None;
+
+                            for l in output.lines() {
+                                let trimmed = l.trim();
+                                if let Some((_num, title)) = crate::tui::chat::split_numbered_result(trimmed) {
+                                    if let Some(t) = current_title.take() {
+                                        results.push((t, current_url.take().unwrap_or_default()));
+                                    }
+                                    current_title = Some(title.to_string());
+                                } else if let Some(url) = trimmed.strip_prefix("URL: ") {
+                                    current_url = Some(url.to_string());
+                                }
+                            }
+                            if let Some(t) = current_title {
+                                results.push((t, current_url.unwrap_or_default()));
+                            }
+
+                            let mut snippet = String::new();
+                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                snippet.push('\n');
+                            }
+                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                                snippet.push('\n');
+                            }
+                            snippet.push_str(&header);
+                            snippet.push('\n');
+
+                            if !results.is_empty() {
+                                snippet.push_str("  ┌── Results ──────────────────────────────────────\n");
+                                for (i, (title, url)) in results.iter().take(5).enumerate() {
+                                    snippet.push_str(&format!("  │ {}. {}\n", i + 1, title));
+                                    if !url.is_empty() {
+                                        snippet.push_str(&format!("  │    URL: {}\n", url));
+                                    }
+                                }
+                                if results.len() > 5 {
+                                    snippet.push_str(&format!("  │ ... ({} more results)\n", results.len() - 5));
+                                }
+                                snippet.push_str("  └───\n");
+                            }
+
+                            let branch = if !success {
+                                let err_line = output.lines().next().unwrap_or("error").trim();
+                                let cleaned = err_line
+                                    .strip_prefix(&format!("Error executing {name}: "))
+                                    .unwrap_or(err_line);
+                                format!("  └ failed: {cleaned}")
+                            } else if results.is_empty() {
+                                "  └ 0 results found".to_string()
+                            } else if results.len() == 1 {
+                                "  └ 1 result found".to_string()
+                            } else {
+                                format!("  └ {} results found", results.len())
+                            };
+
+                            snippet.push_str(&branch);
+                            snippet.push_str("\n\n");
+                            self.transcript.push_str(&snippet);
+                            self.truncate_transcript();
                         } else {
-                        let diff_info = if success && name == "edit_file" {
-                            let old_str = args
-                                .and_then(|a| a.get("old_string"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let diff_info = if success && name == "edit_file" {
+                                let old_str = args
+                                    .and_then(|a| a.get("old_string"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
                             let new_str = args
                                 .and_then(|a| a.get("new_string"))
                                 .and_then(|v| v.as_str())
@@ -2085,6 +2289,7 @@ impl App {
                     }
                 }
                 "generation_finished" => {
+                    self.flush_reasoning();
                     self.active_tool = None;
                     if let Some(session_id) = self.active_session_id
                         && event.session_id == session_id
@@ -2105,6 +2310,7 @@ impl App {
                     }
                 }
                 "error" => {
+                    self.flush_reasoning();
                     self.flush_typewriter();
                     self.active_tool = None;
                     if let Ok(payload) =
@@ -2142,6 +2348,7 @@ impl App {
 
     /// Stash the live view fields into the active session's state.
     fn stash_active(&mut self) {
+        self.flush_reasoning();
         self.flush_typewriter();
         let Some(session_id) = self.active_session_id else {
             return;

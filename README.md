@@ -34,8 +34,30 @@ Autentikasi via environment variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OP
 - `/models refresh` — refresh model discovery dari provider.
 - `/new <title>` — buat session baru.
 - `/sessions` — daftar session tersimpan.
+- `/agents` — dialog pemilih agent.
+- `/themes` — dialog interaktif pemilih tema.
+- `/theme <nama>` — ganti tema aktif.
+- `/status` — status sesi & diagnostik sistem.
+- `/keys` — cheatsheet pintasan keyboard.
 - `/help` — daftar perintah.
 - `/exit` — keluar aplikasi.
+
+## Tools
+
+Tool bawaan untuk agen AI:
+
+- `read_file` — baca file (dukungan selector baris).
+- `write_file` — buat atau overwrite file utuh (mode BUILD).
+- `edit_file` — patch atau string replacement presisi (mode BUILD).
+- `list_dir` — daftar isi direktori.
+- `glob_search` — cari pola nama file.
+- `grep_search` — cari teks dalam file workspace.
+- `bash` — eksekusi command shell di workspace root (mode BUILD).
+- `websearch` — cari web live via DuckDuckGo.
+- `webfetch` — ambil konten URL web.
+- `skill` — muat instruksi domain dari `skills/`.
+- `question` — tanya klarifikasi interaktif ke user.
+- `update_plan` — update status rencana multi-tahap (pending, in_progress, completed).
 
 ## Keybindings (TUI)
 

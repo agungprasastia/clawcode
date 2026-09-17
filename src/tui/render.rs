@@ -317,6 +317,7 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
         && (matches!(app.conversation_status(), super::ConversationStatus::Active)
             || app.is_streaming_active()
             || app.is_typing()
+            || app.is_reasoning()
             || app.active_tool().is_some());
 
     let left_spans = if matches!(app.conversation_status(), super::ConversationStatus::Error) {
@@ -334,7 +335,9 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
     } else if is_working {
         if let Some(tool) = app.active_tool() {
             let elapsed = tool.started_at.elapsed().as_secs_f64();
-            let action_str = if tool.desc.is_empty() {
+            let action_str = if tool.desc == "preparing arguments..." {
+                format!("Preparing {}...", tool.name)
+            } else if tool.desc.is_empty() {
                 tool.name.clone()
             } else {
                 format!("{}: {}", tool.name, tool.desc)
@@ -343,6 +346,13 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
                 Span::styled("⬡ ", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
                 Span::styled(action_str, Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
                 Span::styled(format!(" · {:.1}s", elapsed), Style::default().fg(theme.dim)),
+            ]
+        } else if app.is_reasoning() {
+            let elapsed = app.reasoning_elapsed_seconds().unwrap_or(0.0);
+            vec![
+                Span::styled("💭 ", Style::default().fg(theme.amber)),
+                Span::styled("Thinking", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" ({:.1}s)", elapsed), Style::default().fg(theme.dim)),
             ]
         } else {
             let elapsed_str = if let Some(elapsed) = app.streaming_elapsed_seconds() {
@@ -495,7 +505,13 @@ pub(crate) fn mode_label(app: &App) -> &'static str {
 
 pub(crate) fn status_label(app: &App) -> String {
     if let Some(tool) = app.active_tool() {
-        format!("TOOL: {}", tool.name.to_ascii_uppercase())
+        if tool.desc == "preparing arguments..." {
+            format!("PREPARING: {}", tool.name.to_ascii_uppercase())
+        } else {
+            format!("TOOL: {}", tool.name.to_ascii_uppercase())
+        }
+    } else if app.is_reasoning() {
+        "THINKING".to_string()
     } else if app.metrics().is_none() && (app.is_typing() || app.is_streaming_active()) {
         "STREAMING".to_string()
     } else {

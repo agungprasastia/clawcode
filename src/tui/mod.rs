@@ -28,7 +28,7 @@ pub use dialogs::{
     ThemesDialogState, WhichKeyState, render_permission_dialog, render_question_dialog,
 };
 pub use home::HomeState;
-pub use chat::render_chat;
+pub use chat::{format_transcript_lines, render_chat};
 pub use render::render;
 pub use theme::{Theme, ThemeKind};
 pub use typewriter::TypewriterState;

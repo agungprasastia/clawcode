@@ -2092,3 +2092,215 @@ fn test_app_poll_runtime_opens_question_dialog() {
     assert_eq!(dialog.question, "Choose port number");
     assert_eq!(dialog.options, vec!["3000".to_string(), "8080".to_string()]);
 }
+
+#[test]
+fn test_streaming_reasoning_buffer_and_flush_formatting() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    // 1. Send reasoning_delta
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "reasoning_delta".to_string(),
+        payload_json: serde_json::json!({
+            "delta": "Analyzing the bug in router...\nFound invalid route handler"
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+    assert!(app.is_reasoning());
+    assert_eq!(app.reasoning_buffer(), "Analyzing the bug in router...\nFound invalid route handler");
+
+    // Renders "Thinking" in status/hints
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Thinking"));
+
+    // 2. Incoming text_delta flushes reasoning to transcript
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "text_delta".to_string(),
+        payload_json: serde_json::json!({
+            "delta": "Here is the fix:"
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+    assert!(!app.is_reasoning());
+    assert!(app.reasoning_buffer().is_empty());
+    assert!(app.transcript().contains("💭 Thought for "));
+    assert!(app.transcript().contains("  │ Analyzing the bug in router..."));
+    assert!(app.transcript().contains("  │ Found invalid route handler"));
+
+    // Verify transcript lines styling
+    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
+    let lines = clawcode::tui::format_transcript_lines(app.transcript(), &theme, ratatui::style::Color::Cyan);
+    let thought_header = lines.iter().find(|l| l.spans.first().map(|s| s.content.as_ref() == "💭 ").unwrap_or(false));
+    assert!(thought_header.is_some());
+    assert_eq!(thought_header.unwrap().spans[0].style.fg, Some(theme.amber));
+
+    // 3. Test truncation for > 10 lines
+    let mut long_reasoning_app = App::default();
+    let (tx2, rx2) = std::sync::mpsc::channel();
+    long_reasoning_app.set_runtime_receiver(rx2);
+    let long_reasoning = (1..=15).map(|i| format!("thought line {i}")).collect::<Vec<_>>().join("\n");
+    tx2.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "reasoning_delta".to_string(),
+        payload_json: serde_json::json!({
+            "delta": long_reasoning
+        }).to_string(),
+    }).unwrap();
+    long_reasoning_app.poll_runtime();
+    long_reasoning_app.flush_reasoning();
+    assert!(long_reasoning_app.transcript().contains("  │ thought line 5"));
+    assert!(long_reasoning_app.transcript().contains("  │ ..."));
+    assert!(!long_reasoning_app.transcript().contains("  │ thought line 6"));
+}
+
+#[test]
+fn test_tool_call_start_event_handling() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_call_start".to_string(),
+        payload_json: serde_json::json!({
+            "id": "call_42",
+            "name": "bash"
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+    assert!(app.active_tool().is_some());
+    let active = app.active_tool().unwrap();
+    assert_eq!(active.name, "bash");
+    assert_eq!(active.desc, "preparing arguments...");
+
+    // Renders "Preparing bash..."
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Preparing bash..."));
+}
+
+#[test]
+fn test_bash_terminal_card_rendering() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    // 1. Succeeded bash command
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "bash",
+            "arguments": { "command": "cargo test" },
+            "success": true,
+            "output": "running 2 tests\ntest foo ... ok\ntest bar ... ok\n[Process exited with code 0]"
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+    assert!(app.transcript().contains("⬢ Ran cargo test (exit 0)"));
+    assert!(app.transcript().contains("  ┌── Output ────────────────────────────────────────"));
+    assert!(app.transcript().contains("  │ running 2 tests"));
+    assert!(app.transcript().contains("  │ test foo ... ok"));
+    assert!(app.transcript().contains("  │ test bar ... ok"));
+    assert!(app.transcript().contains("  └───"));
+
+    // Verify styling of terminal box
+    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
+    let lines = clawcode::tui::format_transcript_lines(app.transcript(), &theme, ratatui::style::Color::Cyan);
+    let box_header = lines.iter().find(|l| l.spans.iter().any(|s| s.content.contains("Output")));
+    assert!(box_header.is_some());
+
+    // 2. Failed bash command with exit 1
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "bash",
+            "arguments": { "command": "failing_cmd" },
+            "success": false,
+            "output": "Error: command not found\n[Process exited with code 1]"
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+    assert!(app.transcript().contains("⬢ Ran failing_cmd (exit 1)"));
+    assert!(app.transcript().contains("failed: Error: command not found"));
+
+    let failed_lines = clawcode::tui::format_transcript_lines(app.transcript(), &theme, ratatui::style::Color::Cyan);
+    let ran_failed = failed_lines.iter().find(|l| l.spans.iter().any(|s| s.content.contains("failing_cmd")));
+    assert!(ran_failed.is_some());
+    // Failed marker should be red (theme.error)
+    assert_eq!(ran_failed.unwrap().spans[0].style.fg, Some(theme.error));
+}
+
+#[test]
+fn test_websearch_visual_card_formatting() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    let raw_search_output = "Search results for \"rust tokio\" (2 results):\n\n1. Tokio Async Runtime\n   URL: https://tokio.rs\n   An event-driven platform...\n\n2. Tokio Tutorial\n   URL: https://tokio.rs/tutorial\n   Getting started...";
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "websearch",
+            "arguments": { "query": "rust tokio" },
+            "success": true,
+            "output": raw_search_output
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+    assert!(app.transcript().contains("⬢ Searched \"rust tokio\""));
+    assert!(app.transcript().contains("  ┌── Results ──────────────────────────────────────"));
+    assert!(app.transcript().contains("  │ 1. Tokio Async Runtime"));
+    assert!(app.transcript().contains("  │    URL: https://tokio.rs"));
+    assert!(app.transcript().contains("  │ 2. Tokio Tutorial"));
+    assert!(app.transcript().contains("  │    URL: https://tokio.rs/tutorial"));
+    assert!(app.transcript().contains("  └───"));
+    assert!(app.transcript().contains("  └ 2 results found"));
+
+    // Verify styling of websearch card
+    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
+    let lines = clawcode::tui::format_transcript_lines(app.transcript(), &theme, ratatui::style::Color::Cyan);
+    let url_line = lines.iter().find(|l| l.spans.iter().any(|s| s.content.contains("https://tokio.rs")));
+    assert!(url_line.is_some());
+    let url_span = url_line.unwrap().spans.iter().find(|s| s.content == "https://tokio.rs").unwrap();
+    assert_eq!(url_span.style.fg, Some(theme.teal));
+}

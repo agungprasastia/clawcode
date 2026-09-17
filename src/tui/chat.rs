@@ -57,6 +57,7 @@ pub fn render_chat(
         && (matches!(app.conversation_status(), super::ConversationStatus::Active)
             || app.is_streaming_active()
             || app.is_typing()
+            || app.is_reasoning()
             || app.active_tool().is_some());
     let status_color = if is_working {
         mode_color
@@ -128,7 +129,9 @@ pub fn render_chat(
             "skill" => "Loading skill",
             _ => "Running",
         };
-        let action_text = if active_tool.desc.is_empty() {
+        let action_text = if active_tool.desc == "preparing arguments..." {
+            format!("Preparing {}...", active_tool.name)
+        } else if active_tool.desc.is_empty() {
             format!("Running {}...", active_tool.name)
         } else if active_tool.name == "grep_search" || active_tool.name == "glob_search" {
             format!("Running {} {}...", active_tool.name, active_tool.desc)
@@ -211,13 +214,38 @@ pub fn render_chat(
     };
 
     if status_bar_area.is_none() && is_working {
+        let mut status_spans = vec![
+            Span::styled(
+                format!("[{}] ", mode_label(app)),
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            ),
+        ];
         let spinner_width = if transcript_area.width < 30 {
             1
         } else {
             WaveSpinner::WIDTH
         };
-        let mut status_spans = app.wave_spinner().spans_for_width(spinner_width);
-        if let Some(tps) = app.tokens_per_second() {
+        status_spans.extend(app.wave_spinner().spans_for_width(spinner_width));
+        if app.is_reasoning() {
+            let elapsed = app.reasoning_elapsed_seconds().unwrap_or(0.0);
+            status_spans.push(Span::raw(" "));
+            status_spans.push(Span::styled(
+                format!("💭 Thinking ({:.1}s)", elapsed),
+                Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+            ));
+        } else if let Some(tool) = app.active_tool() {
+            let elapsed = tool.started_at.elapsed().as_secs_f64();
+            status_spans.push(Span::raw(" "));
+            let label = if tool.desc == "preparing arguments..." {
+                format!("Preparing {}...", tool.name)
+            } else {
+                format!("{}: {}", tool.name, tool.desc)
+            };
+            status_spans.push(Span::styled(
+                format!("⬡ {} ({:.1}s)", label, elapsed),
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+            ));
+        } else if let Some(tps) = app.tokens_per_second() {
             status_spans.push(Span::raw(" "));
             status_spans.push(Span::styled(
                 format!("{:.0}t/s", tps),
@@ -242,51 +270,93 @@ pub fn render_chat(
     }
 
     if let Some(status_area) = status_bar_area {
-        let spinner_width = if status_area.width < 30 {
+        let mut status_spans = Vec::new();
+
+        // Mode tag: [{MODE}]
+        status_spans.push(Span::styled(
+            format!("[{}] ", mode_label(app)),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ));
+
+        // Model identity: {model}
+        let model_name = if !app.selected_model().is_empty() {
+            app.selected_model()
+        } else {
+            "default"
+        };
+        status_spans.push(Span::styled(
+            model_name.to_string(),
+            Style::default().fg(theme.ink),
+        ));
+        status_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+
+        // Animated WaveSpinner
+        let spinner_width = if status_area.width < 50 {
             1
         } else {
             WaveSpinner::WIDTH
         };
-        let mut status_spans = app.wave_spinner().spans_for_width(spinner_width);
+        status_spans.extend(app.wave_spinner().spans_for_width(spinner_width));
+        status_spans.push(Span::raw(" "));
 
-        if let Some(tool) = app.active_tool() {
-            status_spans.push(Span::raw(" "));
+        // Action state
+        if app.is_reasoning() {
+            let elapsed = app.reasoning_elapsed_seconds().unwrap_or(0.0);
+            status_spans.push(Span::styled("💭 ", Style::default().fg(theme.amber)));
+            status_spans.push(Span::styled(
+                format!("Thinking ({:.1}s)", elapsed),
+                Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+            ));
+        } else if let Some(tool) = app.active_tool() {
+            let elapsed = tool.started_at.elapsed().as_secs_f64();
             status_spans.push(Span::styled(
                 "⬡ ",
                 Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
             ));
-            let tool_desc = if tool.desc.is_empty() {
-                tool.name.clone()
+            let action_label = if tool.desc == "preparing arguments..." {
+                format!("Preparing {}...", tool.name)
             } else {
-                format!("{}: {}", tool.name, tool.desc)
+                let active_verb = match tool.name.as_str() {
+                    "read_file" => "Reading",
+                    "write_file" => "Writing",
+                    "edit_file" => "Editing",
+                    "list_dir" => "Listing",
+                    "glob_search" => "Globbing",
+                    "grep_search" => "Grepping",
+                    "bash" => "Ran",
+                    "update_plan" => "Updating Plan",
+                    "webfetch" => "Fetching",
+                    "websearch" => "Searching",
+                    "skill" => "Loading skill",
+                    _ => "Running",
+                };
+                if tool.desc.is_empty() {
+                    format!("{} {}", active_verb, tool.name)
+                } else {
+                    format!("{} {}", active_verb, tool.desc)
+                }
             };
-            let max_desc_len = (status_area.width as usize).saturating_sub(36).max(8);
-            let display_desc = if tool_desc.len() > max_desc_len {
-                format!("{}…", &tool_desc[..max_desc_len.saturating_sub(1)])
+            let max_desc_len = (status_area.width as usize).saturating_sub(45).max(10);
+            let display_desc = if action_label.len() > max_desc_len {
+                format!("{}…", &action_label[..max_desc_len.saturating_sub(1)])
             } else {
-                tool_desc
+                action_label
             };
             status_spans.push(Span::styled(
-                display_desc,
+                format!("{} ({:.1}s)", display_desc, elapsed),
                 Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
             ));
         } else if let Some(tps) = app.tokens_per_second() {
-            status_spans.push(Span::raw(" "));
+            let elapsed_str = if let Some(elapsed) = app.streaming_elapsed_seconds() {
+                format!(" · {:.1}s", elapsed)
+            } else {
+                String::new()
+            };
             status_spans.push(Span::styled(
-                format!("{:.0}t/s", tps),
+                format!("{:.0}t/s{}", tps, elapsed_str),
                 Style::default().fg(theme.dim),
             ));
-        }
-
-        if let Some(elapsed) = app.streaming_elapsed_seconds() {
-            status_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
-            status_spans.push(Span::styled(
-                format!("{:.1}s", elapsed),
-                Style::default().fg(theme.dim),
-            ));
-        } else if let Some(tool) = app.active_tool() {
-            let elapsed = tool.started_at.elapsed().as_secs_f64();
-            status_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+        } else if let Some(elapsed) = app.streaming_elapsed_seconds() {
             status_spans.push(Span::styled(
                 format!("{:.1}s", elapsed),
                 Style::default().fg(theme.dim),
@@ -300,7 +370,7 @@ pub fn render_chat(
         ));
 
         let status_widget = Paragraph::new(Line::from(status_spans))
-            .style(Style::default().bg(theme.bg_element));
+            .style(Style::default().bg(theme.panel));
         frame.render_widget(status_widget, status_area);
     }
 
@@ -424,8 +494,17 @@ fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     spans
 }
 
+pub fn split_numbered_result(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim_start();
+    let (num, rest) = trimmed.split_once(". ")?;
+    if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+        Some((num, rest))
+    } else {
+        None
+    }
+}
 
-pub(crate) fn format_transcript_lines(
+pub fn format_transcript_lines(
     transcript: &str,
     theme: &Theme,
     mode_color: Color,
@@ -433,7 +512,8 @@ pub(crate) fn format_transcript_lines(
     let raw_lines: Vec<&str> = transcript.lines().collect();
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(raw_lines.len());
     let mut in_code_block = false;
-
+    let mut in_thought = false;
+    let mut in_box = false;
     for (i, line) in raw_lines.iter().enumerate() {
         if line.trim_start().starts_with("```") {
             if in_code_block {
@@ -467,7 +547,12 @@ pub(crate) fn format_transcript_lines(
             ]));
             continue;
         }
+        if line.trim().is_empty() {
+            in_thought = false;
+        }
         if let Some(prompt) = line.strip_prefix("> ") {
+            in_thought = false;
+            in_box = false;
             lines.push(Line::from(vec![
                 Span::styled(
                     "┃ ",
@@ -478,17 +563,63 @@ pub(crate) fn format_transcript_lines(
                     Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
                 ),
             ]));
+        } else if let Some(rest) = line.strip_prefix("💭 ") {
+            in_thought = true;
+            in_box = false;
+            let mut spans = vec![
+                Span::styled("💭 ", Style::default().fg(theme.amber)),
+            ];
+            spans.push(Span::styled(
+                rest.to_string(),
+                Style::default().fg(theme.amber).add_modifier(Modifier::ITALIC),
+            ));
+            lines.push(Line::from(spans));
+        } else if line.trim_start().starts_with("┌──") {
+            in_box = true;
+            in_thought = false;
+            let trimmed = line.trim_start();
+            let indent = &line[..line.len() - trimmed.len()];
+            let after_prefix = trimmed.strip_prefix("┌── ").unwrap_or(trimmed);
+            let mut spans = vec![
+                Span::styled(format!("{indent}┌── "), Style::default().fg(theme.dim)),
+            ];
+            if let Some((title, border_tail)) = after_prefix.split_once(' ') {
+                spans.push(Span::styled(
+                    title.to_string(),
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!(" {border_tail}"),
+                    Style::default().fg(theme.dim),
+                ));
+            } else {
+                spans.push(Span::styled(after_prefix.to_string(), Style::default().fg(theme.dim)));
+            }
+            lines.push(Line::from(spans));
+        } else if line.trim_start().starts_with("└───") {
+            in_box = false;
+            let trimmed = line.trim_start();
+            let indent = &line[..line.len() - trimmed.len()];
+            lines.push(Line::from(vec![
+                Span::styled(format!("{indent}{trimmed}"), Style::default().fg(theme.dim)),
+            ]));
         } else if let Some(rest) = line.strip_prefix("⬢ ") {
+            in_thought = false;
+            in_box = false;
             let is_failed = {
                 let mut failed = false;
-                for next_line in raw_lines.iter().skip(i + 1).take(25) {
-                    let trimmed = next_line.trim_start();
-                    if next_line.starts_with("⬢ ") || next_line.is_empty() {
-                        break;
-                    }
-                    if trimmed.starts_with("└ failed:") || trimmed.starts_with("failed:") {
-                        failed = true;
-                        break;
+                if rest.contains("(exit ") && !rest.contains("(exit 0)") {
+                    failed = true;
+                } else {
+                    for next_line in raw_lines.iter().skip(i + 1).take(25) {
+                        let trimmed = next_line.trim_start();
+                        if next_line.starts_with("⬢ ") || next_line.is_empty() {
+                            break;
+                        }
+                        if trimmed.starts_with("└ failed:") || trimmed.starts_with("failed:") {
+                            failed = true;
+                            break;
+                        }
                     }
                 }
                 failed
@@ -498,7 +629,6 @@ pub(crate) fn format_transcript_lines(
             let mut spans = vec![
                 Span::styled("⬢ ", Style::default().fg(marker_color).add_modifier(Modifier::BOLD)),
             ];
-
             let rest_trimmed = rest.trim();
             if let Some((before, add_part, rem_part)) = parse_diff_badge(rest_trimmed) {
                 if let Some((verb, target)) = before.split_once(' ') {
@@ -548,10 +678,20 @@ pub(crate) fn format_transcript_lines(
                     Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    target.to_string(),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ));
+                if let Some((cmd, exit_part)) = target.rsplit_once(" (exit ") {
+                    let code_str = exit_part.strip_suffix(')').unwrap_or(exit_part);
+                    spans.push(Span::styled(cmd.to_string(), Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled("(", Style::default().fg(theme.dim)));
+                    let exit_color = if code_str == "0" { theme.success } else { theme.error };
+                    spans.push(Span::styled(format!("exit {code_str}"), Style::default().fg(exit_color).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::styled(")", Style::default().fg(theme.dim)));
+                } else {
+                    spans.push(Span::styled(
+                        target.to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    ));
+                }
             } else {
                 spans.push(Span::styled(
                     rest_trimmed.to_string(),
@@ -582,7 +722,31 @@ pub(crate) fn format_transcript_lines(
                 Span::styled(format!("{indent}│ "), Style::default().fg(theme.dim)),
             ];
 
-            if let Some(item) = rest.strip_prefix("✔ ") {
+            if in_thought {
+                spans.push(Span::styled(
+                    rest.to_string(),
+                    Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+                ));
+            } else if in_box {
+                if let Some(url_part) = rest.strip_prefix("   URL: ").or_else(|| rest.strip_prefix("URL: ")) {
+                    spans.push(Span::styled("   URL: ", Style::default().fg(theme.dim)));
+                    spans.push(Span::styled(
+                        url_part.to_string(),
+                        Style::default().fg(theme.teal).add_modifier(Modifier::UNDERLINED),
+                    ));
+                } else if let Some((num_str, title_str)) = split_numbered_result(rest) {
+                    spans.push(Span::styled(
+                        format!("{num_str}. "),
+                        Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::styled(
+                        title_str.to_string(),
+                        Style::default().fg(theme.ink),
+                    ));
+                } else {
+                    spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.ink)));
+                }
+            } else if let Some(item) = rest.strip_prefix("✔ ") {
                 spans.push(Span::styled("✔ ", Style::default().fg(theme.dim)));
                 spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
             } else if let Some(item) = rest.strip_prefix("[✔] ") {
