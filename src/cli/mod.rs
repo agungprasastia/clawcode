@@ -24,7 +24,10 @@ pub enum Command {
 impl PartialEq for Command {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Command::New(a) | Command::NewSession(a), Command::New(b) | Command::NewSession(b)) => a == b,
+            (
+                Command::New(a) | Command::NewSession(a),
+                Command::New(b) | Command::NewSession(b),
+            ) => a == b,
             (Command::Sessions, Command::Sessions) => true,
             (Command::Exit, Command::Exit) => true,
             (Command::Mode(a), Command::Mode(b)) => a == b,
@@ -499,7 +502,9 @@ mod tests {
             CommandOutput::Connected(ProviderId::new("anthropic"))
         );
         assert_eq!(
-            service.execute(Command::ConnectProvider("ollama".into())).unwrap(),
+            service
+                .execute(Command::ConnectProvider("ollama".into()))
+                .unwrap(),
             CommandOutput::Connected(ProviderId::new("ollama"))
         );
     }
@@ -512,10 +517,24 @@ mod tests {
             panic!("expected Help output");
         };
         for cmd in [
-            "/plan", "/build", "/model <id>", "/models", "/models refresh",
-            "/connect [provider]", "/agents", "/themes", "/theme <name>",
-            "/sessions", "/new [title]", "/clear", "/compact", "/copy",
-            "/keys", "/status", "/help", "/exit",
+            "/plan",
+            "/build",
+            "/model <id>",
+            "/models",
+            "/models refresh",
+            "/connect [provider]",
+            "/agents",
+            "/themes",
+            "/theme <name>",
+            "/sessions",
+            "/new [title]",
+            "/clear",
+            "/compact",
+            "/copy",
+            "/keys",
+            "/status",
+            "/help",
+            "/exit",
         ] {
             assert!(text.contains(cmd), "help output missing command `{cmd}`");
         }

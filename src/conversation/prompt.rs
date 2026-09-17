@@ -20,7 +20,11 @@ impl ProviderKind {
             ProviderKind::Gemini
         } else if lower.contains("claude") || lower.contains("anthropic") {
             ProviderKind::Anthropic
-        } else if lower.contains("gpt-") || lower.contains("o1") || lower.contains("o3") || lower.contains("openai") {
+        } else if lower.contains("gpt-")
+            || lower.contains("o1")
+            || lower.contains("o3")
+            || lower.contains("openai")
+        {
             ProviderKind::OpenAI
         } else {
             ProviderKind::Generic
@@ -37,7 +41,12 @@ pub struct SystemPromptComposer {
 }
 
 impl SystemPromptComposer {
-    pub fn new(model: &str, provider: &str, working_directory: impl Into<PathBuf>, mode: Mode) -> Self {
+    pub fn new(
+        model: &str,
+        provider: &str,
+        working_directory: impl Into<PathBuf>,
+        mode: Mode,
+    ) -> Self {
         let wd = working_directory.into();
         let is_git = wd.join(".git").exists();
         Self {
@@ -71,7 +80,11 @@ impl SystemPromptComposer {
 
         // 5. Local project rules (AGENTS.md, CLAUDE.md)
         if let Some((path, content)) = self.resolve_local_rules() {
-            sections.push(format!("# Project Instructions ({})\n{}", path.display(), content));
+            sections.push(format!(
+                "# Project Instructions ({})\n{}",
+                path.display(),
+                content
+            ));
         }
 
         // 6. Custom extra instructions if any
@@ -104,7 +117,8 @@ Core Directives:
 - Test frequently after each change.
 - Never output speculative file edits as raw text when actions are requested; invoke tools directly.
 - Keep terminal responses short, direct, and concise (< 4 lines typically, excluding tool calls).
-- Avoid preambles, fillers, and restatements."#.to_string()
+- Avoid preambles, fillers, and restatements."#
+            .to_string()
     }
 
     fn get_anthropic_prompt(&self) -> String {
@@ -134,7 +148,8 @@ Core Directives:
     fn get_generic_prompt(&self) -> String {
         r#"You are an expert autonomous coding assistant.
 Analyze codebase structure, execute necessary tools, and produce minimal, high-quality code changes.
-Keep responses concise, clear, and direct."#.to_string()
+Keep responses concise, clear, and direct."#
+            .to_string()
     }
 
     fn get_environment_context(&self) -> String {
@@ -196,7 +211,12 @@ You are currently operating in BUILD mode.
     fn resolve_local_rules(&self) -> Option<(PathBuf, String)> {
         let mut cur = self.working_directory.clone();
         loop {
-            let candidates = ["AGENTS.md", "CLAUDE.md", ".clawcode/rules.md", ".clawcode/rules"];
+            let candidates = [
+                "AGENTS.md",
+                "CLAUDE.md",
+                ".clawcode/rules.md",
+                ".clawcode/rules",
+            ];
             for name in &candidates {
                 let p = cur.join(name);
                 if p.is_file() {

@@ -167,7 +167,11 @@ fn test_coding_tools_schemas_validity() {
     assert_eq!(schemas.len(), 12);
     let names: Vec<&str> = schemas
         .iter()
-        .filter_map(|s| s.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+        .filter_map(|s| {
+            s.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+        })
         .collect();
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"write_file"));
@@ -249,7 +253,11 @@ fn test_execute_tool_update_plan() {
         r#"{"explanation": "no plan"}"#,
     );
     assert!(res_missing_plan.is_err());
-    assert!(res_missing_plan.unwrap_err().contains("Missing required argument 'plan'"));
+    assert!(
+        res_missing_plan
+            .unwrap_err()
+            .contains("Missing required argument 'plan'")
+    );
 
     // 5. Validation: empty plan array
     let res_empty_plan = clawcode::conversation::tools::execute_tool(
@@ -475,7 +483,11 @@ fn test_read_file_inline_selectors_and_formatting() {
             "read_file",
             &arg_json,
         );
-        assert!(res_win_exec.is_ok(), "Windows drive letter exec failed: {:?}", res_win_exec);
+        assert!(
+            res_win_exec.is_ok(),
+            "Windows drive letter exec failed: {:?}",
+            res_win_exec
+        );
         let out = res_win_exec.unwrap();
         assert!(out.contains("(lines 1..2 of 5)"));
         assert!(out.contains("  1: line 1"));
@@ -488,14 +500,14 @@ fn test_webfetch_parameter_validation() {
     let (_root, workspace) = workspace("webfetch-val");
 
     // 1. Missing url
-    let res_missing = clawcode::conversation::tools::execute_tool(
-        &workspace,
-        Mode::Plan,
-        "webfetch",
-        r#"{}"#,
-    );
+    let res_missing =
+        clawcode::conversation::tools::execute_tool(&workspace, Mode::Plan, "webfetch", r#"{}"#);
     assert!(res_missing.is_err());
-    assert!(res_missing.unwrap_err().contains("Missing required argument 'url'"));
+    assert!(
+        res_missing
+            .unwrap_err()
+            .contains("Missing required argument 'url'")
+    );
 
     // 2. Invalid scheme
     let res_ftp = clawcode::conversation::tools::execute_tool(
@@ -505,7 +517,11 @@ fn test_webfetch_parameter_validation() {
         r#"{"url": "ftp://files.example.com/data.txt"}"#,
     );
     assert!(res_ftp.is_err());
-    assert!(res_ftp.unwrap_err().contains("URL must begin with 'http://' or 'https://'"));
+    assert!(
+        res_ftp
+            .unwrap_err()
+            .contains("URL must begin with 'http://' or 'https://'")
+    );
 
     let res_relative = clawcode::conversation::tools::execute_tool(
         &workspace,
@@ -514,7 +530,11 @@ fn test_webfetch_parameter_validation() {
         r#"{"url": "example.com/test"}"#,
     );
     assert!(res_relative.is_err());
-    assert!(res_relative.unwrap_err().contains("URL must begin with 'http://' or 'https://'"));
+    assert!(
+        res_relative
+            .unwrap_err()
+            .contains("URL must begin with 'http://' or 'https://'")
+    );
 }
 
 #[test]
@@ -522,14 +542,14 @@ fn test_websearch_parameter_validation() {
     let (_root, workspace) = workspace("websearch-val");
 
     // 1. Missing query
-    let res_missing = clawcode::conversation::tools::execute_tool(
-        &workspace,
-        Mode::Plan,
-        "websearch",
-        r#"{}"#,
-    );
+    let res_missing =
+        clawcode::conversation::tools::execute_tool(&workspace, Mode::Plan, "websearch", r#"{}"#);
     assert!(res_missing.is_err());
-    assert!(res_missing.unwrap_err().contains("Missing required argument 'query'"));
+    assert!(
+        res_missing
+            .unwrap_err()
+            .contains("Missing required argument 'query'")
+    );
 
     // 2. Empty query
     let res_empty = clawcode::conversation::tools::execute_tool(
@@ -539,7 +559,11 @@ fn test_websearch_parameter_validation() {
         r#"{"query": ""}"#,
     );
     assert!(res_empty.is_err());
-    assert!(res_empty.unwrap_err().contains("Search query cannot be empty"));
+    assert!(
+        res_empty
+            .unwrap_err()
+            .contains("Search query cannot be empty")
+    );
 
     // 3. Whitespace query
     let res_spaces = clawcode::conversation::tools::execute_tool(
@@ -549,7 +573,11 @@ fn test_websearch_parameter_validation() {
         r#"{"query": "   "}"#,
     );
     assert!(res_spaces.is_err());
-    assert!(res_spaces.unwrap_err().contains("Search query cannot be empty"));
+    assert!(
+        res_spaces
+            .unwrap_err()
+            .contains("Search query cannot be empty")
+    );
 }
 
 #[test]
@@ -557,14 +585,14 @@ fn test_skill_tool_execution_and_listing() {
     let (root, workspace) = workspace("skill-tool");
 
     // 1. Missing name parameter
-    let res_missing = clawcode::conversation::tools::execute_tool(
-        &workspace,
-        Mode::Plan,
-        "skill",
-        r#"{}"#,
-    );
+    let res_missing =
+        clawcode::conversation::tools::execute_tool(&workspace, Mode::Plan, "skill", r#"{}"#);
     assert!(res_missing.is_err());
-    assert!(res_missing.unwrap_err().contains("Missing required argument 'name'"));
+    assert!(
+        res_missing
+            .unwrap_err()
+            .contains("Missing required argument 'name'")
+    );
 
     // 2. Empty name parameter
     let res_empty = clawcode::conversation::tools::execute_tool(
@@ -574,7 +602,11 @@ fn test_skill_tool_execution_and_listing() {
         r#"{"name": "   "}"#,
     );
     assert!(res_empty.is_err());
-    assert!(res_empty.unwrap_err().contains("Missing required argument 'name'"));
+    assert!(
+        res_empty
+            .unwrap_err()
+            .contains("Missing required argument 'name'")
+    );
 
     // 3. Create workspace skills
     let skills_dir = root.join("skills");
@@ -672,13 +704,9 @@ fn test_webfetch_mock_http_and_offline() {
 
     let fetch_url = format!("http://127.0.0.1:{port}/docs");
     let args = serde_json::json!({ "url": fetch_url }).to_string();
-    let res = clawcode::conversation::tools::execute_tool(
-        &workspace,
-        Mode::Plan,
-        "webfetch",
-        &args,
-    )
-    .unwrap();
+    let res =
+        clawcode::conversation::tools::execute_tool(&workspace, Mode::Plan, "webfetch", &args)
+            .unwrap();
 
     server_thread.join().unwrap();
 
@@ -751,7 +779,10 @@ fn test_websearch_mock_http_and_offline() {
 
     server_thread.join().unwrap();
 
-    assert!(res.contains("Search results for \"rust ureq\""), "actual res was: {res}");
+    assert!(
+        res.contains("Search results for \"rust ureq\""),
+        "actual res was: {res}"
+    );
     assert!(res.contains("ureq - crates.io"));
     assert!(res.contains("https://crates.io/crates/ureq"));
     assert!(res.contains("A simple, safe HTTP client. Minimal dependencies."));
@@ -812,9 +843,11 @@ fn test_tui_app_web_and_skill_verbs_and_formatting() {
     let search_detail = format_tool_success_detail("websearch", search_output);
     assert_eq!(search_detail, "2 results");
 
-    let search_none = format_tool_success_detail("websearch", "No search results found for query \"foo\".");
+    let search_none =
+        format_tool_success_detail("websearch", "No search results found for query \"foo\".");
     assert_eq!(search_none, "0 results");
 
-    let skill_detail = format_tool_success_detail("skill", "<skill_content name=\"test\">...</skill_content>");
+    let skill_detail =
+        format_tool_success_detail("skill", "<skill_content name=\"test\">...</skill_content>");
     assert_eq!(skill_detail, "skill loaded successfully");
 }

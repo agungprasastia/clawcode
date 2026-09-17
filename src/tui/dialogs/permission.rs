@@ -166,14 +166,30 @@ pub fn render_permission_dialog(
         .split(inner);
 
     let (tool_name, action_desc, reason) = match &dialog.prompt {
-        Some(p) => (p.tool_name.as_str(), p.action_desc.as_str(), p.reason.as_str()),
-        None => ("unknown", "No pending action description", "No reason provided"),
+        Some(p) => (
+            p.tool_name.as_str(),
+            p.action_desc.as_str(),
+            p.reason.as_str(),
+        ),
+        None => (
+            "unknown",
+            "No pending action description",
+            "No reason provided",
+        ),
     };
 
     // Tool line
     let tool_line = Line::from(vec![
-        Span::styled("⚠  Tool: ", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
-        Span::styled(tool_name, Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "⚠  Tool: ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            tool_name,
+            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+        ),
     ]);
     frame.render_widget(Paragraph::new(tool_line), chunks[0]);
 
@@ -266,11 +282,8 @@ mod tests {
 
     #[test]
     fn test_permission_dialog_state_with_prompt() {
-        let state = PermissionDialogState::with_prompt(
-            "bash",
-            "rm -rf target",
-            "Clean build directory",
-        );
+        let state =
+            PermissionDialogState::with_prompt("bash", "rm -rf target", "Clean build directory");
         assert!(state.is_active());
         assert_eq!(state.selected_decision, 1);
         assert_eq!(state.selected(), PermissionDecision::AllowOnce);
@@ -376,11 +389,7 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let content: String = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
 
         assert!(content.contains("Security Confirmation"));
         assert!(content.contains("bash"));

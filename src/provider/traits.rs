@@ -67,7 +67,11 @@ pub struct StreamRequest {
 }
 
 impl StreamRequest {
-    pub fn new(model: impl Into<String>, prompt: impl Into<String>, max_output_tokens: u32) -> Self {
+    pub fn new(
+        model: impl Into<String>,
+        prompt: impl Into<String>,
+        max_output_tokens: u32,
+    ) -> Self {
         let p = prompt.into();
         Self {
             model: model.into(),
@@ -177,7 +181,10 @@ pub trait Provider: fmt::Debug {
     fn models(&self) -> Vec<super::registry::ModelInfo>;
     fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError>;
 
-    fn stream(&self, request: &StreamRequest) -> Result<super::stream::ProviderStream, ProviderError> {
+    fn stream(
+        &self,
+        request: &StreamRequest,
+    ) -> Result<super::stream::ProviderStream, ProviderError> {
         let response = self.send(request)?;
         let (sender, stream) = super::stream::ProviderStream::channel(response.events.len().max(1));
         for event in response.events {

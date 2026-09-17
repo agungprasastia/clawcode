@@ -3,9 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
-    },
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
 use super::App;
@@ -16,13 +14,7 @@ use super::render::{
 use super::theme::Theme;
 use super::wave_spinner::WaveSpinner;
 
-pub fn render_chat(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &App,
-    theme: &Theme,
-    mode_color: Color,
-) {
+pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode_color: Color) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -106,10 +98,9 @@ pub fn render_chat(
                 Style::default().fg(mode_color),
             )));
         } else if let Some(last_line) = lines.last_mut() {
-            last_line.spans.push(Span::styled(
-                "▋",
-                Style::default().fg(mode_color),
-            ));
+            last_line
+                .spans
+                .push(Span::styled("▋", Style::default().fg(mode_color)));
         }
     }
 
@@ -138,8 +129,14 @@ pub fn render_chat(
             format!("{} {}...", active_verb, active_tool.desc)
         };
         let mut active_spans = vec![
-            Span::styled("⬡ ", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
-            Span::styled(action_text, Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "⬡ ",
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                action_text,
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+            ),
         ];
         let elapsed = active_tool.started_at.elapsed().as_secs_f64();
         if elapsed >= 0.5 {
@@ -213,12 +210,10 @@ pub fn render_chat(
     };
 
     if status_bar_area.is_none() && is_working {
-        let mut status_spans = vec![
-            Span::styled(
-                format!("[{}] ", mode_label(app)),
-                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-            ),
-        ];
+        let mut status_spans = vec![Span::styled(
+            format!("[{}] ", mode_label(app)),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        )];
         let spinner_width = if transcript_area.width < 30 {
             1
         } else {
@@ -230,7 +225,9 @@ pub fn render_chat(
             status_spans.push(Span::raw(" "));
             status_spans.push(Span::styled(
                 format!("💭 Thinking ({:.1}s)", elapsed),
-                Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.amber)
+                    .add_modifier(Modifier::BOLD),
             ));
         } else if let Some(tool) = app.active_tool() {
             let elapsed = tool.started_at.elapsed().as_secs_f64();
@@ -304,7 +301,9 @@ pub fn render_chat(
             status_spans.push(Span::styled("💭 ", Style::default().fg(theme.amber)));
             status_spans.push(Span::styled(
                 format!("Thinking ({:.1}s)", elapsed),
-                Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.amber)
+                    .add_modifier(Modifier::BOLD),
             ));
         } else if let Some(tool) = app.active_tool() {
             let elapsed = tool.started_at.elapsed().as_secs_f64();
@@ -370,8 +369,8 @@ pub fn render_chat(
             Style::default().fg(theme.dim),
         ));
 
-        let status_widget = Paragraph::new(Line::from(status_spans))
-            .style(Style::default().bg(theme.panel));
+        let status_widget =
+            Paragraph::new(Line::from(status_spans)).style(Style::default().bg(theme.panel));
         frame.render_widget(status_widget, status_area);
     }
 
@@ -407,7 +406,10 @@ pub fn render_chat(
         let badge_text = format!(" ↓ {scroll_offset} lines up (End to bottom) ");
         let badge_width = badge_text.len() as u16;
         if transcript_area.width > badge_width + 2 {
-            let offset_x = transcript_area.width.saturating_sub(badge_width).saturating_sub(2);
+            let offset_x = transcript_area
+                .width
+                .saturating_sub(badge_width)
+                .saturating_sub(2);
             let offset_y = transcript_area.height.saturating_sub(1);
             let badge_area = Rect {
                 x: transcript_area.x.saturating_add(offset_x),
@@ -455,7 +457,9 @@ fn parse_diff_badge(s: &str) -> Option<(&str, &str, &str)> {
     let close_idx = s[open_idx..].find(')')? + open_idx;
     let badge_content = &s[open_idx + 2..close_idx];
     let (add_part, rem_part) = badge_content.split_once(" -")?;
-    if !add_part.chars().all(|c| c.is_ascii_digit()) || !rem_part.chars().all(|c| c.is_ascii_digit()) {
+    if !add_part.chars().all(|c| c.is_ascii_digit())
+        || !rem_part.chars().all(|c| c.is_ascii_digit())
+    {
         return None;
     }
     let before = s[..open_idx].trim_end();
@@ -463,7 +467,10 @@ fn parse_diff_badge(s: &str) -> Option<(&str, &str, &str)> {
 }
 fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     if !text.contains('`') {
-        return vec![Span::styled(text.to_string(), Style::default().fg(theme.ink))];
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(theme.ink),
+        )];
     }
 
     let mut spans = Vec::new();
@@ -473,7 +480,10 @@ fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
         let before = &remainder[..start_idx];
         if let Some(end_idx) = remainder[start_idx + 1..].find('`') {
             if !before.is_empty() {
-                spans.push(Span::styled(before.to_string(), Style::default().fg(theme.ink)));
+                spans.push(Span::styled(
+                    before.to_string(),
+                    Style::default().fg(theme.ink),
+                ));
             }
             let code_content = &remainder[start_idx + 1..start_idx + 1 + end_idx];
             spans.push(Span::styled(
@@ -487,7 +497,10 @@ fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     }
 
     if !remainder.is_empty() {
-        spans.push(Span::styled(remainder.to_string(), Style::default().fg(theme.ink)));
+        spans.push(Span::styled(
+            remainder.to_string(),
+            Style::default().fg(theme.ink),
+        ));
     }
 
     if spans.is_empty() {
@@ -556,7 +569,10 @@ fn render_side_by_side_col(col: &str, theme: &Theme) -> Vec<Span<'static>> {
         return vec![Span::raw(col.to_string())];
     }
     if col.contains('⋯') {
-        return vec![Span::styled(col.to_string(), Style::default().fg(theme.dim))];
+        return vec![Span::styled(
+            col.to_string(),
+            Style::default().fg(theme.dim),
+        )];
     }
 
     let trimmed = col.trim_start();
@@ -571,7 +587,10 @@ fn render_side_by_side_col(col: &str, theme: &Theme) -> Vec<Span<'static>> {
                 Span::styled(format!("{num:>4} "), Style::default().fg(theme.dim).bg(bg)),
                 Span::styled(
                     "- ",
-                    Style::default().fg(theme.error).bg(bg).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.error)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
             ];
@@ -581,11 +600,17 @@ fn render_side_by_side_col(col: &str, theme: &Theme) -> Vec<Span<'static>> {
                 Span::styled(format!("{num:>4} "), Style::default().fg(theme.dim).bg(bg)),
                 Span::styled(
                     "+ ",
-                    Style::default().fg(theme.success).bg(bg).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.success)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
             ];
-        } else if let Some(content) = after_num.strip_prefix("   ").or_else(|| after_num.strip_prefix("  ")) {
+        } else if let Some(content) = after_num
+            .strip_prefix("   ")
+            .or_else(|| after_num.strip_prefix("  "))
+        {
             return vec![
                 Span::styled(format!("{num:>4} "), Style::default().fg(theme.dim)),
                 Span::raw("  "),
@@ -598,7 +623,10 @@ fn render_side_by_side_col(col: &str, theme: &Theme) -> Vec<Span<'static>> {
             Span::styled("     ", Style::default().bg(bg)),
             Span::styled(
                 "- ",
-                Style::default().fg(theme.error).bg(bg).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.error)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
         ];
@@ -608,13 +636,19 @@ fn render_side_by_side_col(col: &str, theme: &Theme) -> Vec<Span<'static>> {
             Span::styled("     ", Style::default().bg(bg)),
             Span::styled(
                 "+ ",
-                Style::default().fg(theme.success).bg(bg).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.success)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
         ];
     }
 
-    vec![Span::styled(col.to_string(), Style::default().fg(theme.ink))]
+    vec![Span::styled(
+        col.to_string(),
+        Style::default().fg(theme.ink),
+    )]
 }
 
 pub fn format_transcript_lines(
@@ -631,22 +665,32 @@ pub fn format_transcript_lines(
         if line.trim_start().starts_with("```") {
             if in_code_block {
                 in_code_block = false;
-                lines.push(Line::from(vec![
-                    Span::styled("└───", Style::default().fg(theme.dim)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    "└───",
+                    Style::default().fg(theme.dim),
+                )]));
             } else {
                 in_code_block = true;
                 let lang = line.trim_start().trim_start_matches('`').trim();
                 if lang.is_empty() {
                     lines.push(Line::from(vec![
                         Span::styled("┌───", Style::default().fg(theme.dim)),
-                        Span::styled("─────────────────────────────────────", Style::default().fg(theme.dim)),
+                        Span::styled(
+                            "─────────────────────────────────────",
+                            Style::default().fg(theme.dim),
+                        ),
                     ]));
                 } else {
                     lines.push(Line::from(vec![
                         Span::styled("┌─── ", Style::default().fg(theme.dim)),
-                        Span::styled(lang.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)),
-                        Span::styled(" ─────────────────────────────", Style::default().fg(theme.dim)),
+                        Span::styled(
+                            lang.to_string(),
+                            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            " ─────────────────────────────",
+                            Style::default().fg(theme.dim),
+                        ),
                     ]));
                 }
             }
@@ -679,12 +723,12 @@ pub fn format_transcript_lines(
         } else if let Some(rest) = line.strip_prefix("💭 ") {
             in_thought = true;
             in_box = false;
-            let mut spans = vec![
-                Span::styled("💭 ", Style::default().fg(theme.amber)),
-            ];
+            let mut spans = vec![Span::styled("💭 ", Style::default().fg(theme.amber))];
             spans.push(Span::styled(
                 rest.to_string(),
-                Style::default().fg(theme.amber).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(theme.amber)
+                    .add_modifier(Modifier::ITALIC),
             ));
             lines.push(Line::from(spans));
         } else if line.trim_start().starts_with("┌──") {
@@ -693,9 +737,10 @@ pub fn format_transcript_lines(
             let trimmed = line.trim_start();
             let indent = &line[..line.len() - trimmed.len()];
             let after_prefix = trimmed.strip_prefix("┌── ").unwrap_or(trimmed);
-            let mut spans = vec![
-                Span::styled(format!("{indent}┌── "), Style::default().fg(theme.dim)),
-            ];
+            let mut spans = vec![Span::styled(
+                format!("{indent}┌── "),
+                Style::default().fg(theme.dim),
+            )];
             if let Some((title, border_tail)) = after_prefix.split_once(' ') {
                 spans.push(Span::styled(
                     title.to_string(),
@@ -706,20 +751,25 @@ pub fn format_transcript_lines(
                     Style::default().fg(theme.dim),
                 ));
             } else {
-                spans.push(Span::styled(after_prefix.to_string(), Style::default().fg(theme.dim)));
+                spans.push(Span::styled(
+                    after_prefix.to_string(),
+                    Style::default().fg(theme.dim),
+                ));
             }
             lines.push(Line::from(spans));
         } else if line.trim_start().starts_with("└───") {
             in_box = false;
             let trimmed = line.trim_start();
             let indent = &line[..line.len() - trimmed.len()];
-            lines.push(Line::from(vec![
-                Span::styled(format!("{indent}{trimmed}"), Style::default().fg(theme.dim)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("{indent}{trimmed}"),
+                Style::default().fg(theme.dim),
+            )]));
         } else if line.starts_with("⬢ ")
             || line.starts_with("• Edit")
             || line.starts_with("• Write")
-            || (line.starts_with("• ") && parse_diff_badge(line.strip_prefix("• ").unwrap_or("")).is_some())
+            || (line.starts_with("• ")
+                && parse_diff_badge(line.strip_prefix("• ").unwrap_or("")).is_some())
         {
             in_thought = false;
             in_box = false;
@@ -735,7 +785,10 @@ pub fn format_transcript_lines(
                 } else {
                     for next_line in raw_lines.iter().skip(i + 1).take(25) {
                         let trimmed = next_line.trim_start();
-                        if next_line.starts_with("⬢ ") || next_line.starts_with("• ") || next_line.is_empty() {
+                        if next_line.starts_with("⬢ ")
+                            || next_line.starts_with("• ")
+                            || next_line.is_empty()
+                        {
                             break;
                         }
                         if trimmed.starts_with("└ failed:") || trimmed.starts_with("failed:") {
@@ -754,9 +807,12 @@ pub fn format_transcript_lines(
             } else {
                 theme.success
             };
-            let mut spans = vec![
-                Span::styled(bullet.to_string(), Style::default().fg(marker_color).add_modifier(Modifier::BOLD)),
-            ];
+            let mut spans = vec![Span::styled(
+                bullet.to_string(),
+                Style::default()
+                    .fg(marker_color)
+                    .add_modifier(Modifier::BOLD),
+            )];
             let rest_trimmed = rest.trim();
             if let Some((before, add_part, rem_part)) = parse_diff_badge(rest_trimmed) {
                 if let Some((verb, target)) = before.split_once(' ') {
@@ -779,12 +835,16 @@ pub fn format_transcript_lines(
                 spans.push(Span::styled("(", Style::default().fg(theme.dim)));
                 spans.push(Span::styled(
                     format!("+{add_part}"),
-                    Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
                     format!("-{rem_part}"),
-                    Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled(")", Style::default().fg(theme.dim)));
             } else if let Some(target) = rest_trimmed.strip_prefix("Updated Plan") {
@@ -808,20 +868,36 @@ pub fn format_transcript_lines(
                 spans.push(Span::raw(" "));
                 if let Some((cmd, exit_part)) = target.rsplit_once(" (exit ") {
                     let code_str = exit_part.strip_suffix(')').unwrap_or(exit_part);
-                    spans.push(Span::styled(cmd.to_string(), Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::styled(
+                        cmd.to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    ));
                     spans.push(Span::raw(" "));
                     spans.push(Span::styled("(", Style::default().fg(theme.dim)));
-                    let exit_color = if code_str == "0" { theme.success } else { theme.error };
-                    spans.push(Span::styled(format!("exit {code_str}"), Style::default().fg(exit_color).add_modifier(Modifier::BOLD)));
+                    let exit_color = if code_str == "0" {
+                        theme.success
+                    } else {
+                        theme.error
+                    };
+                    spans.push(Span::styled(
+                        format!("exit {code_str}"),
+                        Style::default().fg(exit_color).add_modifier(Modifier::BOLD),
+                    ));
                     spans.push(Span::styled(")", Style::default().fg(theme.dim)));
                 } else if let Some((file, lines_part)) = target.rsplit_once(" (")
                     && lines_part.ends_with(" lines)")
                 {
-                    spans.push(Span::styled(file.to_string(), Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::styled(
+                        file.to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    ));
                     spans.push(Span::raw(" "));
                     spans.push(Span::styled("(", Style::default().fg(theme.dim)));
                     let count_str = lines_part.strip_suffix(')').unwrap_or(lines_part);
-                    spans.push(Span::styled(count_str.to_string(), Style::default().fg(theme.dim)));
+                    spans.push(Span::styled(
+                        count_str.to_string(),
+                        Style::default().fg(theme.dim),
+                    ));
                     spans.push(Span::styled(")", Style::default().fg(theme.dim)));
                 } else {
                     spans.push(Span::styled(
@@ -837,37 +913,58 @@ pub fn format_transcript_lines(
             }
             lines.push(Line::from(spans));
         } else if let Some(rest) = line.trim_start().strip_prefix("└ ") {
-            let mut spans = vec![
-                Span::styled("  └ ", Style::default().fg(theme.dim)),
-            ];
+            let mut spans = vec![Span::styled("  └ ", Style::default().fg(theme.dim))];
             let rest_trimmed = rest.trim();
             if let Some(err_detail) = rest_trimmed.strip_prefix("failed:") {
-                spans.push(Span::styled("failed: ", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled(err_detail.trim().to_string(), Style::default().fg(theme.error)));
+                spans.push(Span::styled(
+                    "failed: ",
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    err_detail.trim().to_string(),
+                    Style::default().fg(theme.error),
+                ));
             } else {
-                spans.push(Span::styled(rest_trimmed.to_string(), Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(
+                    rest_trimmed.to_string(),
+                    Style::default().fg(theme.quiet),
+                ));
             }
             lines.push(Line::from(spans));
         } else if line.trim_start().starts_with("│ ") || line.trim_start() == "│" {
             let trimmed = line.trim_start();
             let indent_len = line.len().saturating_sub(trimmed.len());
             let indent = &line[..indent_len];
-            let rest = if trimmed == "│" { "" } else { trimmed.strip_prefix("│ ").unwrap_or("") };
-            let mut spans = vec![
-                Span::styled(format!("{indent}│ "), Style::default().fg(theme.dim)),
-            ];
+            let rest = if trimmed == "│" {
+                ""
+            } else {
+                trimmed.strip_prefix("│ ").unwrap_or("")
+            };
+            let mut spans = vec![Span::styled(
+                format!("{indent}│ "),
+                Style::default().fg(theme.dim),
+            )];
 
             if in_thought {
                 spans.push(Span::styled(
                     rest.to_string(),
-                    Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(theme.dim)
+                        .add_modifier(Modifier::ITALIC),
                 ));
             } else if in_box {
-                if let Some(url_part) = rest.strip_prefix("   URL: ").or_else(|| rest.strip_prefix("URL: ")) {
+                if let Some(url_part) = rest
+                    .strip_prefix("   URL: ")
+                    .or_else(|| rest.strip_prefix("URL: "))
+                {
                     spans.push(Span::styled("   URL: ", Style::default().fg(theme.dim)));
                     spans.push(Span::styled(
                         url_part.to_string(),
-                        Style::default().fg(theme.teal).add_modifier(Modifier::UNDERLINED),
+                        Style::default()
+                            .fg(theme.teal)
+                            .add_modifier(Modifier::UNDERLINED),
                     ));
                 } else if let Some((num_str, title_str)) = split_numbered_result(rest) {
                     spans.push(Span::styled(
@@ -879,43 +976,94 @@ pub fn format_transcript_lines(
                         Style::default().fg(theme.ink),
                     ));
                 } else {
-                    spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.ink)));
+                    spans.push(Span::styled(
+                        rest.to_string(),
+                        Style::default().fg(theme.ink),
+                    ));
                 }
             } else if let Some(item) = rest.strip_prefix("✔ ") {
                 spans.push(Span::styled("✔ ", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.dim),
+                ));
             } else if let Some(item) = rest.strip_prefix("[✔] ") {
                 spans.push(Span::styled("[✔] ", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.dim),
+                ));
             } else if let Some(item) = rest.strip_prefix("[✔]") {
                 spans.push(Span::styled("[✔]", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.dim),
+                ));
             } else if let Some(item) = rest.strip_prefix("• ") {
-                spans.push(Span::styled("• ", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    "• ",
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
             } else if let Some(item) = rest.strip_prefix("[•] ") {
-                spans.push(Span::styled("[•] ", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    "[•] ",
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
             } else if let Some(item) = rest.strip_prefix("[•]") {
-                spans.push(Span::styled("[•]", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    "[•]",
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
             } else if let Some(item) = rest.strip_prefix("□ ") {
                 spans.push(Span::styled("□ ", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.quiet),
+                ));
             } else if let Some(item) = rest.strip_prefix("[ ] ") {
                 spans.push(Span::styled("[ ] ", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.quiet),
+                ));
             } else if let Some(item) = rest.strip_prefix("[ ]") {
                 spans.push(Span::styled("[ ]", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.quiet),
+                ));
             } else if rest.contains("✔ ") || rest.contains("[✔]") {
-                spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.dim)));
+                spans.push(Span::styled(
+                    rest.to_string(),
+                    Style::default().fg(theme.dim),
+                ));
             } else if rest.contains("• ") || rest.contains("[•]") {
-                spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    rest.to_string(),
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
             } else if rest.contains("□ ") || rest.contains("[ ]") {
-                spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(
+                    rest.to_string(),
+                    Style::default().fg(theme.quiet),
+                ));
             } else {
-                spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(
+                    rest.to_string(),
+                    Style::default().fg(theme.quiet),
+                ));
             }
             lines.push(Line::from(spans));
         } else if line.trim_start().starts_with("✔ ")
@@ -934,30 +1082,63 @@ pub fn format_transcript_lines(
             };
             if let Some(item) = trimmed.strip_prefix("✔ ") {
                 spans.push(Span::styled("✔ ", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.dim),
+                ));
             } else if let Some(item) = trimmed.strip_prefix("[✔] ") {
                 spans.push(Span::styled("[✔] ", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.dim),
+                ));
             } else if let Some(item) = trimmed.strip_prefix("[✔]") {
                 spans.push(Span::styled("[✔]", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.dim),
+                ));
             } else if let Some(item) = trimmed.strip_prefix("[•] ") {
-                spans.push(Span::styled("[•] ", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    "[•] ",
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
             } else if let Some(item) = trimmed.strip_prefix("[•]") {
-                spans.push(Span::styled("[•]", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    "[•]",
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ));
             } else if let Some(item) = trimmed.strip_prefix("□ ") {
                 spans.push(Span::styled("□ ", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.quiet),
+                ));
             } else if let Some(item) = trimmed.strip_prefix("[ ] ") {
                 spans.push(Span::styled("[ ] ", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.quiet),
+                ));
             } else if let Some(item) = trimmed.strip_prefix("[ ]") {
                 spans.push(Span::styled("[ ]", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(
+                    item.to_string(),
+                    Style::default().fg(theme.quiet),
+                ));
             } else {
-                spans.push(Span::styled(trimmed.to_string(), Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(
+                    trimmed.to_string(),
+                    Style::default().fg(theme.quiet),
+                ));
             }
             lines.push(Line::from(spans));
         } else if let Some((indent, left_col, right_col)) = parse_side_by_side_diff_line(line) {
@@ -975,12 +1156,11 @@ pub fn format_transcript_lines(
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{indent}- "),
-                    Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    removed_text.to_string(),
-                    Style::default().fg(theme.error),
-                ),
+                Span::styled(removed_text.to_string(), Style::default().fg(theme.error)),
             ]));
         } else if (line.starts_with(' ') || line.starts_with('\t'))
             && (line.trim_start().starts_with("+ ") || line.trim_start() == "+")
@@ -991,12 +1171,11 @@ pub fn format_transcript_lines(
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{indent}+ "),
-                    Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    added_text.to_string(),
-                    Style::default().fg(theme.success),
-                ),
+                Span::styled(added_text.to_string(), Style::default().fg(theme.success)),
             ]));
         } else if (line.starts_with(' ') || line.starts_with('\t'))
             && line.trim_start().starts_with('⋯')
@@ -1007,21 +1186,37 @@ pub fn format_transcript_lines(
             )));
         } else if let Some(rest) = line.strip_prefix("⬡ ") {
             let spans = vec![
-                Span::styled("⬡ ", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
-                Span::styled(rest.to_string(), Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "⬡ ",
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    rest.to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
             ];
             lines.push(Line::from(spans));
         } else if let Some(rest) = line.strip_prefix("⚙ [") {
             let inner = rest.strip_suffix(']').unwrap_or(rest);
-            let mut spans = vec![
-                Span::styled("⚙ ", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
-            ];
+            let mut spans = vec![Span::styled(
+                "⚙ ",
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            )];
             if let Some((name, args)) = inner.split_once(':') {
-                spans.push(Span::styled(name.trim().to_string(), Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    name.trim().to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ));
                 spans.push(Span::raw(" "));
-                spans.push(Span::styled(args.trim().to_string(), Style::default().fg(theme.ink)));
+                spans.push(Span::styled(
+                    args.trim().to_string(),
+                    Style::default().fg(theme.ink),
+                ));
             } else {
-                spans.push(Span::styled(inner.trim().to_string(), Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    inner.trim().to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ));
             }
             lines.push(Line::from(spans));
         } else if let Some(rest) = line.strip_prefix("✓ ") {
@@ -1031,7 +1226,12 @@ pub fn format_transcript_lines(
             ]));
         } else if let Some(rest) = line.strip_prefix("✗ ") {
             lines.push(Line::from(vec![
-                Span::styled("  └ failed: ", Style::default().fg(theme.error).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "  └ failed: ",
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(rest.to_string(), Style::default().fg(theme.error)),
             ]));
         } else if line.starts_with("### ") {
@@ -1047,15 +1247,17 @@ pub fn format_transcript_lines(
         } else if line.starts_with("# ") {
             lines.push(Line::from(Span::styled(
                 line.to_string(),
-                Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.amber)
+                    .add_modifier(Modifier::BOLD),
             )));
         } else if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-            let mut spans = vec![
-                Span::styled("• ", Style::default().fg(theme.amber)),
-            ];
+            let mut spans = vec![Span::styled("• ", Style::default().fg(theme.amber))];
             spans.extend(format_inline_code(rest, theme));
             lines.push(Line::from(spans));
-        } else if (line.starts_with(' ') || line.starts_with('\t')) && line.trim_start().starts_with("* ") {
+        } else if (line.starts_with(' ') || line.starts_with('\t'))
+            && line.trim_start().starts_with("* ")
+        {
             let trimmed = line.trim_start();
             let indent_len = line.len().saturating_sub(trimmed.len());
             let indent = &line[..indent_len];
@@ -1205,9 +1407,13 @@ mod tests {
     fn test_format_transcript_plain_text() {
         let theme = ThemeKind::ClawcodeDark.to_theme();
         let mode_color = Color::Cyan;
-        let lines = format_transcript_lines("Plain response text from assistant", &theme, mode_color);
+        let lines =
+            format_transcript_lines("Plain response text from assistant", &theme, mode_color);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content, "Plain response text from assistant");
+        assert_eq!(
+            lines[0].spans[0].content,
+            "Plain response text from assistant"
+        );
         assert_eq!(lines[0].spans[0].style.fg, Some(theme.ink));
     }
 
@@ -1243,10 +1449,18 @@ mod tests {
         assert_eq!(lines[0].spans[0].content, "⬢ ");
         assert_eq!(lines[0].spans[0].style.fg, Some(theme.success));
 
-        let add_span = lines[0].spans.iter().find(|s| s.content == "+3").expect("+3 badge span");
+        let add_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "+3")
+            .expect("+3 badge span");
         assert_eq!(add_span.style.fg, Some(theme.success));
 
-        let rem_span = lines[0].spans.iter().find(|s| s.content == "-1").expect("-1 badge span");
+        let rem_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "-1")
+            .expect("-1 badge span");
         assert_eq!(rem_span.style.fg, Some(theme.error));
 
         assert_eq!(lines[1].spans[0].style.fg, Some(theme.error));
@@ -1272,14 +1486,29 @@ mod tests {
         assert_eq!(lines[0].spans[0].content, "• ");
         assert_eq!(lines[0].spans[0].style.fg, Some(theme.teal));
         assert_eq!(lines[0].spans[1].content, "Edit");
-        assert_eq!(lines[0].spans[3].content, "database/migrations/2025_12_11_141134_add_date_of_birth_to_users_table.php");
-        let add_span = lines[0].spans.iter().find(|s| s.content == "+1").expect("+1 badge");
+        assert_eq!(
+            lines[0].spans[3].content,
+            "database/migrations/2025_12_11_141134_add_date_of_birth_to_users_table.php"
+        );
+        let add_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "+1")
+            .expect("+1 badge");
         assert_eq!(add_span.style.fg, Some(theme.success));
-        let rem_span = lines[0].spans.iter().find(|s| s.content == "-1").expect("-1 badge");
+        let rem_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "-1")
+            .expect("-1 badge");
         assert_eq!(rem_span.style.fg, Some(theme.error));
 
         // Line 1: Context row with dim line numbers and theme.dim separator
-        let sep_span = lines[1].spans.iter().find(|s| s.content == " │ ").expect("separator span");
+        let sep_span = lines[1]
+            .spans
+            .iter()
+            .find(|s| s.content == " │ ")
+            .expect("separator span");
         assert_eq!(sep_span.style.fg, Some(theme.dim));
         assert_eq!(lines[1].spans[1].style.fg, Some(theme.dim)); // num span
         assert_eq!(lines[1].spans[1].style.bg, None); // normal bg
@@ -1425,10 +1654,23 @@ mod tests {
         assert_eq!(lines[2].spans[0].style.fg, Some(theme.dim));
         assert_eq!(lines[2].spans[1].content, "• ");
         assert_eq!(lines[2].spans[1].style.fg, Some(theme.teal));
-        assert!(lines[2].spans[1].style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(lines[2].spans[2].content, "2. Sedang menjalankan langkah kedua");
+        assert!(
+            lines[2].spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert_eq!(
+            lines[2].spans[2].content,
+            "2. Sedang menjalankan langkah kedua"
+        );
         assert_eq!(lines[2].spans[2].style.fg, Some(theme.teal));
-        assert!(lines[2].spans[2].style.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            lines[2].spans[2]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
 
         // Line 3: pending item with □
         assert_eq!(lines[3].spans[0].content, "  │ ");
@@ -1464,7 +1706,12 @@ mod tests {
         assert_eq!(lines[1].spans[0].style.fg, Some(theme.dim));
         assert_eq!(lines[1].spans[1].content, "[•] ");
         assert_eq!(lines[1].spans[1].style.fg, Some(theme.teal));
-        assert!(lines[1].spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            lines[1].spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
         assert_eq!(lines[2].spans[0].content, "  │ ");
         assert_eq!(lines[2].spans[0].style.fg, Some(theme.dim));
         assert_eq!(lines[2].spans[1].content, "[ ] ");

@@ -18,22 +18,21 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 pub use app::{
-    App, ConversationMode, ConversationStatus, Input, UiEvent,
-    UiEventQueue, format_tool_success_detail, is_sensitive_command,
-    tool_target_and_verbs,
+    App, ConversationMode, ConversationStatus, Input, UiEvent, UiEventQueue,
+    format_tool_success_detail, is_sensitive_command, tool_target_and_verbs,
 };
+pub use chat::{format_transcript_lines, render_chat};
 pub use dialogs::{
     AgentItem, AgentsDialogState, ModelsDialogState, PermissionDecision, PermissionDialogState,
     PermissionPrompt, QuestionDialogState, SessionsDialogState, StatusDialogState,
     ThemesDialogState, WhichKeyState, render_permission_dialog, render_question_dialog,
 };
+pub use diff::{DiffLine, DiffOp, DiffResult, compute_diff};
 pub use home::HomeState;
-pub use chat::{format_transcript_lines, render_chat};
 pub use render::render;
 pub use theme::{Theme, ThemeKind};
 pub use typewriter::TypewriterState;
 pub use wave_spinner::WaveSpinner;
-pub use diff::{DiffLine, DiffOp, DiffResult, compute_diff};
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const UI_EVENT_QUEUE_CAPACITY: usize = 64;

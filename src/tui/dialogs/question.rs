@@ -135,15 +135,20 @@ pub fn render_question_dialog(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Question text
+            Constraint::Length(2),      // Question text
             Constraint::Min(opt_count), // Options list
-            Constraint::Length(1), // Footer hints
+            Constraint::Length(1),      // Footer hints
         ])
         .split(inner);
 
     // Question
     let question_line = Line::from(vec![
-        Span::styled("? ", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "? ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             if dialog.question.is_empty() {
                 "Agent asked a question:"
@@ -162,8 +167,14 @@ pub fn render_question_dialog(
         let is_selected = i == dialog.selected_option;
         let line = if is_selected {
             Line::from(vec![
-                Span::styled(" › (•) ", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)),
-                Span::styled(opt, Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " › (•) ",
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    opt,
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
             ])
         } else {
             Line::from(vec![
@@ -292,10 +303,8 @@ mod tests {
 
     #[test]
     fn test_question_dialog_state_custom_answer_input() {
-        let mut dialog = QuestionDialogState::new(
-            "Enter port",
-            vec!["8080".to_string(), "3000".to_string()],
-        );
+        let mut dialog =
+            QuestionDialogState::new("Enter port", vec!["8080".to_string(), "3000".to_string()]);
         assert_eq!(dialog.selected_option, 0);
 
         dialog.push_char('9');
@@ -346,11 +355,7 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let content: String = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
 
         assert!(content.contains("Question from Agent"));
         assert!(content.contains("Which framework do you prefer?"));

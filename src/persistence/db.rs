@@ -255,7 +255,10 @@ impl Db {
     pub fn session(&self, session_id: i64) -> Result<Option<Session>, rusqlite::Error> {
         self.connection
             .query_row(
-                &format!("SELECT {} FROM sessions WHERE id = ?1", Session::SELECT_COLUMNS),
+                &format!(
+                    "SELECT {} FROM sessions WHERE id = ?1",
+                    Session::SELECT_COLUMNS
+                ),
                 params![session_id],
                 Session::from_row,
             )

@@ -281,9 +281,12 @@ fn worker_loop(
                             Ok(false) => {
                                 publish_status(&bus, session_id, Some(generation_id), "cancel_noop")
                             }
-                            Err(error) => {
-                                publish_error(&bus, session_id, Some(generation_id), &error.to_string())
-                            }
+                            Err(error) => publish_error(
+                                &bus,
+                                session_id,
+                                Some(generation_id),
+                                &error.to_string(),
+                            ),
                         }
                     }
                 }
@@ -433,7 +436,11 @@ fn run_generation(
     });
     messages.extend(history);
 
-    if messages.last().map(|m| (m.role.as_str(), m.content.as_str())) != Some(("user", prompt)) {
+    if messages
+        .last()
+        .map(|m| (m.role.as_str(), m.content.as_str()))
+        != Some(("user", prompt))
+    {
         let _ = ctx.writer.append(ctx.session_id, "user", prompt);
         messages.push(crate::provider::ChatMessage {
             role: "user".to_string(),
@@ -496,13 +503,19 @@ fn run_generation(
                 }
                 StreamEvent::ToolCallStart { id, name } => {
                     turn_tool_calls.push((id.clone(), name.clone(), String::new()));
-                    ctx.emit("tool_call_start", &serde_json::json!({ "id": id, "name": name }));
+                    ctx.emit(
+                        "tool_call_start",
+                        &serde_json::json!({ "id": id, "name": name }),
+                    );
                 }
                 StreamEvent::ToolCallDelta { id, arguments } => {
                     if let Some(call) = turn_tool_calls.iter_mut().find(|(cid, _, _)| cid == &id) {
                         call.2.push_str(&arguments);
                     }
-                    ctx.emit("tool_call_delta", &serde_json::json!({ "id": id, "arguments": arguments }));
+                    ctx.emit(
+                        "tool_call_delta",
+                        &serde_json::json!({ "id": id, "arguments": arguments }),
+                    );
                 }
                 StreamEvent::ToolCallEnd { id } => {
                     ctx.emit("tool_call_end", &serde_json::json!({ "id": id }));
@@ -542,9 +555,9 @@ fn run_generation(
                 let _ = ctx.writer.append(ctx.session_id, "assistant", &text);
             }
             ctx.db.clear_last_error(ctx.session_id);
-            let _ = ctx
-                .db
-                .with(|db| db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None));
+            let _ = ctx.db.with(|db| {
+                db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None)
+            });
             ctx.emit_status("cancelled");
             ctx.deactivate();
             return;
@@ -620,20 +633,24 @@ fn run_generation(
                 }),
             );
 
-            let effective_ws_dir = if workspace_dir.as_os_str().is_empty() || !workspace_dir.exists() {
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-            } else {
-                workspace_dir.clone()
-            };
+            let effective_ws_dir =
+                if workspace_dir.as_os_str().is_empty() || !workspace_dir.exists() {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                } else {
+                    workspace_dir.clone()
+                };
 
-            let result = match crate::workspace::Workspace::with_filesystem(&effective_ws_dir, crate::workspace::RealFileSystem) {
-                Ok(ws) => crate::conversation::tools::execute_tool(
-                    &ws,
-                    mode,
-                    &tool_name,
-                    &args_str,
-                ),
-                Err(e) => Err(format!("Failed to open workspace {}: {e}", effective_ws_dir.display())),
+            let result = match crate::workspace::Workspace::with_filesystem(
+                &effective_ws_dir,
+                crate::workspace::RealFileSystem,
+            ) {
+                Ok(ws) => {
+                    crate::conversation::tools::execute_tool(&ws, mode, &tool_name, &args_str)
+                }
+                Err(e) => Err(format!(
+                    "Failed to open workspace {}: {e}",
+                    effective_ws_dir.display()
+                )),
             };
 
             let (success, output) = match result {
@@ -738,7 +755,9 @@ fn publish_error(bus: &EventBus, session_id: i64, generation_id: Option<i64>, me
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{ModelInfo, ProviderCapabilities, ProviderError, ProviderId, StreamResponse};
+    use crate::provider::{
+        ModelInfo, ProviderCapabilities, ProviderError, ProviderId, StreamResponse,
+    };
 
     #[derive(Debug)]
     struct SlowProvider;
@@ -750,20 +769,30 @@ mod tests {
             &ID
         }
         fn capabilities(&self) -> ProviderCapabilities {
-            ProviderCapabilities { streaming: true, tools: false }
+            ProviderCapabilities {
+                streaming: true,
+                tools: false,
+            }
         }
-        fn models(&self) -> Vec<ModelInfo> { Vec::new() }
+        fn models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
         fn send(&self, _request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
             Ok(StreamResponse { events: vec![] })
         }
-        fn stream(&self, _request: &StreamRequest) -> Result<crate::provider::ProviderStream, ProviderError> {
+        fn stream(
+            &self,
+            _request: &StreamRequest,
+        ) -> Result<crate::provider::ProviderStream, ProviderError> {
             let (sender, stream) = crate::provider::ProviderStream::channel(16);
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 let _ = sender.send(StreamEvent::TextDelta("delayed text".into()));
                 let _ = sender.flush();
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                let _ = sender.send(StreamEvent::Finish { reason: FinishReason::Stop });
+                let _ = sender.send(StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                });
                 let _ = sender.flush();
             });
             Ok(stream)
@@ -780,7 +809,9 @@ mod tests {
         let writer = WriterHandle::spawn(Db::open_in_memory().unwrap());
         let client = RuntimeClient::spawn(db, writer, Box::new(SlowProvider), bus);
 
-        client.start_generation(session_id, "plan", "fake", "slow", "hello").unwrap();
+        client
+            .start_generation(session_id, "plan", "fake", "slow", "hello")
+            .unwrap();
         client.cancel_generation(session_id).unwrap();
 
         let mut got_cancelled = false;
@@ -803,11 +834,17 @@ mod tests {
         }
 
         assert!(got_cancelled, "generation should emit cancelled event");
-        assert!(!got_completed, "generation must never emit completed when cancelled");
+        assert!(
+            !got_completed,
+            "generation must never emit completed when cancelled"
+        );
 
         let db = client.shutdown();
         let gid = target_generation_id.expect("must have generation id");
-        assert_eq!(db.generation_status(gid).unwrap(), Some(GenerationStatus::Cancelled));
+        assert_eq!(
+            db.generation_status(gid).unwrap(),
+            Some(GenerationStatus::Cancelled)
+        );
     }
 
     #[test]
@@ -820,8 +857,12 @@ mod tests {
         let writer = WriterHandle::spawn(Db::open_in_memory().unwrap());
         let client = RuntimeClient::spawn(db, writer, Box::new(SlowProvider), bus);
 
-        client.start_generation(session_id, "plan", "fake", "slow", "turn 1").unwrap();
-        client.start_generation(session_id, "plan", "fake", "slow", "turn 2").unwrap();
+        client
+            .start_generation(session_id, "plan", "fake", "slow", "turn 1")
+            .unwrap();
+        client
+            .start_generation(session_id, "plan", "fake", "slow", "turn 2")
+            .unwrap();
 
         let mut error_seen = false;
         let start = std::time::Instant::now();
@@ -833,13 +874,19 @@ mod tests {
                 }
             }
         }
-        assert!(error_seen, "concurrent generation on same session must be rejected");
+        assert!(
+            error_seen,
+            "concurrent generation on same session must be rejected"
+        );
         let _ = client.shutdown();
     }
 
     #[test]
     fn send_after_shutdown_returns_err() {
-        let client = RuntimeClient { sender: None, worker: None };
+        let client = RuntimeClient {
+            sender: None,
+            worker: None,
+        };
         let res = client.create_session(1, "test");
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("client shut down"));

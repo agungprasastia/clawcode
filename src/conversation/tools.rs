@@ -595,8 +595,14 @@ pub fn execute_tool(
             let clean_path = parsed.path;
             let is_raw = parsed.is_raw;
 
-            let explicit_offset = args.get("offset").and_then(|v| v.as_u64()).map(|v| v as usize);
-            let explicit_limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let explicit_offset = args
+                .get("offset")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let explicit_limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
 
             let read_res = workspace
                 .read(clean_path, TOOL_READ_MAX_BYTES)
@@ -672,7 +678,8 @@ pub fn execute_tool(
                 }
                 Ok(out)
             } else {
-                let mut out = format!("[{clean_path}#{hash}] (lines {start}..{end} of {total_lines})\n");
+                let mut out =
+                    format!("[{clean_path}#{hash}] (lines {start}..{end} of {total_lines})\n");
                 for (i, line) in lines[start - 1..end].iter().enumerate() {
                     let line_no = start + i;
                     out.push_str(&format!("  {line_no}: {line}\n"));
@@ -820,10 +827,7 @@ pub fn execute_tool(
             ))
         }
         "list_dir" => {
-            let subpath = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
+            let subpath = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             let target_dir = if subpath == "." || subpath.is_empty() {
                 workspace.root_path().to_path_buf()
             } else {
@@ -873,10 +877,7 @@ pub fn execute_tool(
                 .get("pattern")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Missing required argument 'pattern'".to_string())?;
-            let subpath = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
+            let subpath = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             let target_dir = if subpath == "." || subpath.is_empty() {
                 workspace.root_path().to_path_buf()
             } else {
@@ -889,7 +890,13 @@ pub fn execute_tool(
             }
 
             let mut matched = Vec::new();
-            walk_dir_glob(&target_dir, workspace.root_path(), pattern, &mut matched, 100);
+            walk_dir_glob(
+                &target_dir,
+                workspace.root_path(),
+                pattern,
+                &mut matched,
+                100,
+            );
 
             if matched.is_empty() {
                 Ok(format!("No files matched pattern '{pattern}'"))
@@ -903,10 +910,7 @@ pub fn execute_tool(
                 .get("query")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Missing required argument 'query'".to_string())?;
-            let subpath = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
+            let subpath = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             let target_dir = if subpath == "." || subpath.is_empty() {
                 workspace.root_path().to_path_buf()
             } else {
@@ -934,9 +938,9 @@ pub fn execute_tool(
                 .ok_or_else(|| "Missing required argument 'command'".to_string())?;
 
             if mode == Mode::Plan {
-                let decision = workspace.validate_shell(mode, ".", command_str).unwrap_or(
-                    crate::workspace::PolicyDecision::ApprovalRequired,
-                );
+                let decision = workspace
+                    .validate_shell(mode, ".", command_str)
+                    .unwrap_or(crate::workspace::PolicyDecision::ApprovalRequired);
                 if matches!(decision, crate::workspace::PolicyDecision::Denied) {
                     return Err(
                         "Command execution denied in PLAN mode. Switch to BUILD mode (Tab) to execute modifying commands."
@@ -1041,13 +1045,13 @@ pub fn execute_tool(
                 let raw_status = obj
                     .get("status")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        format!("Plan step at index {idx} is missing 'status'")
-                    })?;
+                    .ok_or_else(|| format!("Plan step at index {idx} is missing 'status'"))?;
 
                 let norm_status = match raw_status.trim().to_ascii_lowercase().as_str() {
                     "todo" | "open" | "pending" | "not_started" | "not-started" => "pending",
-                    "in_progress" | "in-progress" | "in progress" | "doing" | "active" => "in_progress",
+                    "in_progress" | "in-progress" | "in progress" | "doing" | "active" => {
+                        "in_progress"
+                    }
                     "done" | "completed" | "complete" => "completed",
                     other => {
                         return Err(format!(
@@ -1300,10 +1304,7 @@ fn decode_entity(entity: &str) -> Option<char> {
                 }
             } else if entity.starts_with('#') {
                 if entity.len() > 1 {
-                    entity[1..]
-                        .parse::<u32>()
-                        .ok()
-                        .and_then(char::from_u32)
+                    entity[1..].parse::<u32>().ok().and_then(char::from_u32)
                 } else {
                     None
                 }
@@ -1465,7 +1466,9 @@ pub fn execute_websearch(query: &str) -> Result<String, String> {
         ));
     }
 
-    Ok(format!("No search results found for query \"{trimmed_query}\"."))
+    Ok(format!(
+        "No search results found for query \"{trimmed_query}\"."
+    ))
 }
 
 pub fn url_encode(input: &str) -> String {
@@ -1492,10 +1495,8 @@ pub fn percent_decode(s: &str) -> String {
             let h1 = chars.next();
             let h2 = chars.next();
             if let (Some(h1), Some(h2)) = (h1, h2) {
-                if let (Some(d1), Some(d2)) = (
-                    (h1 as char).to_digit(16),
-                    (h2 as char).to_digit(16),
-                ) {
+                if let (Some(d1), Some(d2)) = ((h1 as char).to_digit(16), (h2 as char).to_digit(16))
+                {
                     bytes.push(((d1 << 4) | d2) as u8);
                     continue;
                 }
@@ -1657,7 +1658,10 @@ fn extract_attr_val(slice: &str, attr_name: &str) -> Option<String> {
 pub fn parse_instant_answer_json(json_val: &serde_json::Value) -> Vec<SearchItem> {
     let mut results = Vec::new();
 
-    let heading = json_val.get("Heading").and_then(|v| v.as_str()).unwrap_or("");
+    let heading = json_val
+        .get("Heading")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let abstract_text = json_val
         .get("AbstractText")
         .and_then(|v| v.as_str())
@@ -1836,9 +1840,13 @@ fn walk_dir_glob(
     if results.len() >= max_items {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return; };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else { continue; };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
@@ -1871,9 +1879,13 @@ fn walk_dir_grep(
         return;
     }
     let query_lower = query.to_lowercase();
-    let Ok(entries) = std::fs::read_dir(dir) else { return; };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else { continue; };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
@@ -1883,7 +1895,9 @@ fn walk_dir_grep(
         if file_type.is_dir() {
             walk_dir_grep(&path, root, query, results, max_items);
         } else if file_type.is_file() {
-            let Ok(bytes) = std::fs::read(&path) else { continue; };
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
             if bytes.contains(&0) || bytes.len() > 1024 * 1024 {
                 // skip binary or large files
                 continue;
@@ -2000,7 +2014,10 @@ mod tests {
         let items = parse_instant_answer_json(&json_val);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].title, "Rust (programming language)");
-        assert_eq!(items[0].url, "https://en.wikipedia.org/wiki/Rust_(programming_language)");
+        assert_eq!(
+            items[0].url,
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+        );
         assert_eq!(items[1].title, "Cargo");
         assert_eq!(items[1].snippet, "The Rust package manager.");
     }
@@ -2164,13 +2181,7 @@ mod tests {
 
         let content = "line 1\nline 2\nline 3\nline 4\nline 5";
         let args = serde_json::json!({ "path": "lines.txt", "content": content }).to_string();
-        let _ = execute_tool(
-            &workspace,
-            Mode::Build,
-            "write_file",
-            &args,
-        )
-        .unwrap();
+        let _ = execute_tool(&workspace, Mode::Build, "write_file", &args).unwrap();
 
         // 1. path:2-4
         let res_range = execute_tool(
@@ -2268,22 +2279,42 @@ mod tests {
         assert!(res.unwrap_err().contains("Access denied"));
 
         // glob_search with parent traversal
-        let res = execute_tool(&workspace, Mode::Plan, "glob_search", r#"{"pattern": "*.rs", "path": "../../"}"#);
+        let res = execute_tool(
+            &workspace,
+            Mode::Plan,
+            "glob_search",
+            r#"{"pattern": "*.rs", "path": "../../"}"#,
+        );
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("Access denied"));
 
         // grep_search with parent traversal
-        let res = execute_tool(&workspace, Mode::Plan, "grep_search", r#"{"query": "secret", "path": "../"}"#);
+        let res = execute_tool(
+            &workspace,
+            Mode::Plan,
+            "grep_search",
+            r#"{"query": "secret", "path": "../"}"#,
+        );
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("Access denied"));
 
         // read_file with parent traversal
-        let res = execute_tool(&workspace, Mode::Plan, "read_file", r#"{"path": "../secret.txt"}"#);
+        let res = execute_tool(
+            &workspace,
+            Mode::Plan,
+            "read_file",
+            r#"{"path": "../secret.txt"}"#,
+        );
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("Failed to read"));
 
         // write_file with parent traversal
-        let res = execute_tool(&workspace, Mode::Build, "write_file", r#"{"path": "../secret.txt", "content": "bad"}"#);
+        let res = execute_tool(
+            &workspace,
+            Mode::Build,
+            "write_file",
+            r#"{"path": "../secret.txt", "content": "bad"}"#,
+        );
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("Failed to write"));
 
@@ -2306,46 +2337,97 @@ mod tests {
         // 1. File at EOF without newline, LLM provides old_string with newline
         let path = "eof_no_newline.txt";
         let content = "def hello():\n    print(\"hello\")";
-        let _ = execute_tool(&workspace, Mode::Build, "write_file", &serde_json::json!({
-            "path": path,
-            "content": content
-        }).to_string()).unwrap();
+        let _ = execute_tool(
+            &workspace,
+            Mode::Build,
+            "write_file",
+            &serde_json::json!({
+                "path": path,
+                "content": content
+            })
+            .to_string(),
+        )
+        .unwrap();
 
-        let edit_res = execute_tool(&workspace, Mode::Build, "edit_file", &serde_json::json!({
-            "path": path,
-            "old_string": "    print(\"hello\")\n",
-            "new_string": "    print(\"world\")\n"
-        }).to_string());
-        assert!(edit_res.is_ok(), "Expected edit to succeed at EOF without newline: {:?}", edit_res);
+        let edit_res = execute_tool(
+            &workspace,
+            Mode::Build,
+            "edit_file",
+            &serde_json::json!({
+                "path": path,
+                "old_string": "    print(\"hello\")\n",
+                "new_string": "    print(\"world\")\n"
+            })
+            .to_string(),
+        );
+        assert!(
+            edit_res.is_ok(),
+            "Expected edit to succeed at EOF without newline: {:?}",
+            edit_res
+        );
 
-        let read_back = execute_tool(&workspace, Mode::Plan, "read_file", &serde_json::json!({
-            "path": format!("{path}:raw")
-        }).to_string()).unwrap();
+        let read_back = execute_tool(
+            &workspace,
+            Mode::Plan,
+            "read_file",
+            &serde_json::json!({
+                "path": format!("{path}:raw")
+            })
+            .to_string(),
+        )
+        .unwrap();
         assert!(read_back.contains("print(\"world\")"));
 
         // 2. CRLF file edited with LF strings
         let crlf_path = "crlf.txt";
         let crlf_content = "line 1\r\nline 2\r\nline 3";
-        let _ = execute_tool(&workspace, Mode::Build, "write_file", &serde_json::json!({
-            "path": crlf_path,
-            "content": crlf_content
-        }).to_string()).unwrap();
+        let _ = execute_tool(
+            &workspace,
+            Mode::Build,
+            "write_file",
+            &serde_json::json!({
+                "path": crlf_path,
+                "content": crlf_content
+            })
+            .to_string(),
+        )
+        .unwrap();
 
-        let crlf_edit = execute_tool(&workspace, Mode::Build, "edit_file", &serde_json::json!({
-            "path": crlf_path,
-            "old_string": "line 2\n",
-            "new_string": "line two\n"
-        }).to_string());
-        assert!(crlf_edit.is_ok(), "Expected CRLF file edit with LF string to succeed: {:?}", crlf_edit);
+        let crlf_edit = execute_tool(
+            &workspace,
+            Mode::Build,
+            "edit_file",
+            &serde_json::json!({
+                "path": crlf_path,
+                "old_string": "line 2\n",
+                "new_string": "line two\n"
+            })
+            .to_string(),
+        );
+        assert!(
+            crlf_edit.is_ok(),
+            "Expected CRLF file edit with LF string to succeed: {:?}",
+            crlf_edit
+        );
 
         // 3. Empty old_string is rejected
-        let empty_edit = execute_tool(&workspace, Mode::Build, "edit_file", &serde_json::json!({
-            "path": crlf_path,
-            "old_string": "",
-            "new_string": "new"
-        }).to_string());
+        let empty_edit = execute_tool(
+            &workspace,
+            Mode::Build,
+            "edit_file",
+            &serde_json::json!({
+                "path": crlf_path,
+                "old_string": "",
+                "new_string": "new"
+            })
+            .to_string(),
+        );
         assert!(empty_edit.is_err());
-        assert!(empty_edit.unwrap_err().contains("old_string cannot be empty"));
+        assert!(
+            empty_edit
+                .unwrap_err()
+                .contains("old_string cannot be empty")
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

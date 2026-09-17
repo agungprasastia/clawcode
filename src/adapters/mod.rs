@@ -86,7 +86,9 @@ impl Transport for HttpTransport {
         if let Some(ref key) = self.api_key {
             if !key.is_empty() {
                 if endpoint.contains("anthropic") {
-                    req = req.set("x-api-key", key).set("anthropic-version", "2023-06-01");
+                    req = req
+                        .set("x-api-key", key)
+                        .set("anthropic-version", "2023-06-01");
                 }
                 req = req.set("Authorization", &format!("Bearer {key}"));
             }
@@ -103,7 +105,8 @@ impl Transport for HttpTransport {
             ureq::Error::Transport(e) => ProviderError::Network(e.to_string()),
         })?;
 
-        resp.into_string().map_err(|e| ProviderError::Network(e.to_string()))
+        resp.into_string()
+            .map_err(|e| ProviderError::Network(e.to_string()))
     }
 
     fn stream_request(
@@ -121,7 +124,9 @@ impl Transport for HttpTransport {
         if let Some(ref key) = self.api_key {
             if !key.is_empty() {
                 if endpoint.contains("anthropic") {
-                    req = req.set("x-api-key", key).set("anthropic-version", "2023-06-01");
+                    req = req
+                        .set("x-api-key", key)
+                        .set("anthropic-version", "2023-06-01");
                 }
                 req = req.set("Authorization", &format!("Bearer {key}"));
             }
@@ -228,7 +233,10 @@ impl Transport for HttpTransport {
                         return Ok(());
                     }
                 }
-            } else if trimmed.starts_with("event:") || trimmed.starts_with("id:") || trimmed.starts_with("retry:") {
+            } else if trimmed.starts_with("event:")
+                || trimmed.starts_with("id:")
+                || trimmed.starts_with("retry:")
+            {
                 continue;
             } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
                 if current_data.is_empty() && serde_json::from_str::<Value>(trimmed).is_ok() {
@@ -362,7 +370,10 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                         if let Some(tcalls) = &m.tool_calls {
                             for call in tcalls {
                                 let id = call.get("id").and_then(Value::as_str).unwrap_or("");
-                                let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+                                let name = call
+                                    .pointer("/function/name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("");
                                 let args_val: Value = call
                                     .pointer("/function/arguments")
                                     .and_then(|a| match a {
@@ -478,9 +489,14 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
         self.transport.request(&self.endpoint, &body)
     }
 
-    pub(crate) fn stream_body(&self, request: &StreamRequest, sender: &crate::provider::StreamSender) -> Result<(), ProviderError> {
+    pub(crate) fn stream_body(
+        &self,
+        request: &StreamRequest,
+        sender: &crate::provider::StreamSender,
+    ) -> Result<(), ProviderError> {
         let (body, parser) = self.build_payload(request);
-        self.transport.stream_request(&self.endpoint, &body, sender, parser)
+        self.transport
+            .stream_request(&self.endpoint, &body, sender, parser)
     }
 
     pub fn with_models(mut self, models: Vec<ModelInfo>) -> Self {
@@ -523,7 +539,10 @@ impl<T: Transport + Clone + 'static> crate::provider::Provider for JsonProvider<
             _ => Self::parse_openai(&response),
         }
     }
-    fn stream(&self, request: &StreamRequest) -> Result<crate::provider::ProviderStream, ProviderError> {
+    fn stream(
+        &self,
+        request: &StreamRequest,
+    ) -> Result<crate::provider::ProviderStream, ProviderError> {
         let (sender, stream) = crate::provider::ProviderStream::channel(256);
         let this = self.clone();
         let req = request.clone();
@@ -663,8 +682,10 @@ fn parse_usage(value: &Value) -> Option<crate::provider::Usage> {
     })
 }
 
-pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send {
-    let mut active_tools: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send
+{
+    let mut active_tools: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::new();
     move |value: Value| -> Result<Vec<StreamEvent>, ProviderError> {
         let mut events = Vec::new();
         if let Some(error) = value.get("error").and_then(Value::as_str) {
@@ -713,16 +734,11 @@ pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    events.push(StreamEvent::ToolCallStart {
-                        id: id_str,
-                        name,
-                    });
+                    events.push(StreamEvent::ToolCallStart { id: id_str, name });
                 }
                 let call_id = active_tools.get(&index).cloned();
                 if let Some(id) = call_id {
-                    if let Some(args) = call
-                        .pointer("/function/arguments")
-                        .and_then(Value::as_str)
+                    if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
                     {
                         if !args.is_empty() {
                             events.push(StreamEvent::ToolCallDelta {
@@ -786,7 +802,8 @@ pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
     }
 }
 
-pub(crate) fn anthropic_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send {
+pub(crate) fn anthropic_parser()
+-> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send {
     let mut active_tools: std::collections::HashMap<usize, (String, String)> =
         std::collections::HashMap::new();
     move |value: Value| -> Result<Vec<StreamEvent>, ProviderError> {
@@ -815,8 +832,16 @@ pub(crate) fn anthropic_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>
             let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
             if let Some(cb) = value.get("content_block").and_then(Value::as_object) {
                 if cb.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    let id = cb.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-                    let name = cb.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                    let id = cb
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let name = cb
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     active_tools.insert(index, (id.clone(), name.clone()));
                     events.push(StreamEvent::ToolCallStart { id, name });
                 }
@@ -855,11 +880,24 @@ pub(crate) fn anthropic_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>
                         .and_then(Value::as_str)
                         .map(String::from)
                         .unwrap_or_else(|| format!("call_{idx}"));
-                    let name = block.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                    let args = block.get("input").map(|v| v.to_string()).unwrap_or_default();
-                    events.push(StreamEvent::ToolCallStart { id: id.clone(), name });
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let args = block
+                        .get("input")
+                        .map(|v| v.to_string())
+                        .unwrap_or_default();
+                    events.push(StreamEvent::ToolCallStart {
+                        id: id.clone(),
+                        name,
+                    });
                     if !args.is_empty() {
-                        events.push(StreamEvent::ToolCallDelta { id: id.clone(), arguments: args });
+                        events.push(StreamEvent::ToolCallDelta {
+                            id: id.clone(),
+                            arguments: args,
+                        });
                     }
                     events.push(StreamEvent::ToolCallEnd { id });
                 }
@@ -882,7 +920,8 @@ pub(crate) fn anthropic_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>
     }
 }
 
-pub(crate) fn ollama_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send {
+pub(crate) fn ollama_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send
+{
     move |value: Value| -> Result<Vec<StreamEvent>, ProviderError> {
         let mut events = Vec::new();
         if let Some(error) = value.get("error").and_then(Value::as_str) {
@@ -977,7 +1016,10 @@ impl ConfiguredRouter {
         }
     }
 
-    fn resolve_provider(&self, request: &StreamRequest) -> (String, String, Option<String>, StreamRequest) {
+    fn resolve_provider(
+        &self,
+        request: &StreamRequest,
+    ) -> (String, String, Option<String>, StreamRequest) {
         let mut req = request.clone();
         let mut p_name = request
             .provider
@@ -1048,7 +1090,10 @@ impl ConfiguredRouter {
         (p_name, endpoint, api_key, req)
     }
 
-    fn create_provider(&self, request: &StreamRequest) -> (JsonProvider<HttpTransport>, StreamRequest) {
+    fn create_provider(
+        &self,
+        request: &StreamRequest,
+    ) -> (JsonProvider<HttpTransport>, StreamRequest) {
         let (p_name, endpoint, api_key, req) = self.resolve_provider(request);
         let mut transport = HttpTransport::new();
         if let Some(key) = api_key {
@@ -1086,7 +1131,10 @@ impl Provider for ConfiguredRouter {
         let (provider, req) = self.create_provider(request);
         provider.send(&req)
     }
-    fn stream(&self, request: &StreamRequest) -> Result<crate::provider::ProviderStream, ProviderError> {
+    fn stream(
+        &self,
+        request: &StreamRequest,
+    ) -> Result<crate::provider::ProviderStream, ProviderError> {
         let (provider, req) = self.create_provider(request);
         provider.stream(&req)
     }
@@ -1179,7 +1227,8 @@ mod tests {
 
     #[test]
     fn parses_sse_multiline_data() {
-        let body = "data: {\"choices\":\ndata: [{\"delta\":{\"content\":\"multi\"}}]}\ndata: [DONE]";
+        let body =
+            "data: {\"choices\":\ndata: [{\"delta\":{\"content\":\"multi\"}}]}\ndata: [DONE]";
         let response = JsonProvider::<MockTransport>::parse_openai(body).unwrap();
         assert_eq!(response.text(), "multi");
     }
@@ -1200,20 +1249,32 @@ data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}
 "#;
         let response = JsonProvider::<MockTransport>::parse_anthropic(body).unwrap();
         assert_eq!(response.events.len(), 4);
-        assert!(matches!(&response.events[0], StreamEvent::ToolCallStart { id, name } if id == "toolu_01" && name == "read_file"));
-        assert!(matches!(&response.events[1], StreamEvent::ToolCallDelta { id, arguments } if id == "toolu_01" && arguments.contains("foo.rs")));
+        assert!(
+            matches!(&response.events[0], StreamEvent::ToolCallStart { id, name } if id == "toolu_01" && name == "read_file")
+        );
+        assert!(
+            matches!(&response.events[1], StreamEvent::ToolCallDelta { id, arguments } if id == "toolu_01" && arguments.contains("foo.rs"))
+        );
         assert!(matches!(&response.events[2], StreamEvent::ToolCallEnd { id } if id == "toolu_01"));
-        assert!(matches!(&response.events[3], StreamEvent::Finish { reason } if *reason == crate::provider::FinishReason::ToolCall));
+        assert!(
+            matches!(&response.events[3], StreamEvent::Finish { reason } if *reason == crate::provider::FinishReason::ToolCall)
+        );
     }
 
     #[test]
     fn parses_ollama_tool_calls() {
         let body = r#"{"model":"llama3","message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","function":{"name":"read_file","arguments":{"path":"src/main.rs"}}}]},"done":true}"#;
         let response = JsonProvider::<MockTransport>::parse_ollama(body).unwrap();
-        assert!(matches!(&response.events[0], StreamEvent::ToolCallStart { id, name } if id == "call_1" && name == "read_file"));
-        assert!(matches!(&response.events[1], StreamEvent::ToolCallDelta { id, arguments } if id == "call_1" && arguments.contains("src/main.rs")));
+        assert!(
+            matches!(&response.events[0], StreamEvent::ToolCallStart { id, name } if id == "call_1" && name == "read_file")
+        );
+        assert!(
+            matches!(&response.events[1], StreamEvent::ToolCallDelta { id, arguments } if id == "call_1" && arguments.contains("src/main.rs"))
+        );
         assert!(matches!(&response.events[2], StreamEvent::ToolCallEnd { id } if id == "call_1"));
-        assert!(matches!(&response.events[3], StreamEvent::Finish { reason } if *reason == crate::provider::FinishReason::ToolCall));
+        assert!(
+            matches!(&response.events[3], StreamEvent::Finish { reason } if *reason == crate::provider::FinishReason::ToolCall)
+        );
     }
 
     #[test]

@@ -82,7 +82,6 @@ impl<F: FileSystem> Workspace<F> {
         self.root.resolve(relative)
     }
 
-
     pub fn read(
         &self,
         relative: impl AsRef<Path>,

@@ -230,7 +230,11 @@ pub fn render_agents_dialog(
         chunks[1],
     );
 
-    let selected_idx = if filtered.is_empty() { 0 } else { dialog.selected.min(filtered.len() - 1) };
+    let selected_idx = if filtered.is_empty() {
+        0
+    } else {
+        dialog.selected.min(filtered.len() - 1)
+    };
     let item_lines: Vec<Line> = if filtered.is_empty() {
         vec![Line::from(Span::styled(
             format!("  No agents matching \"{}\"", dialog.filter),

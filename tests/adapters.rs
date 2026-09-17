@@ -80,5 +80,9 @@ fn configured_router_resolves_and_discovers_models() {
     config.providers.insert("9router".into(), custom);
     let router = clawcode::adapters::ConfiguredRouter::new(config);
     let models = router.models();
-    assert!(models.iter().any(|m| m.id == "9router/ag/gemini-3.8-flash-high"));
+    assert!(
+        models
+            .iter()
+            .any(|m| m.id == "9router/ag/gemini-3.8-flash-high")
+    );
 }

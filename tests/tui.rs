@@ -1330,9 +1330,14 @@ fn status_dialog_clear_compact_and_copy_parity() {
 #[test]
 fn wave_spinner_renders_and_animates_across_frames() {
     let mut app = App::default();
-    assert_eq!(app.wave_spinner().spans().len(), clawcode::tui::WaveSpinner::WIDTH as usize);
+    assert_eq!(
+        app.wave_spinner().spans().len(),
+        clawcode::tui::WaveSpinner::WIDTH as usize
+    );
 
-    let wide_spans = app.wave_spinner().spans_for_width(clawcode::tui::WaveSpinner::WIDTH);
+    let wide_spans = app
+        .wave_spinner()
+        .spans_for_width(clawcode::tui::WaveSpinner::WIDTH);
     assert_eq!(wide_spans.len(), clawcode::tui::WaveSpinner::WIDTH as usize);
 
     let compact_spans = app.wave_spinner().spans_for_width(1);
@@ -1340,7 +1345,10 @@ fn wave_spinner_renders_and_animates_across_frames() {
 
     app.set_mode(clawcode::tui::ConversationMode::Build);
     let build_spans = app.wave_spinner().spans();
-    assert_eq!(build_spans.len(), clawcode::tui::WaveSpinner::WIDTH as usize);
+    assert_eq!(
+        build_spans.len(),
+        clawcode::tui::WaveSpinner::WIDTH as usize
+    );
 }
 
 #[test]
@@ -1510,11 +1518,13 @@ fn sessions_switching_hydrates_messages_from_database() {
     let db = clawcode::persistence::Db::open_in_memory().unwrap();
     let s1 = db.create_session("First Session").unwrap();
     db.append_message(s1.id, "user", "What is Rust?").unwrap();
-    db.append_message(s1.id, "assistant", "Rust is a fast systems language.").unwrap();
+    db.append_message(s1.id, "assistant", "Rust is a fast systems language.")
+        .unwrap();
 
     let s2 = db.create_session("Second Session").unwrap();
     db.append_message(s2.id, "user", "Explain SQLite").unwrap();
-    db.append_message(s2.id, "assistant", "SQLite is an embedded database engine.").unwrap();
+    db.append_message(s2.id, "assistant", "SQLite is an embedded database engine.")
+        .unwrap();
 
     let mut app = App::default();
     let service = clawcode::cli::CommandService::with_db(clawcode::cli::CliDiscovery::new(), db);
@@ -1524,20 +1534,29 @@ fn sessions_switching_hydrates_messages_from_database() {
     app.switch_session(s1.id);
     assert_eq!(app.active_session_id(), Some(s1.id));
     assert!(app.transcript().contains("> What is Rust?"));
-    assert!(app.transcript().contains("Rust is a fast systems language."));
+    assert!(
+        app.transcript()
+            .contains("Rust is a fast systems language.")
+    );
 
     // Switch to session 2 -> hydrates session 2 messages
     app.switch_session(s2.id);
     assert_eq!(app.active_session_id(), Some(s2.id));
     assert!(app.transcript().contains("> Explain SQLite"));
-    assert!(app.transcript().contains("SQLite is an embedded database engine."));
+    assert!(
+        app.transcript()
+            .contains("SQLite is an embedded database engine.")
+    );
     assert!(!app.transcript().contains("What is Rust?"));
 
     // Switch back to session 1 -> previous state intact
     app.switch_session(s1.id);
     assert_eq!(app.active_session_id(), Some(s1.id));
     assert!(app.transcript().contains("> What is Rust?"));
-    assert!(app.transcript().contains("Rust is a fast systems language."));
+    assert!(
+        app.transcript()
+            .contains("Rust is a fast systems language.")
+    );
 }
 
 #[test]
@@ -1577,8 +1596,10 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
         payload_json: serde_json::json!({
             "name": "read_file",
             "arguments": { "path": "src/cli/mod.rs" }
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
     assert!(app.active_tool().is_some());
@@ -1592,7 +1613,11 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -1603,7 +1628,10 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
     assert!(text.contains("read_file: src/cli/mod.rs"));
 
     // 2. Tool finishes execution with 71 lines output
-    let dummy_output = (0..71).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    let dummy_output = (0..71)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id: 1,
         generation_id: Some(1),
@@ -1614,8 +1642,10 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
             "arguments": { "path": "src/cli/mod.rs" },
             "success": true,
             "output": dummy_output
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
     app.poll_runtime();
     assert!(app.active_tool().is_none());
 
@@ -1628,7 +1658,11 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -1663,8 +1697,10 @@ fn tool_execution_update_plan_renders_checklist_and_tracks_plan() {
         payload_json: serde_json::json!({
             "name": "update_plan",
             "arguments": payload_args
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
     app.poll_runtime();
 
     assert!(app.active_tool().is_some());
@@ -1683,17 +1719,34 @@ fn tool_execution_update_plan_renders_checklist_and_tracks_plan() {
             "arguments": payload_args,
             "success": true,
             "output": "Plan updated: 3 steps (1 completed, 1 in progress, 1 pending)"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
     app.poll_runtime();
     assert!(app.active_tool().is_none());
 
     // Verify current_plan snapshot on App
     let plan = app.current_plan();
     assert_eq!(plan.len(), 3);
-    assert_eq!(plan[0], ("Selesai langkah pertama".to_string(), "completed".to_string()));
-    assert_eq!(plan[1], ("Sedang menjalankan langkah kedua".to_string(), "in_progress".to_string()));
-    assert_eq!(plan[2], ("Langkah ketiga pending".to_string(), "pending".to_string()));
+    assert_eq!(
+        plan[0],
+        (
+            "Selesai langkah pertama".to_string(),
+            "completed".to_string()
+        )
+    );
+    assert_eq!(
+        plan[1],
+        (
+            "Sedang menjalankan langkah kedua".to_string(),
+            "in_progress".to_string()
+        )
+    );
+    assert_eq!(
+        plan[2],
+        ("Langkah ketiga pending".to_string(), "pending".to_string())
+    );
 
     // Verify transcript format:
     // ⬢ Updated Plan
@@ -1714,7 +1767,11 @@ fn tool_execution_update_plan_renders_checklist_and_tracks_plan() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -1739,8 +1796,10 @@ fn tool_failure_formats_cleanly_with_error_branch() {
         payload_json: serde_json::json!({
             "name": "read_file",
             "arguments": { "path": "foo.rs" }
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
     app.poll_runtime();
 
     tx.send(clawcode::runtime::RuntimeEvent {
@@ -1753,8 +1812,10 @@ fn tool_failure_formats_cleanly_with_error_branch() {
             "arguments": { "path": "foo.rs" },
             "success": false,
             "output": "Error executing read_file: file not found"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
     app.poll_runtime();
 
     assert!(app.transcript().contains("⬢ Read foo.rs"));
@@ -1765,7 +1826,11 @@ fn tool_failure_formats_cleanly_with_error_branch() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -1790,8 +1855,10 @@ fn various_tool_entries_format_matching_crabcode_spec() {
             "arguments": { "query": "/" },
             "success": true,
             "output": (0..100).map(|i| format!("match {i}")).collect::<Vec<_>>().join("\n")
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     // glob_search
     tx.send(clawcode::runtime::RuntimeEvent {
@@ -1804,8 +1871,10 @@ fn various_tool_entries_format_matching_crabcode_spec() {
             "arguments": { "pattern": "*ui*" },
             "success": true,
             "output": "src/ui/mod.rs\nsrc/ui/render.rs"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     // list_dir
     tx.send(clawcode::runtime::RuntimeEvent {
@@ -1818,8 +1887,10 @@ fn various_tool_entries_format_matching_crabcode_spec() {
             "arguments": { "path": "src" },
             "success": true,
             "output": (0..14).map(|i| format!("entry {i}")).collect::<Vec<_>>().join("\n")
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
 
@@ -1840,14 +1911,20 @@ fn historical_tool_lines_render_with_clean_styles() {
     app.apply(UiEvent::Input(Input::Submit));
 
     // Simulate historical transcript format
-    app.apply(UiEvent::StreamDelta("\n⚙ [grep_search: /]\n✓ grep_search succeeded (100 lines)\n\n".into()));
+    app.apply(UiEvent::StreamDelta(
+        "\n⚙ [grep_search: /]\n✓ grep_search succeeded (100 lines)\n\n".into(),
+    ));
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -1934,13 +2011,19 @@ fn test_is_sensitive_command() {
     assert!(clawcode::tui::is_sensitive_command("rm -rf target"));
     assert!(clawcode::tui::is_sensitive_command("rm file.txt"));
     assert!(clawcode::tui::is_sensitive_command("rm"));
-    assert!(clawcode::tui::is_sensitive_command("git reset --hard HEAD~1"));
+    assert!(clawcode::tui::is_sensitive_command(
+        "git reset --hard HEAD~1"
+    ));
     assert!(clawcode::tui::is_sensitive_command("git clean -fd"));
     assert!(clawcode::tui::is_sensitive_command("mkfs.ext4 /dev/sdb1"));
-    assert!(clawcode::tui::is_sensitive_command("dd if=/dev/zero of=/dev/sda"));
+    assert!(clawcode::tui::is_sensitive_command(
+        "dd if=/dev/zero of=/dev/sda"
+    ));
     assert!(clawcode::tui::is_sensitive_command("kill -9 1234"));
     assert!(clawcode::tui::is_sensitive_command("chmod 777 script.sh"));
-    assert!(clawcode::tui::is_sensitive_command("chown root:root /etc/file"));
+    assert!(clawcode::tui::is_sensitive_command(
+        "chown root:root /etc/file"
+    ));
 
     // Safe commands
     assert!(!clawcode::tui::is_sensitive_command("ls -la"));
@@ -1959,7 +2042,11 @@ fn test_permission_dialog_rendered_overlay() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -1984,17 +2071,11 @@ fn test_app_question_dialog_navigation_and_custom_answer() {
         vec!["React".to_string(), "Vue".to_string()],
     );
     assert!(app.question_dialog().is_some());
-    assert_eq!(
-        app.question_dialog().unwrap().selected_answer(),
-        "React"
-    );
+    assert_eq!(app.question_dialog().unwrap().selected_answer(), "React");
 
     // Down moves to Vue
     app.apply(UiEvent::Input(Input::Down));
-    assert_eq!(
-        app.question_dialog().unwrap().selected_answer(),
-        "Vue"
-    );
+    assert_eq!(app.question_dialog().unwrap().selected_answer(), "Vue");
 
     // Down moves to Custom text option
     app.apply(UiEvent::Input(Input::Down));
@@ -2004,17 +2085,11 @@ fn test_app_question_dialog_navigation_and_custom_answer() {
     for c in "Svelte".chars() {
         app.apply(UiEvent::Input(Input::Character(c)));
     }
-    assert_eq!(
-        app.question_dialog().unwrap().selected_answer(),
-        "Svelte"
-    );
+    assert_eq!(app.question_dialog().unwrap().selected_answer(), "Svelte");
 
     // Backspace removes last char -> "Svelt"
     app.apply(UiEvent::Input(Input::Backspace));
-    assert_eq!(
-        app.question_dialog().unwrap().selected_answer(),
-        "Svelt"
-    );
+    assert_eq!(app.question_dialog().unwrap().selected_answer(), "Svelt");
 
     // Submit confirms "Svelt"
     app.apply(UiEvent::Input(Input::Submit));
@@ -2051,7 +2126,11 @@ fn test_app_question_dialog_rendered_overlay() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -2083,12 +2162,16 @@ fn test_app_poll_runtime_opens_question_dialog() {
                 "question": "Choose port number",
                 "options": ["3000", "8080"]
             }
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
 
-    let dialog = app.question_dialog().expect("question dialog should be open");
+    let dialog = app
+        .question_dialog()
+        .expect("question dialog should be open");
     assert_eq!(dialog.question, "Choose port number");
     assert_eq!(dialog.options, vec!["3000".to_string(), "8080".to_string()]);
 }
@@ -2107,12 +2190,17 @@ fn test_streaming_reasoning_buffer_and_flush_formatting() {
         kind: "reasoning_delta".to_string(),
         payload_json: serde_json::json!({
             "delta": "Analyzing the bug in router...\nFound invalid route handler"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
     assert!(app.is_reasoning());
-    assert_eq!(app.reasoning_buffer(), "Analyzing the bug in router...\nFound invalid route handler");
+    assert_eq!(
+        app.reasoning_buffer(),
+        "Analyzing the bug in router...\nFound invalid route handler"
+    );
 
     // Renders "Thinking" in status/hints
     let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -2120,7 +2208,11 @@ fn test_streaming_reasoning_buffer_and_flush_formatting() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("Thinking"));
@@ -2133,20 +2225,34 @@ fn test_streaming_reasoning_buffer_and_flush_formatting() {
         kind: "text_delta".to_string(),
         payload_json: serde_json::json!({
             "delta": "Here is the fix:"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
     assert!(!app.is_reasoning());
     assert!(app.reasoning_buffer().is_empty());
     assert!(app.transcript().contains("💭 Thought for "));
-    assert!(app.transcript().contains("  │ Analyzing the bug in router..."));
+    assert!(
+        app.transcript()
+            .contains("  │ Analyzing the bug in router...")
+    );
     assert!(app.transcript().contains("  │ Found invalid route handler"));
 
     // Verify transcript lines styling
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let lines = clawcode::tui::format_transcript_lines(app.transcript(), &theme, ratatui::style::Color::Cyan);
-    let thought_header = lines.iter().find(|l| l.spans.first().map(|s| s.content.as_ref() == "💭 ").unwrap_or(false));
+    let lines = clawcode::tui::format_transcript_lines(
+        app.transcript(),
+        &theme,
+        ratatui::style::Color::Cyan,
+    );
+    let thought_header = lines.iter().find(|l| {
+        l.spans
+            .first()
+            .map(|s| s.content.as_ref() == "💭 ")
+            .unwrap_or(false)
+    });
     assert!(thought_header.is_some());
     assert_eq!(thought_header.unwrap().spans[0].style.fg, Some(theme.amber));
 
@@ -2154,7 +2260,10 @@ fn test_streaming_reasoning_buffer_and_flush_formatting() {
     let mut long_reasoning_app = App::default();
     let (tx2, rx2) = std::sync::mpsc::channel();
     long_reasoning_app.set_runtime_receiver(rx2);
-    let long_reasoning = (1..=15).map(|i| format!("thought line {i}")).collect::<Vec<_>>().join("\n");
+    let long_reasoning = (1..=15)
+        .map(|i| format!("thought line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     tx2.send(clawcode::runtime::RuntimeEvent {
         session_id: 1,
         generation_id: Some(1),
@@ -2162,13 +2271,23 @@ fn test_streaming_reasoning_buffer_and_flush_formatting() {
         kind: "reasoning_delta".to_string(),
         payload_json: serde_json::json!({
             "delta": long_reasoning
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
     long_reasoning_app.poll_runtime();
     long_reasoning_app.flush_reasoning();
-    assert!(long_reasoning_app.transcript().contains("  │ thought line 5"));
+    assert!(
+        long_reasoning_app
+            .transcript()
+            .contains("  │ thought line 5")
+    );
     assert!(long_reasoning_app.transcript().contains("  │ ..."));
-    assert!(!long_reasoning_app.transcript().contains("  │ thought line 6"));
+    assert!(
+        !long_reasoning_app
+            .transcript()
+            .contains("  │ thought line 6")
+    );
 }
 
 #[test]
@@ -2185,8 +2304,10 @@ fn test_tool_call_start_event_handling() {
         payload_json: serde_json::json!({
             "id": "call_42",
             "name": "bash"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
     assert!(app.active_tool().is_some());
@@ -2200,7 +2321,11 @@ fn test_tool_call_start_event_handling() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("Preparing bash..."));
@@ -2228,7 +2353,10 @@ fn test_bash_terminal_card_rendering() {
 
     app.poll_runtime();
     assert!(app.transcript().contains("⬢ Ran cargo test (exit 0)"));
-    assert!(app.transcript().contains("  ┌── Output ────────────────────────────────────────"));
+    assert!(
+        app.transcript()
+            .contains("  ┌── Output ────────────────────────────────────────")
+    );
     assert!(app.transcript().contains("  │ running 2 tests"));
     assert!(app.transcript().contains("  │ test foo ... ok"));
     assert!(app.transcript().contains("  │ test bar ... ok"));
@@ -2236,8 +2364,14 @@ fn test_bash_terminal_card_rendering() {
 
     // Verify styling of terminal box
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let lines = clawcode::tui::format_transcript_lines(app.transcript(), &theme, ratatui::style::Color::Cyan);
-    let box_header = lines.iter().find(|l| l.spans.iter().any(|s| s.content.contains("Output")));
+    let lines = clawcode::tui::format_transcript_lines(
+        app.transcript(),
+        &theme,
+        ratatui::style::Color::Cyan,
+    );
+    let box_header = lines
+        .iter()
+        .find(|l| l.spans.iter().any(|s| s.content.contains("Output")));
     assert!(box_header.is_some());
 
     // 2. Failed bash command with exit 1
@@ -2251,15 +2385,26 @@ fn test_bash_terminal_card_rendering() {
             "arguments": { "command": "failing_cmd" },
             "success": false,
             "output": "Error: command not found\n[Process exited with code 1]"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
     assert!(app.transcript().contains("⬢ Ran failing_cmd (exit 1)"));
-    assert!(app.transcript().contains("failed: Error: command not found"));
+    assert!(
+        app.transcript()
+            .contains("failed: Error: command not found")
+    );
 
-    let failed_lines = clawcode::tui::format_transcript_lines(app.transcript(), &theme, ratatui::style::Color::Cyan);
-    let ran_failed = failed_lines.iter().find(|l| l.spans.iter().any(|s| s.content.contains("failing_cmd")));
+    let failed_lines = clawcode::tui::format_transcript_lines(
+        app.transcript(),
+        &theme,
+        ratatui::style::Color::Cyan,
+    );
+    let ran_failed = failed_lines
+        .iter()
+        .find(|l| l.spans.iter().any(|s| s.content.contains("failing_cmd")));
     assert!(ran_failed.is_some());
     // Failed marker should be red (theme.error)
     assert_eq!(ran_failed.unwrap().spans[0].style.fg, Some(theme.error));
@@ -2283,25 +2428,46 @@ fn test_websearch_visual_card_formatting() {
             "arguments": { "query": "rust tokio" },
             "success": true,
             "output": raw_search_output
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
     assert!(app.transcript().contains("⬢ Searched \"rust tokio\""));
-    assert!(app.transcript().contains("  ┌── Results ──────────────────────────────────────"));
+    assert!(
+        app.transcript()
+            .contains("  ┌── Results ──────────────────────────────────────")
+    );
     assert!(app.transcript().contains("  │ 1. Tokio Async Runtime"));
     assert!(app.transcript().contains("  │    URL: https://tokio.rs"));
     assert!(app.transcript().contains("  │ 2. Tokio Tutorial"));
-    assert!(app.transcript().contains("  │    URL: https://tokio.rs/tutorial"));
+    assert!(
+        app.transcript()
+            .contains("  │    URL: https://tokio.rs/tutorial")
+    );
     assert!(app.transcript().contains("  └───"));
     assert!(app.transcript().contains("  └ 2 results found"));
 
     // Verify styling of websearch card
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let lines = clawcode::tui::format_transcript_lines(app.transcript(), &theme, ratatui::style::Color::Cyan);
-    let url_line = lines.iter().find(|l| l.spans.iter().any(|s| s.content.contains("https://tokio.rs")));
+    let lines = clawcode::tui::format_transcript_lines(
+        app.transcript(),
+        &theme,
+        ratatui::style::Color::Cyan,
+    );
+    let url_line = lines.iter().find(|l| {
+        l.spans
+            .iter()
+            .any(|s| s.content.contains("https://tokio.rs"))
+    });
     assert!(url_line.is_some());
-    let url_span = url_line.unwrap().spans.iter().find(|s| s.content == "https://tokio.rs").unwrap();
+    let url_span = url_line
+        .unwrap()
+        .spans
+        .iter()
+        .find(|s| s.content == "https://tokio.rs")
+        .unwrap();
     assert_eq!(url_span.style.fg, Some(theme.teal));
 }
 
@@ -2349,7 +2515,11 @@ fn test_edit_file_opencode_side_by_side_diff_in_transcript() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -2393,8 +2563,14 @@ fn test_write_file_clean_summary_no_diff() {
     assert!(!transcript.contains("    + # Title"));
 
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let lines = clawcode::tui::format_transcript_lines(app.transcript(), &theme, ratatui::style::Color::Cyan);
-    let write_line = lines.iter().find(|l| l.spans.iter().any(|s| s.content == "• "));
+    let lines = clawcode::tui::format_transcript_lines(
+        app.transcript(),
+        &theme,
+        ratatui::style::Color::Cyan,
+    );
+    let write_line = lines
+        .iter()
+        .find(|l| l.spans.iter().any(|s| s.content == "• "));
     assert!(write_line.is_some());
     let spans = &write_line.unwrap().spans;
     assert_eq!(spans[0].content, "• ");
@@ -2450,7 +2626,11 @@ fn test_generation_finished_clears_streaming_status() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 

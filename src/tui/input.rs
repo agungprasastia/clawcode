@@ -1,6 +1,4 @@
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use super::{Input, UiEvent};
 
@@ -30,10 +28,14 @@ fn translate_key(key: KeyEvent) -> Option<Input> {
         }
         KeyCode::PageUp => Some(Input::PageUp),
         KeyCode::PageDown => Some(Input::PageDown),
-        KeyCode::Home if key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Home
+            if key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             Some(Input::Home)
         }
-        KeyCode::End if key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::End
+            if key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             Some(Input::End)
         }
         KeyCode::Up
@@ -150,6 +152,9 @@ mod tests {
     #[test]
     fn event_paste_translates_to_ui_event_paste() {
         let event = Event::Paste("clipboard text".to_string());
-        assert_eq!(translate(event), Some(UiEvent::Paste("clipboard text".to_string())));
+        assert_eq!(
+            translate(event),
+            Some(UiEvent::Paste("clipboard text".to_string()))
+        );
     }
 }

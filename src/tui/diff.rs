@@ -217,10 +217,10 @@ pub fn format_side_by_side_diff(rows: &[SideBySideRow], col_width: usize) -> Str
     out
 }
 
-
 fn lcs_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
     let mut start = 0;
-    while start < old_lines.len() && start < new_lines.len() && old_lines[start] == new_lines[start] {
+    while start < old_lines.len() && start < new_lines.len() && old_lines[start] == new_lines[start]
+    {
         start += 1;
     }
 
@@ -457,11 +457,41 @@ mod tests {
         assert_eq!(res.added, 1);
         assert_eq!(res.removed, 1);
         assert_eq!(res.lines.len(), 5);
-        assert_eq!(res.lines[0], DiffLine { op: DiffOp::Same, text: "alpha".to_string() });
-        assert_eq!(res.lines[1], DiffLine { op: DiffOp::Remove, text: "beta".to_string() });
-        assert_eq!(res.lines[2], DiffLine { op: DiffOp::Add, text: "BETA_MODIFIED".to_string() });
-        assert_eq!(res.lines[3], DiffLine { op: DiffOp::Same, text: "gamma".to_string() });
-        assert_eq!(res.lines[4], DiffLine { op: DiffOp::Same, text: "delta".to_string() });
+        assert_eq!(
+            res.lines[0],
+            DiffLine {
+                op: DiffOp::Same,
+                text: "alpha".to_string()
+            }
+        );
+        assert_eq!(
+            res.lines[1],
+            DiffLine {
+                op: DiffOp::Remove,
+                text: "beta".to_string()
+            }
+        );
+        assert_eq!(
+            res.lines[2],
+            DiffLine {
+                op: DiffOp::Add,
+                text: "BETA_MODIFIED".to_string()
+            }
+        );
+        assert_eq!(
+            res.lines[3],
+            DiffLine {
+                op: DiffOp::Same,
+                text: "gamma".to_string()
+            }
+        );
+        assert_eq!(
+            res.lines[4],
+            DiffLine {
+                op: DiffOp::Same,
+                text: "delta".to_string()
+            }
+        );
     }
 
     #[test]
@@ -516,16 +546,14 @@ mod tests {
 
     #[test]
     fn test_format_side_by_side_diff() {
-        let rows = vec![
-            SideBySideRow {
-                left_num: Some(15),
-                left_sign: Some('-'),
-                left_text: "//".to_string(),
-                right_num: Some(15),
-                right_sign: Some('+'),
-                right_text: "$table->date('dob');".to_string(),
-            }
-        ];
+        let rows = vec![SideBySideRow {
+            left_num: Some(15),
+            left_sign: Some('-'),
+            left_text: "//".to_string(),
+            right_num: Some(15),
+            right_sign: Some('+'),
+            right_text: "$table->date('dob');".to_string(),
+        }];
         let formatted = format_side_by_side_diff(&rows, 30);
         assert!(formatted.contains(" │ "));
         assert!(formatted.contains("  15 - //"));

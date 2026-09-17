@@ -191,7 +191,11 @@ pub fn render_themes_dialog(
     );
 
     let list_height = chunks[2].height as usize;
-    let selected_idx = if filtered.is_empty() { 0 } else { dialog.selected.min(filtered.len() - 1) };
+    let selected_idx = if filtered.is_empty() {
+        0
+    } else {
+        dialog.selected.min(filtered.len() - 1)
+    };
     let scroll_offset = if selected_idx >= list_height {
         (selected_idx + 1).saturating_sub(list_height)
     } else {
@@ -420,7 +424,11 @@ mod tests {
         state.push_char('w');
         let filtered = state.filtered_items();
         assert!(!filtered.is_empty());
-        assert!(filtered.iter().all(|t| t.id().contains("claw") || t.name().to_lowercase().contains("claw")));
+        assert!(
+            filtered
+                .iter()
+                .all(|t| t.id().contains("claw") || t.name().to_lowercase().contains("claw"))
+        );
 
         state.filter = "non_existent_theme_query_xyz".to_string();
         assert!(state.filtered_items().is_empty());

@@ -11,13 +11,12 @@ use super::chat::render_chat;
 
 use super::App;
 use super::dialogs::{
-    render_agents_dialog, render_models_dialog, render_model_suggestions_popup,
-    render_permission_dialog, render_question_dialog, render_sessions_dialog, render_sessions_panel,
-    render_status_dialog, render_themes_dialog, render_which_key,
+    render_agents_dialog, render_model_suggestions_popup, render_models_dialog,
+    render_permission_dialog, render_question_dialog, render_sessions_dialog,
+    render_sessions_panel, render_status_dialog, render_themes_dialog, render_which_key,
 };
 use super::home::render_home;
 use super::theme::Theme;
-
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let theme = app.theme().to_theme();
@@ -67,7 +66,6 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         render_sessions_panel(frame, area, app, &theme);
     }
 }
-
 
 pub(crate) fn render_input_card(
     frame: &mut Frame<'_>,
@@ -272,8 +270,7 @@ pub(crate) fn render_input_card(
         .split(inner_area);
 
     // Hardware terminal cursor positioning
-    let cursor_x =
-        content_area.x + (cursor_width as u16).min(content_area.width.saturating_sub(1));
+    let cursor_x = content_area.x + (cursor_width as u16).min(content_area.width.saturating_sub(1));
     let cursor_y = v_chunks[1].y;
     frame.set_cursor_position((cursor_x, cursor_y));
 
@@ -345,16 +342,33 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
                 format!("{}: {}", tool.name, tool.desc)
             };
             vec![
-                Span::styled("⬡ ", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
-                Span::styled(action_str, Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" · {:.1}s", elapsed), Style::default().fg(theme.dim)),
+                Span::styled(
+                    "⬡ ",
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    action_str,
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" · {:.1}s", elapsed),
+                    Style::default().fg(theme.dim),
+                ),
             ]
         } else if app.is_reasoning() {
             let elapsed = app.reasoning_elapsed_seconds().unwrap_or(0.0);
             vec![
                 Span::styled("💭 ", Style::default().fg(theme.amber)),
-                Span::styled("Thinking", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" ({:.1}s)", elapsed), Style::default().fg(theme.dim)),
+                Span::styled(
+                    "Thinking",
+                    Style::default()
+                        .fg(theme.amber)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" ({:.1}s)", elapsed),
+                    Style::default().fg(theme.dim),
+                ),
             ]
         } else {
             let elapsed_str = if let Some(elapsed) = app.streaming_elapsed_seconds() {
@@ -364,7 +378,10 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
             };
             vec![
                 Span::styled("● ", Style::default().fg(mode_color)),
-                Span::styled("streaming", Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "streaming",
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(elapsed_str, Style::default().fg(theme.dim)),
             ]
         }
@@ -383,7 +400,10 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
     let (right_spans, right_len) = if is_working {
         (
             vec![
-                Span::styled("Esc", Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Esc",
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" cancel", Style::default().fg(theme.dim)),
             ],
             12,
@@ -438,7 +458,6 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
         chunks[2],
     );
 }
-
 
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     if area.width == 0 || area.height == 0 {
@@ -535,7 +554,12 @@ pub(crate) fn identity_label(app: &App) -> String {
     }
 }
 
-pub(crate) fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app: &App, theme: &Theme) {
+pub(crate) fn render_command_popup(
+    frame: &mut Frame<'_>,
+    input_area: Rect,
+    app: &App,
+    theme: &Theme,
+) {
     if app.prompt().starts_with("/model ") {
         render_model_suggestions_popup(frame, input_area, app, theme);
         return;
@@ -674,8 +698,18 @@ fn render_theme_suggestions_popup(
             let is_selected = actual_idx == selected_idx;
             if is_selected {
                 Line::from(vec![
-                    Span::styled(" › ", Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
-                    Span::styled(name, Style::default().fg(theme.amber).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        " › ",
+                        Style::default()
+                            .fg(theme.amber)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        name,
+                        Style::default()
+                            .fg(theme.amber)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ])
             } else {
                 Line::from(vec![
@@ -692,7 +726,9 @@ fn render_theme_suggestions_popup(
         .style(Style::default().bg(theme.bg_element))
         .title(Span::styled(
             " Themes (Tab complete) ",
-            Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
         ));
     frame.render_widget(Paragraph::new(items).block(block), popup_area);
 }
@@ -714,7 +750,9 @@ mod tests {
         }
 
         // Chat screen with transcript
-        app.apply(crate::tui::UiEvent::StreamDelta("Hello world!\n🦀 Unicode test 🚀\n".to_string()));
+        app.apply(crate::tui::UiEvent::StreamDelta(
+            "Hello world!\n🦀 Unicode test 🚀\n".to_string(),
+        ));
         for width in [0, 1, 5, 10, 25, 40] {
             for height in [0, 1, 2, 3, 5, 8] {
                 let _ = render_to_test_backend(&app, width, height);

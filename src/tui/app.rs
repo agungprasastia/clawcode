@@ -195,17 +195,26 @@ pub struct ActiveToolInfo {
     pub started_at: std::time::Instant,
 }
 
-pub fn tool_target_and_verbs(name: &str, args: Option<&serde_json::Value>) -> (&'static str, &'static str, String) {
+pub fn tool_target_and_verbs(
+    name: &str,
+    args: Option<&serde_json::Value>,
+) -> (&'static str, &'static str, String) {
     let desc = match (name, args) {
-        ("read_file" | "write_file" | "edit_file", Some(a)) => {
-            a.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string()
-        }
-        ("bash", Some(a)) => {
-            a.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string()
-        }
-        ("question", Some(a)) => {
-            a.get("question").and_then(|q| q.as_str()).unwrap_or("").to_string()
-        }
+        ("read_file" | "write_file" | "edit_file", Some(a)) => a
+            .get("path")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ("bash", Some(a)) => a
+            .get("command")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ("question", Some(a)) => a
+            .get("question")
+            .and_then(|q| q.as_str())
+            .unwrap_or("")
+            .to_string(),
         ("update_plan", Some(a)) => {
             if let Some(exp) = a
                 .get("explanation")
@@ -220,24 +229,36 @@ pub fn tool_target_and_verbs(name: &str, args: Option<&serde_json::Value>) -> (&
                 String::new()
             }
         }
-        ("glob_search", Some(a)) => {
-            a.get("pattern").and_then(|p| p.as_str()).unwrap_or("").to_string()
-        }
-        ("grep_search", Some(a)) => {
-            a.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string()
-        }
-        ("list_dir", Some(a)) => {
-            a.get("path").and_then(|p| p.as_str()).unwrap_or(".").to_string()
-        }
-        ("webfetch", Some(a)) => {
-            a.get("url").and_then(|p| p.as_str()).unwrap_or("").to_string()
-        }
-        ("websearch", Some(a)) => {
-            a.get("query").and_then(|p| p.as_str()).unwrap_or("").to_string()
-        }
-        ("skill", Some(a)) => {
-            a.get("name").and_then(|p| p.as_str()).unwrap_or("").to_string()
-        }
+        ("glob_search", Some(a)) => a
+            .get("pattern")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ("grep_search", Some(a)) => a
+            .get("query")
+            .and_then(|q| q.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ("list_dir", Some(a)) => a
+            .get("path")
+            .and_then(|p| p.as_str())
+            .unwrap_or(".")
+            .to_string(),
+        ("webfetch", Some(a)) => a
+            .get("url")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ("websearch", Some(a)) => a
+            .get("query")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ("skill", Some(a)) => a
+            .get("name")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string(),
         (_, Some(a)) => {
             if let Some(s) = a
                 .get("path")
@@ -404,15 +425,25 @@ pub fn split_provider_model(id: &str) -> Option<(&str, &str)> {
 pub fn is_sensitive_command(cmd: &str) -> bool {
     let lower = cmd.trim().to_lowercase();
     const PATTERNS: &[&str] = &[
-        "rm ", "rm\t", "git reset", "git clean", "mkfs", "dd ", "dd\t", "kill ", "kill\t",
-        "chmod ", "chmod\t", "chown ", "chown\t",
+        "rm ",
+        "rm\t",
+        "git reset",
+        "git clean",
+        "mkfs",
+        "dd ",
+        "dd\t",
+        "kill ",
+        "kill\t",
+        "chmod ",
+        "chmod\t",
+        "chown ",
+        "chown\t",
     ];
     if lower == "rm" || lower == "dd" || lower == "kill" || lower == "mkfs" {
         return true;
     }
     PATTERNS.iter().any(|&p| lower.contains(p))
 }
-
 
 pub struct App {
     running: bool,
@@ -598,7 +629,9 @@ impl App {
                         self.last_permission_decision = Some(decision);
                         self.diagnostic = match decision {
                             PermissionDecision::Deny => "Permission denied".to_string(),
-                            PermissionDecision::AllowOnce => "Permission granted (once)".to_string(),
+                            PermissionDecision::AllowOnce => {
+                                "Permission granted (once)".to_string()
+                            }
                             PermissionDecision::AllowAlways => {
                                 "Permission granted (always)".to_string()
                             }
@@ -654,7 +687,6 @@ impl App {
             }
             return;
         }
-
 
         if self.which_key.visible {
             match event {
@@ -878,7 +910,8 @@ impl App {
                         .and_then(|d| d.selected_session().cloned());
                     if let Some(chosen) = chosen_session {
                         self.switch_session(chosen.id);
-                        self.diagnostic = format!("switched to session #{} ({})", chosen.id, chosen.title);
+                        self.diagnostic =
+                            format!("switched to session #{} ({})", chosen.id, chosen.title);
                     }
                     self.sessions_dialog = None;
                     self.session_listings.clear();
@@ -1567,7 +1600,6 @@ impl App {
         self.question_dialog = None;
     }
 
-
     pub fn is_sensitive_command(cmd: &str) -> bool {
         is_sensitive_command(cmd)
     }
@@ -1685,7 +1717,12 @@ impl App {
         if !self.prompt.starts_with("/model ") {
             return Vec::new();
         }
-        let query = self.prompt.strip_prefix("/model ").unwrap_or("").trim().to_lowercase();
+        let query = self
+            .prompt
+            .strip_prefix("/model ")
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
         self.available_models
             .iter()
             .map(|m| m.id.clone())
@@ -1697,7 +1734,12 @@ impl App {
         if !self.prompt.starts_with("/theme ") {
             return Vec::new();
         }
-        let query = self.prompt.strip_prefix("/theme ").unwrap_or("").trim().to_lowercase();
+        let query = self
+            .prompt
+            .strip_prefix("/theme ")
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
         crate::tui::ThemeKind::ALL
             .iter()
             .filter_map(|t| {
@@ -1735,11 +1777,12 @@ impl App {
     pub fn previous_suggestion(&mut self) {
         let count = self.suggestion_count();
         if count > 0 {
-            self.selected_suggestion = if self.selected_suggestion == 0 || self.selected_suggestion >= count {
-                count - 1
-            } else {
-                self.selected_suggestion - 1
-            };
+            self.selected_suggestion =
+                if self.selected_suggestion == 0 || self.selected_suggestion >= count {
+                    count - 1
+                } else {
+                    self.selected_suggestion - 1
+                };
         } else {
             self.selected_suggestion = 0;
         }
@@ -1925,7 +1968,8 @@ impl App {
                     let status = format!("{} ({})", self.model, self.provider);
                     match SystemClipboard.set_text(&status) {
                         Ok(()) => {
-                            self.diagnostic = format!("copied status: {} ({})", self.model, self.provider);
+                            self.diagnostic =
+                                format!("copied status: {} ({})", self.model, self.provider);
                         }
                         Err(err) => {
                             self.diagnostic = format!("failed to copy status: {err}");
@@ -2086,7 +2130,8 @@ impl App {
             had_events = true;
             match event.kind.as_str() {
                 "reasoning_delta" => {
-                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
                     {
                         if self.reasoning_start.is_none() {
@@ -2098,8 +2143,13 @@ impl App {
                 "tool_call_start" => {
                     self.flush_reasoning();
                     self.flush_typewriter();
-                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json) {
-                        let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    {
+                        let name = payload
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool");
                         self.active_tool = Some(ActiveToolInfo {
                             name: name.to_string(),
                             desc: "preparing arguments...".to_string(),
@@ -2122,7 +2172,10 @@ impl App {
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                     {
-                        let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                        let name = payload
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool");
                         let args = payload.get("arguments");
                         let (_verb, _active_verb, desc) = tool_target_and_verbs(name, args);
                         self.active_tool = Some(ActiveToolInfo {
@@ -2161,8 +2214,14 @@ impl App {
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                     {
-                        let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
-                        let success = payload.get("success").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let name = payload
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool");
+                        let success = payload
+                            .get("success")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
                         let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
                         let args = payload.get("arguments");
 
@@ -2175,7 +2234,9 @@ impl App {
 
                         let detail = if !success {
                             let err_line = output.lines().next().unwrap_or("error").trim();
-                            let cleaned = err_line.strip_prefix(&format!("Error executing {name}: ")).unwrap_or(err_line);
+                            let cleaned = err_line
+                                .strip_prefix(&format!("Error executing {name}: "))
+                                .unwrap_or(err_line);
                             format!("failed: {cleaned}")
                         } else {
                             format_tool_success_detail(name, output)
@@ -2211,15 +2272,18 @@ impl App {
                                             if step.is_empty() {
                                                 return None;
                                             }
-                                            let clean_step = if let Some((num, rest)) = step.split_once(". ") {
-                                                if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
-                                                    rest.trim()
+                                            let clean_step =
+                                                if let Some((num, rest)) = step.split_once(". ") {
+                                                    if !num.is_empty()
+                                                        && num.chars().all(|c| c.is_ascii_digit())
+                                                    {
+                                                        rest.trim()
+                                                    } else {
+                                                        step
+                                                    }
                                                 } else {
                                                     step
-                                                }
-                                            } else {
-                                                step
-                                            };
+                                                };
 
                                             let status = obj
                                                 .get("status")
@@ -2228,8 +2292,10 @@ impl App {
                                                 .trim()
                                                 .to_ascii_lowercase();
                                             let norm_status = match status.as_str() {
-                                                "todo" | "open" | "pending" | "not_started" | "not-started" => "pending",
-                                                "in_progress" | "in-progress" | "in progress" | "doing" | "active" => "in_progress",
+                                                "todo" | "open" | "pending" | "not_started"
+                                                | "not-started" => "pending",
+                                                "in_progress" | "in-progress" | "in progress"
+                                                | "doing" | "active" => "in_progress",
                                                 "done" | "completed" | "complete" => "completed",
                                                 other => other,
                                             };
@@ -2281,14 +2347,19 @@ impl App {
                             self.transcript.push_str(&snippet);
                             self.truncate_transcript();
                         } else if name == "bash" {
-                            let exit_code: i32 = if let Some(idx) = output.rfind("[Process exited with code ") {
-                                let after = &output[idx + "[Process exited with code ".len()..];
-                                after.split(']').next().and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(if success { 0 } else { 1 })
-                            } else if success {
-                                0
-                            } else {
-                                1
-                            };
+                            let exit_code: i32 =
+                                if let Some(idx) = output.rfind("[Process exited with code ") {
+                                    let after = &output[idx + "[Process exited with code ".len()..];
+                                    after
+                                        .split(']')
+                                        .next()
+                                        .and_then(|s| s.trim().parse::<i32>().ok())
+                                        .unwrap_or(if success { 0 } else { 1 })
+                                } else if success {
+                                    0
+                                } else {
+                                    1
+                                };
 
                             let header = format!("⬢ Ran {target} (exit {exit_code})");
                             let branch = format!("  └ {detail}");
@@ -2316,7 +2387,9 @@ impl App {
                             snippet.push('\n');
 
                             if !cleaned_lines.is_empty() {
-                                snippet.push_str("  ┌── Output ────────────────────────────────────────\n");
+                                snippet.push_str(
+                                    "  ┌── Output ────────────────────────────────────────\n",
+                                );
                                 let max_lines = 25;
                                 if cleaned_lines.len() <= max_lines {
                                     for l in &cleaned_lines {
@@ -2326,7 +2399,10 @@ impl App {
                                     for l in &cleaned_lines[..max_lines] {
                                         snippet.push_str(&format!("  │ {l}\n"));
                                     }
-                                    snippet.push_str(&format!("  │ ... ({} more lines)\n", cleaned_lines.len() - max_lines));
+                                    snippet.push_str(&format!(
+                                        "  │ ... ({} more lines)\n",
+                                        cleaned_lines.len() - max_lines
+                                    ));
                                 }
                                 snippet.push_str("  └───\n");
                             }
@@ -2347,7 +2423,9 @@ impl App {
 
                             for l in output.lines() {
                                 let trimmed = l.trim();
-                                if let Some((_num, title)) = crate::tui::chat::split_numbered_result(trimmed) {
+                                if let Some((_num, title)) =
+                                    crate::tui::chat::split_numbered_result(trimmed)
+                                {
                                     if let Some(t) = current_title.take() {
                                         results.push((t, current_url.take().unwrap_or_default()));
                                     }
@@ -2371,7 +2449,9 @@ impl App {
                             snippet.push('\n');
 
                             if !results.is_empty() {
-                                snippet.push_str("  ┌── Results ──────────────────────────────────────\n");
+                                snippet.push_str(
+                                    "  ┌── Results ──────────────────────────────────────\n",
+                                );
                                 for (i, (title, url)) in results.iter().take(5).enumerate() {
                                     snippet.push_str(&format!("  │ {}. {}\n", i + 1, title));
                                     if !url.is_empty() {
@@ -2379,7 +2459,10 @@ impl App {
                                     }
                                 }
                                 if results.len() > 5 {
-                                    snippet.push_str(&format!("  │ ... ({} more results)\n", results.len() - 5));
+                                    snippet.push_str(&format!(
+                                        "  │ ... ({} more results)\n",
+                                        results.len() - 5
+                                    ));
                                 }
                                 snippet.push_str("  └───\n");
                             }
@@ -2419,10 +2502,7 @@ impl App {
                                 .unwrap_or(1);
                             let diff = crate::tui::diff::compute_diff(old_str, new_str, 0);
                             let side_by_side = crate::tui::diff::compute_side_by_side_diff(
-                                old_str,
-                                new_str,
-                                start_line,
-                                20,
+                                old_str, new_str, start_line, 20,
                             );
                             let header = if target.is_empty() {
                                 format!("• Edit (+{} -{})", diff.added, diff.removed)
@@ -2595,11 +2675,17 @@ impl App {
                         }
                     }
                     if msg.role == "user" {
-                        self.transcript.push_str(&format!("> {}\n\n", msg.content.trim()));
+                        self.transcript
+                            .push_str(&format!("> {}\n\n", msg.content.trim()));
                     } else if msg.role == "assistant" {
-                        self.transcript.push_str(&format!("{}\n\n", msg.content.trim()));
+                        self.transcript
+                            .push_str(&format!("{}\n\n", msg.content.trim()));
                     } else {
-                        self.transcript.push_str(&format!("[{}]: {}\n\n", msg.role, msg.content.trim()));
+                        self.transcript.push_str(&format!(
+                            "[{}]: {}\n\n",
+                            msg.role,
+                            msg.content.trim()
+                        ));
                     }
                 }
                 self.truncate_transcript();
@@ -2658,7 +2744,8 @@ impl App {
                 // order matches the panel layout (workspace, then sessions).
                 self.diagnostic = format!("{} session(s) — press Esc to close", sessions.len());
                 self.session_listings = sessions.clone();
-                self.sessions_dialog = Some(SessionsDialogState::new(sessions, self.active_session_id));
+                self.sessions_dialog =
+                    Some(SessionsDialogState::new(sessions, self.active_session_id));
             }
             CommandOutput::Help(text) => {
                 if self.transcript.is_empty() {
@@ -2711,13 +2798,13 @@ impl App {
         &self.current_plan
     }
 
-
     fn truncate_transcript(&mut self) {
         if self.transcript.len() <= Self::MAX_TRANSCRIPT_BYTES {
             return;
         }
 
-        let retained_bytes = Self::MAX_TRANSCRIPT_BYTES.saturating_sub(Self::TRUNCATION_MARKER.len());
+        let retained_bytes =
+            Self::MAX_TRANSCRIPT_BYTES.saturating_sub(Self::TRUNCATION_MARKER.len());
         let start = ceil_char_boundary(
             &self.transcript,
             self.transcript.len().saturating_sub(retained_bytes),
@@ -2878,7 +2965,9 @@ mod tests {
         assert!(queue.capacity() >= 3);
 
         for i in 0..100 {
-            queue.push(UiEvent::Input(Input::Character((b'a' + (i % 26) as u8) as char)));
+            queue.push(UiEvent::Input(Input::Character(
+                (b'a' + (i % 26) as u8) as char,
+            )));
         }
         assert!(queue.len() <= queue.capacity());
     }
@@ -3025,7 +3114,10 @@ mod tests {
     #[test]
     fn test_delete_session_in_sessions_dialog() {
         let mut app = App::default();
-        let session = app.command_service.create_session("delete me session").unwrap();
+        let session = app
+            .command_service
+            .create_session("delete me session")
+            .unwrap();
         let id = session.id;
         let title = session.title.clone();
         app.sessions_dialog = Some(SessionsDialogState::new(vec![session], Some(id)));

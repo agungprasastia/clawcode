@@ -176,14 +176,8 @@ mod tests {
 
     #[test]
     fn test_status_dialog_state_new() {
-        let state = StatusDialogState::new(
-            "Plan",
-            "openai",
-            "gpt-4o",
-            "dark",
-            "main",
-            "/workspace",
-        );
+        let state =
+            StatusDialogState::new("Plan", "openai", "gpt-4o", "dark", "main", "/workspace");
         assert_eq!(state.mode, "Plan");
         assert_eq!(state.provider, "openai");
         assert_eq!(state.model, "gpt-4o");

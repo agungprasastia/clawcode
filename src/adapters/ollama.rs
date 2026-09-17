@@ -28,7 +28,10 @@ impl<T: super::Transport + Clone + 'static> Provider for Ollama<T> {
     fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
         self.0.send(request)
     }
-    fn stream(&self, request: &StreamRequest) -> Result<crate::provider::ProviderStream, ProviderError> {
+    fn stream(
+        &self,
+        request: &StreamRequest,
+    ) -> Result<crate::provider::ProviderStream, ProviderError> {
         self.0.stream(request)
     }
 }

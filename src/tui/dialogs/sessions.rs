@@ -278,7 +278,11 @@ pub fn render_sessions_dialog(
     );
 
     let list_height = chunks[2].height as usize;
-    let selected_idx = if filtered.is_empty() { 0 } else { dialog.selected.min(filtered.len() - 1) };
+    let selected_idx = if filtered.is_empty() {
+        0
+    } else {
+        dialog.selected.min(filtered.len() - 1)
+    };
     let scroll_offset = if selected_idx >= list_height {
         (selected_idx + 1).saturating_sub(list_height)
     } else {
@@ -347,9 +351,7 @@ pub fn render_sessions_dialog(
                         .fg(theme.success)
                         .add_modifier(Modifier::BOLD)
                 } else if session.status == SessionStatus::Running {
-                    Style::default()
-                        .fg(theme.teal)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.amber)
                 };
@@ -364,14 +366,17 @@ pub fn render_sessions_dialog(
                 let badge_len = badge.len();
                 let available_for_title = row_width.saturating_sub(prefix_len + badge_len + 2);
 
-                let display_title = if session.title.len() > available_for_title && available_for_title > 4 {
-                    format!("{}…", &session.title[..available_for_title - 1])
-                } else {
-                    session.title.clone()
-                };
+                let display_title =
+                    if session.title.len() > available_for_title && available_for_title > 4 {
+                        format!("{}…", &session.title[..available_for_title - 1])
+                    } else {
+                        session.title.clone()
+                    };
 
                 let display_full = format!("{title_prefix}{display_title}");
-                let pad_len = row_width.saturating_sub(cursor.len() + active_dot.len() + display_full.len() + badge_len);
+                let pad_len = row_width.saturating_sub(
+                    cursor.len() + active_dot.len() + display_full.len() + badge_len,
+                );
 
                 let line_style = if is_selected {
                     Style::default().bg(theme.bg_element)

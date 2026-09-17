@@ -212,8 +212,16 @@ impl WriterHandle {
     /// Stop the worker and take back the `Db`. Blocks until all other
     /// handles are dropped, so clones must die first.
     pub fn shutdown(&self) -> Option<Db> {
-        let sender = self.inner.lock().unwrap_or_else(|p| p.into_inner()).take()?;
-        let worker = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take()?;
+        let sender = self
+            .inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()?;
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()?;
         drop(sender);
         let db = worker.join().ok()?;
         Some(db)
@@ -271,17 +279,18 @@ fn flush_events(db: &Db, pending: &mut Vec<PendingEvent>) {
     let mut results: Vec<Result<i64, String>> = Vec::with_capacity(batch.len());
     let mut session_max_seq: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     for (session_id, generation_id, kind, payload_json, _) in &batch {
-        let res = tx.query_row(
-            "INSERT INTO generation_events (seq, session_id, generation_id, kind, payload_json)
+        let res = tx
+            .query_row(
+                "INSERT INTO generation_events (seq, session_id, generation_id, kind, payload_json)
              VALUES (
                  COALESCE((SELECT MAX(seq) + 1 FROM generation_events WHERE session_id = ?1), 0),
                  ?1, ?2, ?3, ?4
              )
              RETURNING seq",
-            rusqlite::params![session_id, generation_id, kind, payload_json],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string());
+                rusqlite::params![session_id, generation_id, kind, payload_json],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string());
         if let Ok(seq) = res {
             let entry = session_max_seq.entry(*session_id).or_insert(seq);
             if seq > *entry {
@@ -308,4 +317,3 @@ fn flush_events(db: &Db, pending: &mut Vec<PendingEvent>) {
         let _ = reply.send(result);
     }
 }
-
