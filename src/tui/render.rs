@@ -12,8 +12,8 @@ use super::chat::render_chat;
 use super::App;
 use super::dialogs::{
     render_agents_dialog, render_models_dialog, render_model_suggestions_popup,
-    render_sessions_dialog, render_sessions_panel, render_status_dialog, render_themes_dialog,
-    render_which_key,
+    render_permission_dialog, render_question_dialog, render_sessions_dialog, render_sessions_panel,
+    render_status_dialog, render_themes_dialog, render_which_key,
 };
 use super::home::render_home;
 use super::theme::Theme;
@@ -47,7 +47,11 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
     render_status_bar(frame, status_bar_area, app, &theme);
 
-    if app.which_key().visible {
+    if let Some(dialog) = app.permission_dialog() {
+        render_permission_dialog(frame, area, dialog, &theme);
+    } else if let Some(dialog) = app.question_dialog() {
+        render_question_dialog(frame, area, dialog, &theme);
+    } else if app.which_key().visible {
         render_which_key(frame, area, &theme);
     } else if let Some(dialog) = app.status_dialog() {
         render_status_dialog(frame, area, dialog, &theme);

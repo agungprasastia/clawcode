@@ -51,6 +51,8 @@ fn translate_key(key: KeyEvent) -> Option<Input> {
         }
         KeyCode::Up if key.modifiers.is_empty() => Some(Input::Up),
         KeyCode::Down if key.modifiers.is_empty() => Some(Input::Down),
+        KeyCode::Left if key.modifiers.is_empty() => Some(Input::Left),
+        KeyCode::Right if key.modifiers.is_empty() => Some(Input::Right),
         KeyCode::Esc | KeyCode::Char('q') if key.modifiers.is_empty() => Some(Input::Quit),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Cancel),
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Clear),
@@ -102,12 +104,18 @@ mod tests {
     }
 
     #[test]
-    fn arrow_keys_translate_to_up_down() {
+    fn arrow_keys_translate_to_up_down_left_right() {
         let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(translate_key(up), Some(Input::Up));
 
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(translate_key(down), Some(Input::Down));
+
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(translate_key(left), Some(Input::Left));
+
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(translate_key(right), Some(Input::Right));
     }
 
     #[test]

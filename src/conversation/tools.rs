@@ -358,6 +358,30 @@ pub fn coding_tools_schemas() -> Vec<serde_json::Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "question",
+                "description": "Ask the user one or more clarifying questions when requirements are ambiguous or key choices are needed. The user will select options or provide free text.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The clarifying question to ask the user"
+                        },
+                        "options": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "Optional list of predefined choices for the user to select from"
+                        }
+                    },
+                    "required": ["question"]
+                }
+            }
+        }),
     ]
 }
 
@@ -648,6 +672,27 @@ pub fn execute_tool(
                 Err(e) => Err(format!("Failed to execute command: {e}")),
             }
         }
+        "question" => {
+            let question = args
+                .get("question")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Missing required argument 'question'".to_string())?;
+            let options = args.get("options").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<String>>()
+            });
+            let mut out = format!("Question asked: {question}");
+            if let Some(opts) = options {
+                if !opts.is_empty() {
+                    out.push_str("\nOptions:\n");
+                    for (i, opt) in opts.iter().enumerate() {
+                        out.push_str(&format!(" {}. {}\n", i + 1, opt));
+                    }
+                }
+            }
+            Ok(out)
+        }
         _ => Err(format!("Unknown tool: '{name}'")),
     }
 }
@@ -751,7 +796,7 @@ mod tests {
     #[test]
     fn test_schemas_validity() {
         let schemas = coding_tools_schemas();
-        assert_eq!(schemas.len(), 7);
+        assert_eq!(schemas.len(), 8);
         let names: Vec<_> = schemas
             .iter()
             .map(|s| s["function"]["name"].as_str().unwrap())
@@ -763,6 +808,7 @@ mod tests {
         assert!(names.contains(&"glob_search"));
         assert!(names.contains(&"grep_search"));
         assert!(names.contains(&"bash"));
+        assert!(names.contains(&"question"));
     }
 
     #[test]
@@ -848,6 +894,18 @@ mod tests {
         )
         .unwrap();
         assert!(grep_res.contains("test.txt:1: hello universe"));
+
+        // 7. question tool
+        let question_res = execute_tool(
+            &workspace,
+            Mode::Plan,
+            "question",
+            r#"{"question": "Choose database", "options": ["postgres", "sqlite"]}"#,
+        )
+        .unwrap();
+        assert!(question_res.contains("Question asked: Choose database"));
+        assert!(question_res.contains("1. postgres"));
+        assert!(question_res.contains("2. sqlite"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

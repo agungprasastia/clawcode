@@ -164,7 +164,7 @@ fn tool_layer_enforces_read_and_mutation_bounds() {
 #[test]
 fn test_coding_tools_schemas_validity() {
     let schemas = clawcode::conversation::tools::coding_tools_schemas();
-    assert_eq!(schemas.len(), 7);
+    assert_eq!(schemas.len(), 8);
     let names: Vec<&str> = schemas
         .iter()
         .filter_map(|s| s.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
@@ -176,6 +176,7 @@ fn test_coding_tools_schemas_validity() {
     assert!(names.contains(&"glob_search"));
     assert!(names.contains(&"grep_search"));
     assert!(names.contains(&"bash"));
+    assert!(names.contains(&"question"));
 }
 
 #[test]

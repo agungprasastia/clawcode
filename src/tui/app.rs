@@ -8,8 +8,8 @@ use crate::provider::TurnMetrics;
 use crate::runtime::{EventBus, RuntimeEvent, client::RuntimeClient};
 
 use super::dialogs::{
-    AgentsDialogState, ModelsDialogState, SessionsDialogState, StatusDialogState,
-    ThemesDialogState, WhichKeyState,
+    AgentsDialogState, ModelsDialogState, PermissionDecision, PermissionDialogState,
+    QuestionDialogState, SessionsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState,
 };
 use super::home::HomeState;
 
@@ -44,6 +44,8 @@ pub enum Input {
     ToggleMode,
     Up,
     Down,
+    Left,
+    Right,
     ScrollUp,
     ScrollDown,
     PageUp,
@@ -198,6 +200,9 @@ pub fn tool_target_and_verbs(name: &str, args: Option<&serde_json::Value>) -> (&
         ("bash", Some(a)) => {
             a.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string()
         }
+        ("question", Some(a)) => {
+            a.get("question").and_then(|q| q.as_str()).unwrap_or("").to_string()
+        }
         ("glob_search", Some(a)) => {
             a.get("pattern").and_then(|p| p.as_str()).unwrap_or("").to_string()
         }
@@ -231,6 +236,7 @@ pub fn tool_target_and_verbs(name: &str, args: Option<&serde_json::Value>) -> (&
         "glob_search" => ("Glob", "Running glob_search", desc),
         "grep_search" => ("Grep", "Running grep_search", desc),
         "bash" => ("Ran", "Running", desc),
+        "question" => ("Ask", "Asking", desc),
         _ => ("Tool", "Running", desc),
     }
 }
@@ -283,6 +289,7 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
                 format!("{count} lines")
             }
         }
+        "question" => "answered".to_string(),
         _ => {
             let count = output.lines().count();
             if count <= 1 && output.trim().len() < 60 && !output.trim().is_empty() {
@@ -295,6 +302,18 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
         }
     }
 }
+pub fn is_sensitive_command(cmd: &str) -> bool {
+    let lower = cmd.trim().to_lowercase();
+    const PATTERNS: &[&str] = &[
+        "rm ", "rm\t", "git reset", "git clean", "mkfs", "dd ", "dd\t", "kill ", "kill\t",
+        "chmod ", "chmod\t", "chown ", "chown\t",
+    ];
+    if lower == "rm" || lower == "dd" || lower == "kill" || lower == "mkfs" {
+        return true;
+    }
+    PATTERNS.iter().any(|&p| lower.contains(p))
+}
+
 
 pub struct App {
     running: bool,
@@ -316,6 +335,14 @@ pub struct App {
     sessions: std::collections::HashMap<i64, ClientSessionState>,
     /// Snapshot shown by the /sessions panel.
     session_listings: Vec<crate::persistence::Session>,
+    /// Active interactive permission dialog, if security approval is required.
+    permission_dialog: Option<PermissionDialogState>,
+    /// Last decision recorded from the permission dialog.
+    last_permission_decision: Option<PermissionDecision>,
+    /// Active interactive question dialog, if agent asks a clarifying question.
+    question_dialog: Option<QuestionDialogState>,
+    /// Last user answer to a question dialog.
+    last_question_answer: Option<String>,
     /// Active interactive sessions selection dialog, if opened.
     sessions_dialog: Option<SessionsDialogState>,
     /// Active interactive model selection dialog, if opened.
@@ -401,6 +428,10 @@ impl App {
             active_session_id: None,
             sessions: std::collections::HashMap::new(),
             session_listings: Vec::new(),
+            permission_dialog: None,
+            last_permission_decision: None,
+            question_dialog: None,
+            last_question_answer: None,
             sessions_dialog: None,
             models_dialog: None,
             agents_dialog: None,
@@ -428,6 +459,94 @@ impl App {
     pub const TRUNCATION_MARKER: &str = "[earlier transcript truncated]\n";
 
     pub fn apply(&mut self, event: UiEvent) {
+        if self.permission_dialog.is_some() {
+            match event {
+                UiEvent::Input(Input::Left)
+                | UiEvent::Input(Input::Up)
+                | UiEvent::Input(Input::Character('h'))
+                | UiEvent::Input(Input::Character('k')) => {
+                    if let Some(dialog) = &mut self.permission_dialog {
+                        dialog.previous();
+                    }
+                }
+                UiEvent::Input(Input::Right)
+                | UiEvent::Input(Input::Down)
+                | UiEvent::Input(Input::ToggleMode)
+                | UiEvent::Input(Input::Character('l'))
+                | UiEvent::Input(Input::Character('j')) => {
+                    if let Some(dialog) = &mut self.permission_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
+                    self.last_permission_decision = Some(PermissionDecision::Deny);
+                    self.diagnostic = "Permission denied".to_string();
+                    self.permission_dialog = None;
+                }
+                UiEvent::Input(Input::Submit) => {
+                    if let Some(dialog) = &self.permission_dialog {
+                        let decision = dialog.selected();
+                        self.last_permission_decision = Some(decision);
+                        self.diagnostic = match decision {
+                            PermissionDecision::Deny => "Permission denied".to_string(),
+                            PermissionDecision::AllowOnce => "Permission granted (once)".to_string(),
+                            PermissionDecision::AllowAlways => {
+                                "Permission granted (always)".to_string()
+                            }
+                        };
+                    }
+                    self.permission_dialog = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.question_dialog.is_some() {
+            match event {
+                UiEvent::Input(Input::Up) | UiEvent::Input(Input::ScrollUp) => {
+                    if let Some(dialog) = &mut self.question_dialog {
+                        dialog.previous();
+                    }
+                }
+                UiEvent::Input(Input::Down)
+                | UiEvent::Input(Input::ScrollDown)
+                | UiEvent::Input(Input::ToggleMode) => {
+                    if let Some(dialog) = &mut self.question_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Input(Input::Character(c)) => {
+                    if let Some(dialog) = &mut self.question_dialog {
+                        if dialog.typing_custom || dialog.selected_option == dialog.options.len() {
+                            dialog.push_char(c);
+                        }
+                    }
+                }
+                UiEvent::Input(Input::Backspace) => {
+                    if let Some(dialog) = &mut self.question_dialog {
+                        if dialog.typing_custom || dialog.selected_option == dialog.options.len() {
+                            dialog.pop_char();
+                        }
+                    }
+                }
+                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
+                    self.diagnostic = "Question dismissed".to_string();
+                    self.question_dialog = None;
+                }
+                UiEvent::Input(Input::Submit) => {
+                    if let Some(dialog) = &self.question_dialog {
+                        let answer = dialog.selected_answer();
+                        self.diagnostic = format!("Answer selected: {answer}");
+                        self.last_question_answer = Some(answer);
+                    }
+                    self.question_dialog = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+
         if self.which_key.visible {
             match event {
                 UiEvent::Input(Input::WhichKey)
@@ -796,6 +915,7 @@ impl App {
             UiEvent::Input(Input::End) => {
                 self.scroll_to_bottom();
             }
+            UiEvent::Input(Input::Left) | UiEvent::Input(Input::Right) => {}
             UiEvent::Input(Input::Submit) => self.submit_prompt(),
             UiEvent::Input(Input::WhichKey) => {
                 self.which_key.toggle();
@@ -827,6 +947,8 @@ impl App {
 
         let quitting = event == UiEvent::Input(Input::Quit)
             && self.session_listings.is_empty()
+            && self.permission_dialog.is_none()
+            && self.question_dialog.is_none()
             && self.sessions_dialog.is_none()
             && self.models_dialog.is_none()
             && self.agents_dialog.is_none()
@@ -1165,6 +1287,59 @@ impl App {
 
     pub fn selected_suggestion_index(&self) -> usize {
         self.selected_suggestion
+    }
+
+    pub fn permission_dialog(&self) -> Option<&PermissionDialogState> {
+        self.permission_dialog.as_ref()
+    }
+
+    pub fn permission_dialog_mut(&mut self) -> Option<&mut PermissionDialogState> {
+        self.permission_dialog.as_mut()
+    }
+
+    pub fn last_permission_decision(&self) -> Option<PermissionDecision> {
+        self.last_permission_decision
+    }
+
+    pub fn open_permission_dialog(
+        &mut self,
+        tool_name: impl Into<String>,
+        action_desc: impl Into<String>,
+        reason: impl Into<String>,
+    ) {
+        self.permission_dialog = Some(PermissionDialogState::with_prompt(
+            tool_name,
+            action_desc,
+            reason,
+        ));
+    }
+
+    pub fn close_permission_dialog(&mut self) {
+        self.permission_dialog = None;
+    }
+    pub fn question_dialog(&self) -> Option<&QuestionDialogState> {
+        self.question_dialog.as_ref()
+    }
+
+    pub fn question_dialog_mut(&mut self) -> Option<&mut QuestionDialogState> {
+        self.question_dialog.as_mut()
+    }
+
+    pub fn last_question_answer(&self) -> Option<&str> {
+        self.last_question_answer.as_deref()
+    }
+
+    pub fn open_question_dialog(&mut self, question: &str, options: Vec<String>) {
+        self.question_dialog = Some(QuestionDialogState::new(question, options));
+    }
+
+    pub fn close_question_dialog(&mut self) {
+        self.question_dialog = None;
+    }
+
+
+    pub fn is_sensitive_command(cmd: &str) -> bool {
+        is_sensitive_command(cmd)
     }
 
     pub fn sessions_dialog(&self) -> Option<&SessionsDialogState> {
@@ -1621,6 +1796,28 @@ impl App {
                             desc,
                             started_at: std::time::Instant::now(),
                         });
+                        if name == "question" {
+                            let parsed_args_obj = if let Some(serde_json::Value::String(s)) = args {
+                                serde_json::from_str::<serde_json::Value>(s).ok()
+                            } else {
+                                None
+                            };
+                            let effective_args = parsed_args_obj.as_ref().or(args);
+                            let q_str = effective_args
+                                .and_then(|a| a.get("question"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let options = effective_args
+                                .and_then(|a| a.get("options"))
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                                        .collect::<Vec<String>>()
+                                })
+                                .unwrap_or_default();
+                            self.open_question_dialog(q_str, options);
+                        }
                     }
                 }
                 "tool_executed" => {

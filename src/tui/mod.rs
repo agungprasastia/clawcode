@@ -19,11 +19,12 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 pub use app::{
     App, ConversationMode, ConversationStatus, Input, UiEvent,
-    UiEventQueue,
+    UiEventQueue, is_sensitive_command,
 };
 pub use dialogs::{
-    AgentItem, AgentsDialogState, ModelsDialogState, SessionsDialogState, StatusDialogState,
-    ThemesDialogState, WhichKeyState,
+    AgentItem, AgentsDialogState, ModelsDialogState, PermissionDecision, PermissionDialogState,
+    PermissionPrompt, QuestionDialogState, SessionsDialogState, StatusDialogState,
+    ThemesDialogState, WhichKeyState, render_permission_dialog, render_question_dialog,
 };
 pub use home::HomeState;
 pub use chat::render_chat;

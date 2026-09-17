@@ -1767,3 +1767,239 @@ fn historical_tool_lines_render_with_clean_styles() {
     assert!(text.contains("└"));
     assert!(text.contains("grep_search succeeded (100 lines)"));
 }
+#[test]
+fn test_app_permission_dialog_navigation_and_decisions() {
+    let mut app = App::default();
+    assert!(app.permission_dialog().is_none());
+
+    // Open dialog
+    app.open_permission_dialog("bash", "rm -rf /tmp/data", "Clean temporary data");
+    assert!(app.permission_dialog().is_some());
+    assert_eq!(
+        app.permission_dialog().unwrap().selected(),
+        clawcode::tui::PermissionDecision::AllowOnce
+    );
+
+    // Tab/Right advances to AllowAlways
+    app.apply(UiEvent::Input(Input::Right));
+    assert_eq!(
+        app.permission_dialog().unwrap().selected(),
+        clawcode::tui::PermissionDecision::AllowAlways
+    );
+
+    // Enter confirms AllowAlways
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.permission_dialog().is_none());
+    assert_eq!(
+        app.last_permission_decision(),
+        Some(clawcode::tui::PermissionDecision::AllowAlways)
+    );
+
+    // Reopen and navigate to Deny using Left
+    app.open_permission_dialog("edit_file", "edit /etc/hosts", "Update host entries");
+    assert_eq!(
+        app.permission_dialog().unwrap().selected(),
+        clawcode::tui::PermissionDecision::AllowOnce
+    );
+    app.apply(UiEvent::Input(Input::Left));
+    assert_eq!(
+        app.permission_dialog().unwrap().selected(),
+        clawcode::tui::PermissionDecision::Deny
+    );
+
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.permission_dialog().is_none());
+    assert_eq!(
+        app.last_permission_decision(),
+        Some(clawcode::tui::PermissionDecision::Deny)
+    );
+}
+
+#[test]
+fn test_app_permission_dialog_quit_or_cancel_denies() {
+    let mut app = App::default();
+    app.open_permission_dialog("bash", "git reset --hard", "Discard changes");
+    assert!(app.permission_dialog().is_some());
+
+    // Esc / Quit cancels and denies permission without quitting application
+    app.apply(UiEvent::Input(Input::Quit));
+    assert!(app.permission_dialog().is_none());
+    assert_eq!(
+        app.last_permission_decision(),
+        Some(clawcode::tui::PermissionDecision::Deny)
+    );
+
+    // Cancel (Ctrl+C) also denies
+    app.open_permission_dialog("bash", "git clean -fd", "Clean untracked files");
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.permission_dialog().is_none());
+    assert_eq!(
+        app.last_permission_decision(),
+        Some(clawcode::tui::PermissionDecision::Deny)
+    );
+}
+
+#[test]
+fn test_is_sensitive_command() {
+    // Dangerous commands
+    assert!(clawcode::tui::is_sensitive_command("rm -rf target"));
+    assert!(clawcode::tui::is_sensitive_command("rm file.txt"));
+    assert!(clawcode::tui::is_sensitive_command("rm"));
+    assert!(clawcode::tui::is_sensitive_command("git reset --hard HEAD~1"));
+    assert!(clawcode::tui::is_sensitive_command("git clean -fd"));
+    assert!(clawcode::tui::is_sensitive_command("mkfs.ext4 /dev/sdb1"));
+    assert!(clawcode::tui::is_sensitive_command("dd if=/dev/zero of=/dev/sda"));
+    assert!(clawcode::tui::is_sensitive_command("kill -9 1234"));
+    assert!(clawcode::tui::is_sensitive_command("chmod 777 script.sh"));
+    assert!(clawcode::tui::is_sensitive_command("chown root:root /etc/file"));
+
+    // Safe commands
+    assert!(!clawcode::tui::is_sensitive_command("ls -la"));
+    assert!(!clawcode::tui::is_sensitive_command("git status"));
+    assert!(!clawcode::tui::is_sensitive_command("cargo check"));
+    assert!(!clawcode::tui::is_sensitive_command("echo 'hello world'"));
+}
+
+#[test]
+fn test_permission_dialog_rendered_overlay() {
+    let mut app = App::default();
+    app.open_permission_dialog("bash", "rm -rf /tmp/test", "Remove temporary files");
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Security Confirmation"));
+    assert!(text.contains("bash"));
+    assert!(text.contains("rm -rf /tmp/test"));
+    assert!(text.contains("Remove temporary files"));
+    assert!(text.contains("[ Deny ]"));
+    assert!(text.contains("[ Allow Once ]"));
+    assert!(text.contains("[ Always Allow ]"));
+    assert!(text.contains("←/→ or Tab to navigate"));
+    assert!(text.contains("Enter to confirm"));
+    assert!(text.contains("Esc to deny"));
+}
+#[test]
+fn test_app_question_dialog_navigation_and_custom_answer() {
+    let mut app = App::default();
+    assert!(app.question_dialog().is_none());
+
+    app.open_question_dialog(
+        "Which frontend framework?",
+        vec!["React".to_string(), "Vue".to_string()],
+    );
+    assert!(app.question_dialog().is_some());
+    assert_eq!(
+        app.question_dialog().unwrap().selected_answer(),
+        "React"
+    );
+
+    // Down moves to Vue
+    app.apply(UiEvent::Input(Input::Down));
+    assert_eq!(
+        app.question_dialog().unwrap().selected_answer(),
+        "Vue"
+    );
+
+    // Down moves to Custom text option
+    app.apply(UiEvent::Input(Input::Down));
+    assert!(app.question_dialog().unwrap().typing_custom);
+
+    // Type "Svelte"
+    for c in "Svelte".chars() {
+        app.apply(UiEvent::Input(Input::Character(c)));
+    }
+    assert_eq!(
+        app.question_dialog().unwrap().selected_answer(),
+        "Svelte"
+    );
+
+    // Backspace removes last char -> "Svelt"
+    app.apply(UiEvent::Input(Input::Backspace));
+    assert_eq!(
+        app.question_dialog().unwrap().selected_answer(),
+        "Svelt"
+    );
+
+    // Submit confirms "Svelt"
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.question_dialog().is_none());
+    assert_eq!(app.last_question_answer(), Some("Svelt"));
+}
+
+#[test]
+fn test_app_question_dialog_dismiss_esc() {
+    let mut app = App::default();
+    app.open_question_dialog("Proceed?", vec!["Yes".to_string(), "No".to_string()]);
+    assert!(app.question_dialog().is_some());
+
+    // Esc dismisses question dialog without quitting app
+    app.apply(UiEvent::Input(Input::Quit));
+    assert!(app.question_dialog().is_none());
+
+    // Cancel (Ctrl+C) also dismisses
+    app.open_question_dialog("Retry?", vec!["Yes".to_string()]);
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.question_dialog().is_none());
+}
+
+#[test]
+fn test_app_question_dialog_rendered_overlay() {
+    let mut app = App::default();
+    app.open_question_dialog(
+        "Which UI library?",
+        vec!["Tailwind".to_string(), "Bootstrap".to_string()],
+    );
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Question from Agent"));
+    assert!(text.contains("Which UI library?"));
+    assert!(text.contains("Tailwind"));
+    assert!(text.contains("Bootstrap"));
+    assert!(text.contains("Custom text:"));
+    assert!(text.contains("↑/↓ select"));
+    assert!(text.contains("Type custom answer"));
+    assert!(text.contains("Enter submit"));
+    assert!(text.contains("Esc dismiss"));
+}
+
+#[test]
+fn test_app_poll_runtime_opens_question_dialog() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".to_string(),
+        payload_json: serde_json::json!({
+            "name": "question",
+            "arguments": {
+                "question": "Choose port number",
+                "options": ["3000", "8080"]
+            }
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+
+    let dialog = app.question_dialog().expect("question dialog should be open");
+    assert_eq!(dialog.question, "Choose port number");
+    assert_eq!(dialog.options, vec!["3000".to_string(), "8080".to_string()]);
+}
