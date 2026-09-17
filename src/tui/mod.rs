@@ -1,4 +1,5 @@
 mod app;
+pub mod chat;
 pub mod dialogs;
 pub mod home;
 mod input;
@@ -24,6 +25,7 @@ pub use dialogs::{
     ThemesDialogState, WhichKeyState,
 };
 pub use home::HomeState;
+pub use chat::render_chat;
 pub use render::render;
 pub use theme::{Theme, ThemeKind};
 pub use typewriter::TypewriterState;
