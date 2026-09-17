@@ -1,4 +1,4 @@
-mod app;
+pub mod app;
 pub mod chat;
 pub mod dialogs;
 pub mod diff;
@@ -19,7 +19,8 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 pub use app::{
     App, ConversationMode, ConversationStatus, Input, UiEvent,
-    UiEventQueue, is_sensitive_command,
+    UiEventQueue, format_tool_success_detail, is_sensitive_command,
+    tool_target_and_verbs,
 };
 pub use dialogs::{
     AgentItem, AgentsDialogState, ModelsDialogState, PermissionDecision, PermissionDialogState,

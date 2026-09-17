@@ -122,6 +122,10 @@ pub fn render_chat(
             "glob_search" => "Running glob_search",
             "grep_search" => "Running grep_search",
             "bash" => "Running",
+            "update_plan" => "Updating Plan",
+            "webfetch" => "Fetching",
+            "websearch" => "Searching",
+            "skill" => "Loading skill",
             _ => "Running",
         };
         let action_text = if active_tool.desc.is_empty() {
@@ -525,6 +529,19 @@ pub(crate) fn format_transcript_lines(
                     Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled(")", Style::default().fg(theme.dim)));
+            } else if let Some(target) = rest_trimmed.strip_prefix("Updated Plan") {
+                spans.push(Span::styled(
+                    "Updated Plan".to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ));
+                let target_trimmed = target.trim();
+                if !target_trimmed.is_empty() {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        target_trimmed.to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    ));
+                }
             } else if let Some((verb, target)) = rest_trimmed.split_once(' ') {
                 spans.push(Span::styled(
                     verb.to_string(),
@@ -554,6 +571,94 @@ pub(crate) fn format_transcript_lines(
                 spans.push(Span::styled(err_detail.trim().to_string(), Style::default().fg(theme.error)));
             } else {
                 spans.push(Span::styled(rest_trimmed.to_string(), Style::default().fg(theme.quiet)));
+            }
+            lines.push(Line::from(spans));
+        } else if line.trim_start().starts_with("│ ") || line.trim_start() == "│" {
+            let trimmed = line.trim_start();
+            let indent_len = line.len() - trimmed.len();
+            let indent = &line[..indent_len];
+            let rest = if trimmed == "│" { "" } else { &trimmed["│ ".len()..] };
+            let mut spans = vec![
+                Span::styled(format!("{indent}│ "), Style::default().fg(theme.dim)),
+            ];
+
+            if let Some(item) = rest.strip_prefix("✔ ") {
+                spans.push(Span::styled("✔ ", Style::default().fg(theme.dim)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+            } else if let Some(item) = rest.strip_prefix("[✔] ") {
+                spans.push(Span::styled("[✔] ", Style::default().fg(theme.dim)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+            } else if let Some(item) = rest.strip_prefix("[✔]") {
+                spans.push(Span::styled("[✔]", Style::default().fg(theme.dim)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+            } else if let Some(item) = rest.strip_prefix("• ") {
+                spans.push(Span::styled("• ", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+            } else if let Some(item) = rest.strip_prefix("[•] ") {
+                spans.push(Span::styled("[•] ", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+            } else if let Some(item) = rest.strip_prefix("[•]") {
+                spans.push(Span::styled("[•]", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+            } else if let Some(item) = rest.strip_prefix("□ ") {
+                spans.push(Span::styled("□ ", Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+            } else if let Some(item) = rest.strip_prefix("[ ] ") {
+                spans.push(Span::styled("[ ] ", Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+            } else if let Some(item) = rest.strip_prefix("[ ]") {
+                spans.push(Span::styled("[ ]", Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+            } else if rest.contains("✔ ") || rest.contains("[✔]") {
+                spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.dim)));
+            } else if rest.contains("• ") || rest.contains("[•]") {
+                spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+            } else if rest.contains("□ ") || rest.contains("[ ]") {
+                spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.quiet)));
+            } else {
+                spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.quiet)));
+            }
+            lines.push(Line::from(spans));
+        } else if line.trim_start().starts_with("✔ ")
+            || line.trim_start().starts_with("[✔]")
+            || line.trim_start().starts_with("[•]")
+            || line.trim_start().starts_with("□ ")
+            || line.trim_start().starts_with("[ ]")
+        {
+            let trimmed = line.trim_start();
+            let indent_len = line.len() - trimmed.len();
+            let indent = &line[..indent_len];
+            let mut spans = if indent.is_empty() {
+                Vec::new()
+            } else {
+                vec![Span::raw(indent.to_string())]
+            };
+            if let Some(item) = trimmed.strip_prefix("✔ ") {
+                spans.push(Span::styled("✔ ", Style::default().fg(theme.dim)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+            } else if let Some(item) = trimmed.strip_prefix("[✔] ") {
+                spans.push(Span::styled("[✔] ", Style::default().fg(theme.dim)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+            } else if let Some(item) = trimmed.strip_prefix("[✔]") {
+                spans.push(Span::styled("[✔]", Style::default().fg(theme.dim)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.dim)));
+            } else if let Some(item) = trimmed.strip_prefix("[•] ") {
+                spans.push(Span::styled("[•] ", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+            } else if let Some(item) = trimmed.strip_prefix("[•]") {
+                spans.push(Span::styled("[•]", Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)));
+            } else if let Some(item) = trimmed.strip_prefix("□ ") {
+                spans.push(Span::styled("□ ", Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+            } else if let Some(item) = trimmed.strip_prefix("[ ] ") {
+                spans.push(Span::styled("[ ] ", Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+            } else if let Some(item) = trimmed.strip_prefix("[ ]") {
+                spans.push(Span::styled("[ ]", Style::default().fg(theme.quiet)));
+                spans.push(Span::styled(item.to_string(), Style::default().fg(theme.quiet)));
+            } else {
+                spans.push(Span::styled(trimmed.to_string(), Style::default().fg(theme.quiet)));
             }
             lines.push(Line::from(spans));
         } else if (line.starts_with(' ') || line.starts_with('\t'))
@@ -927,5 +1032,84 @@ mod tests {
         assert_eq!(lines[1].spans[1].content, "Second item with ");
         assert_eq!(lines[1].spans[2].content, "code");
         assert_eq!(lines[1].spans[2].style.fg, Some(theme.teal));
+    }
+
+    #[test]
+    fn test_format_transcript_visual_checklist_plan() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+
+        let transcript = "\
+⬢ Updated Plan
+  │ ✔ 1. Selesai langkah pertama
+  │ • 2. Sedang menjalankan langkah kedua
+  │ □ 3. Langkah ketiga pending
+  └ Plan updated: 3 steps";
+
+        let lines = format_transcript_lines(transcript, &theme, mode_color);
+        assert_eq!(lines.len(), 5);
+
+        // Header: ⬢ Updated Plan
+        assert_eq!(lines[0].spans[0].content, "⬢ ");
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.success));
+        assert_eq!(lines[0].spans[1].content, "Updated Plan");
+
+        // Line 1: completed item with ✔
+        assert_eq!(lines[1].spans[0].content, "  │ ");
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[1].spans[1].content, "✔ ");
+        assert_eq!(lines[1].spans[1].style.fg, Some(theme.dim));
+        assert_eq!(lines[1].spans[2].content, "1. Selesai langkah pertama");
+        assert_eq!(lines[1].spans[2].style.fg, Some(theme.dim));
+
+        // Line 2: in_progress item with •
+        assert_eq!(lines[2].spans[0].content, "  │ ");
+        assert_eq!(lines[2].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[2].spans[1].content, "• ");
+        assert_eq!(lines[2].spans[1].style.fg, Some(theme.teal));
+        assert!(lines[2].spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(lines[2].spans[2].content, "2. Sedang menjalankan langkah kedua");
+        assert_eq!(lines[2].spans[2].style.fg, Some(theme.teal));
+        assert!(lines[2].spans[2].style.add_modifier.contains(Modifier::BOLD));
+
+        // Line 3: pending item with □
+        assert_eq!(lines[3].spans[0].content, "  │ ");
+        assert_eq!(lines[3].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[3].spans[1].content, "□ ");
+        assert_eq!(lines[3].spans[1].style.fg, Some(theme.quiet));
+        assert_eq!(lines[3].spans[2].content, "3. Langkah ketiga pending");
+        assert_eq!(lines[3].spans[2].style.fg, Some(theme.quiet));
+
+        // Line 4: branch footer
+        assert_eq!(lines[4].spans[0].content, "  └ ");
+        assert_eq!(lines[4].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[4].spans[1].content, "Plan updated: 3 steps");
+        assert_eq!(lines[4].spans[1].style.fg, Some(theme.quiet));
+    }
+
+    #[test]
+    fn test_format_transcript_checklist_bracket_markers() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+
+        let transcript = "  │ [✔] 1. Task A\n  │ [•] 2. Task B\n  │ [ ] 3. Task C";
+
+        let lines = format_transcript_lines(transcript, &theme, mode_color);
+        assert_eq!(lines.len(), 3);
+
+        assert_eq!(lines[0].spans[0].content, "  │ ");
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[0].spans[1].content, "[✔] ");
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme.dim));
+
+        assert_eq!(lines[1].spans[0].content, "  │ ");
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[1].spans[1].content, "[•] ");
+        assert_eq!(lines[1].spans[1].style.fg, Some(theme.teal));
+        assert!(lines[1].spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(lines[2].spans[0].content, "  │ ");
+        assert_eq!(lines[2].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[2].spans[1].content, "[ ] ");
+        assert_eq!(lines[2].spans[1].style.fg, Some(theme.quiet));
     }
 }

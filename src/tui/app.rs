@@ -203,6 +203,20 @@ pub fn tool_target_and_verbs(name: &str, args: Option<&serde_json::Value>) -> (&
         ("question", Some(a)) => {
             a.get("question").and_then(|q| q.as_str()).unwrap_or("").to_string()
         }
+        ("update_plan", Some(a)) => {
+            if let Some(exp) = a
+                .get("explanation")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                exp.to_string()
+            } else if let Some(plan) = a.get("plan").and_then(|v| v.as_array()) {
+                format!("{} steps", plan.len())
+            } else {
+                String::new()
+            }
+        }
         ("glob_search", Some(a)) => {
             a.get("pattern").and_then(|p| p.as_str()).unwrap_or("").to_string()
         }
@@ -211,6 +225,15 @@ pub fn tool_target_and_verbs(name: &str, args: Option<&serde_json::Value>) -> (&
         }
         ("list_dir", Some(a)) => {
             a.get("path").and_then(|p| p.as_str()).unwrap_or(".").to_string()
+        }
+        ("webfetch", Some(a)) => {
+            a.get("url").and_then(|p| p.as_str()).unwrap_or("").to_string()
+        }
+        ("websearch", Some(a)) => {
+            a.get("query").and_then(|p| p.as_str()).unwrap_or("").to_string()
+        }
+        ("skill", Some(a)) => {
+            a.get("name").and_then(|p| p.as_str()).unwrap_or("").to_string()
         }
         (_, Some(a)) => {
             if let Some(s) = a
@@ -237,6 +260,10 @@ pub fn tool_target_and_verbs(name: &str, args: Option<&serde_json::Value>) -> (&
         "grep_search" => ("Grep", "Running grep_search", desc),
         "bash" => ("Ran", "Running", desc),
         "question" => ("Ask", "Asking", desc),
+        "update_plan" => ("Updated Plan", "Updating Plan", desc),
+        "webfetch" => ("Fetched", "Fetching", desc),
+        "websearch" => ("Searched", "Searching", desc),
+        "skill" => ("Loaded skill", "Loading skill", desc),
         _ => ("Tool", "Running", desc),
     }
 }
@@ -290,6 +317,46 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
             }
         }
         "question" => "answered".to_string(),
+        "update_plan" => {
+            if !output.trim().is_empty() {
+                output.trim().to_string()
+            } else {
+                "Plan updated".to_string()
+            }
+        }
+        "webfetch" => {
+            let count = output.lines().count();
+            if count == 1 {
+                "1 line".to_string()
+            } else {
+                format!("{count} lines")
+            }
+        }
+        "websearch" => {
+            let count = output
+                .lines()
+                .filter(|l| {
+                    let trimmed = l.trim_start();
+                    trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
+                        && trimmed.contains(". ")
+                })
+                .count();
+            if count == 0 {
+                if output.contains("0 results")
+                    || output.contains("No search results")
+                    || output.contains("No results")
+                {
+                    "0 results".to_string()
+                } else {
+                    "succeeded".to_string()
+                }
+            } else if count == 1 {
+                "1 result".to_string()
+            } else {
+                format!("{count} results")
+            }
+        }
+        "skill" => "skill loaded successfully".to_string(),
         _ => {
             let count = output.lines().count();
             if count <= 1 && output.trim().len() < 60 && !output.trim().is_empty() {
@@ -383,6 +450,8 @@ pub struct App {
     /// Saved draft when user was typing and started navigating history with Up arrow.
     draft_prompt: String,
     active_tool: Option<ActiveToolInfo>,
+    /// Snapshot of latest task plan: list of (step, status).
+    pub current_plan: Vec<(String, String)>,
 }
 
 /// View state isolated per session: switching sessions must not reset the
@@ -396,6 +465,7 @@ pub struct ClientSessionState {
     pub status: ConversationStatus,
     pub active_generation_id: Option<i64>,
     pub loading: bool,
+    pub current_plan: Vec<(String, String)>,
 }
 
 impl Default for App {
@@ -452,6 +522,7 @@ impl App {
             history_index: None,
             draft_prompt: String::new(),
             active_tool: None,
+            current_plan: Vec::new(),
         }
     }
 
@@ -1845,7 +1916,107 @@ impl App {
                         } else {
                             format_tool_success_detail(name, output)
                         };
+                        if name == "update_plan" {
+                            let parsed_args_holder: Option<serde_json::Value> = match args {
+                                Some(serde_json::Value::String(s)) => serde_json::from_str(s).ok(),
+                                Some(v @ serde_json::Value::Object(_)) => Some(v.clone()),
+                                _ => None,
+                            };
+                            let args_ref = parsed_args_holder.as_ref().or(args);
 
+                            let explanation = args_ref
+                                .and_then(|a| a.get("explanation"))
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(ToString::to_string);
+
+                            let plan_items: Vec<(String, String)> = args_ref
+                                .and_then(|a| a.get("plan"))
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|item| {
+                                            let obj = item.as_object()?;
+                                            let step = obj
+                                                .get("step")
+                                                .or_else(|| obj.get("content"))
+                                                .or_else(|| obj.get("title"))
+                                                .and_then(|v| v.as_str())?
+                                                .trim();
+                                            if step.is_empty() {
+                                                return None;
+                                            }
+                                            let clean_step = if let Some((num, rest)) = step.split_once(". ") {
+                                                if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                                                    rest.trim()
+                                                } else {
+                                                    step
+                                                }
+                                            } else {
+                                                step
+                                            };
+
+                                            let status = obj
+                                                .get("status")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("pending")
+                                                .trim()
+                                                .to_ascii_lowercase();
+                                            let norm_status = match status.as_str() {
+                                                "todo" | "open" | "pending" | "not_started" | "not-started" => "pending",
+                                                "in_progress" | "in-progress" | "in progress" | "doing" | "active" => "in_progress",
+                                                "done" | "completed" | "complete" => "completed",
+                                                other => other,
+                                            };
+                                            Some((clean_step.to_string(), norm_status.to_string()))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+
+                            if success {
+                                self.current_plan = plan_items.clone();
+                            }
+
+                            let header = "⬢ Updated Plan";
+                            let branch = if !success {
+                                let err_line = output.lines().next().unwrap_or("error").trim();
+                                let cleaned = err_line
+                                    .strip_prefix(&format!("Error executing {name}: "))
+                                    .unwrap_or(err_line);
+                                format!("  └ failed: {cleaned}")
+                            } else if !plan_items.is_empty() {
+                                format!("  └ Plan updated: {} steps", plan_items.len())
+                            } else {
+                                format!("  └ {detail}")
+                            };
+
+                            let mut snippet = String::new();
+                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                snippet.push('\n');
+                            }
+                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                                snippet.push('\n');
+                            }
+                            snippet.push_str(header);
+                            snippet.push('\n');
+                            if let Some(exp) = &explanation {
+                                snippet.push_str(&format!("  │ {exp}\n"));
+                            }
+                            for (i, (step, status)) in plan_items.iter().enumerate() {
+                                let marker = match status.as_str() {
+                                    "completed" => "✔",
+                                    "in_progress" => "•",
+                                    _ => "□",
+                                };
+                                snippet.push_str(&format!("  │ {marker} {}. {step}\n", i + 1));
+                            }
+                            snippet.push_str(&branch);
+                            snippet.push_str("\n\n");
+                            self.transcript.push_str(&snippet);
+                            self.truncate_transcript();
+                        } else {
                         let diff_info = if success && name == "edit_file" {
                             let old_str = args
                                 .and_then(|a| a.get("old_string"))
@@ -1910,6 +2081,7 @@ impl App {
                         snippet.push_str("\n\n");
                         self.transcript.push_str(&snippet);
                         self.truncate_transcript();
+                        }
                     }
                 }
                 "generation_finished" => {
@@ -1979,6 +2151,7 @@ impl App {
         state.input_draft = std::mem::take(&mut self.prompt);
         state.scroll = self.chat_scroll;
         state.status = self.status;
+        state.current_plan = self.current_plan.clone();
     }
 
     /// Restore the target session's state into the live view fields.
@@ -1988,6 +2161,7 @@ impl App {
         self.prompt = std::mem::take(&mut state.input_draft);
         self.chat_scroll = state.scroll;
         self.status = state.status;
+        self.current_plan = state.current_plan.clone();
         self.metrics = None;
         self.diagnostic.clear();
         self.selected_suggestion = 0;
@@ -2110,6 +2284,10 @@ impl App {
     pub fn transcript(&self) -> &str {
         &self.transcript
     }
+    pub fn current_plan(&self) -> &[(String, String)] {
+        &self.current_plan
+    }
+
 
     fn truncate_transcript(&mut self) {
         if self.transcript.len() <= Self::MAX_TRANSCRIPT_BYTES {

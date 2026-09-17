@@ -1637,6 +1637,95 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
 }
 
 #[test]
+fn tool_execution_update_plan_renders_checklist_and_tracks_plan() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+    let payload_args = serde_json::json!({
+        "explanation": "Refactor architecture",
+        "plan": [
+            {"step": "Selesai langkah pertama", "status": "completed"},
+            {"step": "Sedang menjalankan langkah kedua", "status": "in_progress"},
+            {"step": "Langkah ketiga pending", "status": "pending"}
+        ]
+    });
+
+    // 1. Tool starts executing
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".to_string(),
+        payload_json: serde_json::json!({
+            "name": "update_plan",
+            "arguments": payload_args
+        }).to_string(),
+    }).unwrap();
+    app.poll_runtime();
+
+    assert!(app.active_tool().is_some());
+    let active = app.active_tool().unwrap();
+    assert_eq!(active.name, "update_plan");
+    assert_eq!(active.desc, "Refactor architecture");
+
+    // 2. Tool finishes execution
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "update_plan",
+            "arguments": payload_args,
+            "success": true,
+            "output": "Plan updated: 3 steps (1 completed, 1 in progress, 1 pending)"
+        }).to_string(),
+    }).unwrap();
+    app.poll_runtime();
+    assert!(app.active_tool().is_none());
+
+    // Verify current_plan snapshot on App
+    let plan = app.current_plan();
+    assert_eq!(plan.len(), 3);
+    assert_eq!(plan[0], ("Selesai langkah pertama".to_string(), "completed".to_string()));
+    assert_eq!(plan[1], ("Sedang menjalankan langkah kedua".to_string(), "in_progress".to_string()));
+    assert_eq!(plan[2], ("Langkah ketiga pending".to_string(), "pending".to_string()));
+
+    // Verify transcript format:
+    // ⬢ Updated Plan
+    //   │ Refactor architecture
+    //   │ ✔ 1. Selesai langkah pertama
+    //   │ • 2. Sedang menjalankan langkah kedua
+    //   │ □ 3. Langkah ketiga pending
+    //   └ Plan updated: 3 steps
+    let transcript = app.transcript();
+    assert!(transcript.contains("⬢ Updated Plan"));
+    assert!(transcript.contains("│ Refactor architecture"));
+    assert!(transcript.contains("│ ✔ 1. Selesai langkah pertama"));
+    assert!(transcript.contains("│ • 2. Sedang menjalankan langkah kedua"));
+    assert!(transcript.contains("│ □ 3. Langkah ketiga pending"));
+    assert!(transcript.contains("└ Plan updated: 3 steps"));
+
+    // 3. Render in terminal
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Updated Plan"));
+    assert!(text.contains("1. Selesai langkah pertama"));
+    assert!(text.contains("2. Sedang menjalankan langkah kedua"));
+    assert!(text.contains("3. Langkah ketiga pending"));
+    assert!(text.contains("Plan updated: 3 steps"));
+}
+
+#[test]
 fn tool_failure_formats_cleanly_with_error_branch() {
     let mut app = App::default();
     let (tx, rx) = std::sync::mpsc::channel();

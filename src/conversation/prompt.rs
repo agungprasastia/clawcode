@@ -166,14 +166,14 @@ Keep responses concise, clear, and direct."#.to_string()
             Mode::Plan => r#"# MODE: PLAN (Read-Only Exploration & Planning)
 You are currently operating in PLAN mode.
 - You CANNOT modify or write files, and you CANNOT execute destructive commands.
-- You have read-only tools: `read_file`, `list_dir`, `glob_search`, `grep_search`.
+- You have read-only tools: `read_file`, `list_dir`, `glob_search`, `grep_search`, `webfetch`, `websearch`, `skill`, `question`, `update_plan`.
 - Investigate the codebase thoroughly: search for symbols, read implementations, trace dependencies.
 - Synthesize your findings into a clear, actionable plan.
 - If changes to files or destructive shell commands are needed, instruct the user to press Tab to switch to BUILD mode."#.to_string(),
             Mode::Build => r#"# MODE: BUILD (Execution & Implementation)
 You are currently operating in BUILD mode.
 - You have full permission to make code changes and run commands to complete the task.
-- Available tools include: `read_file`, `write_file`, `edit_file`, `list_dir`, `glob_search`, `grep_search`, `bash`.
+- Available tools include: `read_file`, `write_file`, `edit_file`, `list_dir`, `glob_search`, `grep_search`, `bash`, `webfetch`, `websearch`, `skill`, `question`, `update_plan`.
 - ALWAYS read files before editing them to understand context and match existing formatting.
 - Make minimal, surgical edits. Do not refactor unrelated code.
 - Prefer `edit_file` with precise string replacement over full file rewrites.
@@ -187,7 +187,8 @@ You are currently operating in BUILD mode.
 - Use the model's native function/tool calling mechanism.
 - Never output speculative diffs or hypothetical file edits in raw text when an action is requested — call the appropriate tool directly.
 - Inspect files thoroughly using `read_file` or search tools before applying edits.
-- When referencing code in responses, use `file_path:line_number` format."#.to_string()
+- When referencing code in responses, use `file_path:line_number` format.
+- Call `update_plan` before starting multi-step tasks and as milestones are reached to update the visual checklist."#.to_string()
     }
 
     fn resolve_local_rules(&self) -> Option<(PathBuf, String)> {

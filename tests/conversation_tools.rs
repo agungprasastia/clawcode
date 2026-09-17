@@ -164,7 +164,7 @@ fn tool_layer_enforces_read_and_mutation_bounds() {
 #[test]
 fn test_coding_tools_schemas_validity() {
     let schemas = clawcode::conversation::tools::coding_tools_schemas();
-    assert_eq!(schemas.len(), 8);
+    assert_eq!(schemas.len(), 12);
     let names: Vec<&str> = schemas
         .iter()
         .filter_map(|s| s.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
@@ -177,6 +177,99 @@ fn test_coding_tools_schemas_validity() {
     assert!(names.contains(&"grep_search"));
     assert!(names.contains(&"bash"));
     assert!(names.contains(&"question"));
+    assert!(names.contains(&"update_plan"));
+    assert!(names.contains(&"webfetch"));
+    assert!(names.contains(&"websearch"));
+    assert!(names.contains(&"skill"));
+}
+#[test]
+fn test_execute_tool_update_plan() {
+    let (_root, workspace) = workspace("update-plan");
+
+    // 1. Valid call with 3 steps and mixed status (todo, doing, done)
+    let payload = serde_json::json!({
+        "explanation": "Refactor database module",
+        "plan": [
+            {"step": "Step 1: Setup migrations", "status": "done"},
+            {"step": "Step 2: Implement queries", "status": "doing"},
+            {"step": "Step 3: Run regression tests", "status": "todo"}
+        ]
+    });
+
+    let res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "update_plan",
+        &payload.to_string(),
+    );
+    assert!(res.is_ok(), "update_plan failed: {:?}", res);
+    assert_eq!(
+        res.unwrap(),
+        "Plan updated: 3 steps (1 completed, 1 in progress, 1 pending)"
+    );
+
+    // 2. Also allowed in Build mode
+    let res_build = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Build,
+        "update_plan",
+        &payload.to_string(),
+    );
+    assert!(res_build.is_ok());
+    assert_eq!(
+        res_build.unwrap(),
+        "Plan updated: 3 steps (1 completed, 1 in progress, 1 pending)"
+    );
+
+    // 3. Alternative status representations: completed, in_progress, pending
+    let payload_canonical = serde_json::json!({
+        "plan": [
+            {"step": "Task A", "status": "completed"},
+            {"step": "Task B", "status": "in_progress"},
+            {"step": "Task C", "status": "pending"}
+        ]
+    });
+    let res_canonical = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "update_plan",
+        &payload_canonical.to_string(),
+    );
+    assert!(res_canonical.is_ok());
+    assert_eq!(
+        res_canonical.unwrap(),
+        "Plan updated: 3 steps (1 completed, 1 in progress, 1 pending)"
+    );
+
+    // 4. Validation: missing plan
+    let res_missing_plan = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "update_plan",
+        r#"{"explanation": "no plan"}"#,
+    );
+    assert!(res_missing_plan.is_err());
+    assert!(res_missing_plan.unwrap_err().contains("Missing required argument 'plan'"));
+
+    // 5. Validation: empty plan array
+    let res_empty_plan = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "update_plan",
+        r#"{"plan": []}"#,
+    );
+    assert!(res_empty_plan.is_err());
+    assert!(res_empty_plan.unwrap_err().contains("at least one step"));
+
+    // 6. Validation: invalid status
+    let res_invalid_status = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "update_plan",
+        r#"{"plan": [{"step": "Task", "status": "unknown_status"}]}"#,
+    );
+    assert!(res_invalid_status.is_err());
+    assert!(res_invalid_status.unwrap_err().contains("Allowed status"));
 }
 
 #[test]
@@ -280,4 +373,448 @@ fn test_execute_tool_bash() {
     );
     assert!(res.is_ok(), "bash execution failed: {:?}", res);
     assert!(res.unwrap().contains("clawcode_agent_test"));
+}
+
+#[test]
+fn test_read_file_inline_selectors_and_formatting() {
+    let (root, workspace) = workspace("read-selectors");
+
+    let file_content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+    fs::write(root.join("data.txt"), file_content).unwrap();
+
+    // 1. Membaca dengan range path:2-4
+    let res_range = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "read_file",
+        r#"{"path": "data.txt:2-4"}"#,
+    )
+    .unwrap();
+    assert!(res_range.contains("[data.txt#"));
+    assert!(res_range.contains("(lines 2..4 of 5)"));
+    assert!(res_range.contains("  2: line 2"));
+    assert!(res_range.contains("  3: line 3"));
+    assert!(res_range.contains("  4: line 4"));
+    assert!(!res_range.contains("line 1"));
+    assert!(!res_range.contains("line 5"));
+
+    // 2. Membaca dengan path:3+2
+    let res_plus = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "read_file",
+        r#"{"path": "data.txt:3+2"}"#,
+    )
+    .unwrap();
+    assert!(res_plus.contains("(lines 3..4 of 5)"));
+    assert!(res_plus.contains("  3: line 3"));
+    assert!(res_plus.contains("  4: line 4"));
+    assert!(!res_plus.contains("line 1"));
+    assert!(!res_plus.contains("line 2"));
+    assert!(!res_plus.contains("line 5"));
+
+    // 3. Membaca dengan path:-2 (last 2 lines)
+    let res_last = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "read_file",
+        r#"{"path": "data.txt:-2"}"#,
+    )
+    .unwrap();
+    assert!(res_last.contains("(lines 4..5 of 5)"));
+    assert!(res_last.contains("  4: line 4"));
+    assert!(res_last.contains("  5: line 5"));
+    assert!(!res_last.contains("line 1"));
+    assert!(!res_last.contains("line 2"));
+    assert!(!res_last.contains("line 3"));
+
+    // 4. Membaca dengan path:raw
+    let res_raw = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "read_file",
+        r#"{"path": "data.txt:raw"}"#,
+    )
+    .unwrap();
+    assert_eq!(res_raw, "line 1\nline 2\nline 3\nline 4\nline 5\n");
+    assert!(!res_raw.contains('['));
+    assert!(!res_raw.contains(':'));
+
+    // 5. Membaca file dengan path biasa + offset/limit
+    let res_offset_limit = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "read_file",
+        r#"{"path": "data.txt", "offset": 2, "limit": 2}"#,
+    )
+    .unwrap();
+    assert!(res_offset_limit.contains("(lines 2..3 of 5)"));
+    assert!(res_offset_limit.contains("  2: line 2"));
+    assert!(res_offset_limit.contains("  3: line 3"));
+    assert!(!res_offset_limit.contains("line 1"));
+    assert!(!res_offset_limit.contains("line 4"));
+    assert!(!res_offset_limit.contains("line 5"));
+
+    // 6. Windows drive letter selector test (C:\test\file.rs:10-20)
+    let parsed_win = clawcode::conversation::tools::parse_read_path(r"C:\test\file.rs:10-20");
+    assert_eq!(parsed_win.path, r"C:\test\file.rs");
+    assert_eq!(
+        parsed_win.selector,
+        Some(clawcode::conversation::tools::LineSelector::Range(10, 20))
+    );
+    assert!(!parsed_win.is_raw);
+
+    let abs_file = root.join("data.txt");
+    let abs_str = abs_file.to_str().unwrap();
+    if abs_str.len() >= 2 && abs_str.as_bytes()[1] == b':' {
+        let path_arg = format!("{abs_str}:1-2");
+        let arg_json = serde_json::json!({ "path": path_arg }).to_string();
+        let res_win_exec = clawcode::conversation::tools::execute_tool(
+            &workspace,
+            Mode::Plan,
+            "read_file",
+            &arg_json,
+        );
+        assert!(res_win_exec.is_ok(), "Windows drive letter exec failed: {:?}", res_win_exec);
+        let out = res_win_exec.unwrap();
+        assert!(out.contains("(lines 1..2 of 5)"));
+        assert!(out.contains("  1: line 1"));
+        assert!(out.contains("  2: line 2"));
+    }
+}
+
+#[test]
+fn test_webfetch_parameter_validation() {
+    let (_root, workspace) = workspace("webfetch-val");
+
+    // 1. Missing url
+    let res_missing = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "webfetch",
+        r#"{}"#,
+    );
+    assert!(res_missing.is_err());
+    assert!(res_missing.unwrap_err().contains("Missing required argument 'url'"));
+
+    // 2. Invalid scheme
+    let res_ftp = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "webfetch",
+        r#"{"url": "ftp://files.example.com/data.txt"}"#,
+    );
+    assert!(res_ftp.is_err());
+    assert!(res_ftp.unwrap_err().contains("URL must begin with 'http://' or 'https://'"));
+
+    let res_relative = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "webfetch",
+        r#"{"url": "example.com/test"}"#,
+    );
+    assert!(res_relative.is_err());
+    assert!(res_relative.unwrap_err().contains("URL must begin with 'http://' or 'https://'"));
+}
+
+#[test]
+fn test_websearch_parameter_validation() {
+    let (_root, workspace) = workspace("websearch-val");
+
+    // 1. Missing query
+    let res_missing = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "websearch",
+        r#"{}"#,
+    );
+    assert!(res_missing.is_err());
+    assert!(res_missing.unwrap_err().contains("Missing required argument 'query'"));
+
+    // 2. Empty query
+    let res_empty = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "websearch",
+        r#"{"query": ""}"#,
+    );
+    assert!(res_empty.is_err());
+    assert!(res_empty.unwrap_err().contains("Search query cannot be empty"));
+
+    // 3. Whitespace query
+    let res_spaces = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "websearch",
+        r#"{"query": "   "}"#,
+    );
+    assert!(res_spaces.is_err());
+    assert!(res_spaces.unwrap_err().contains("Search query cannot be empty"));
+}
+
+#[test]
+fn test_skill_tool_execution_and_listing() {
+    let (root, workspace) = workspace("skill-tool");
+
+    // 1. Missing name parameter
+    let res_missing = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "skill",
+        r#"{}"#,
+    );
+    assert!(res_missing.is_err());
+    assert!(res_missing.unwrap_err().contains("Missing required argument 'name'"));
+
+    // 2. Empty name parameter
+    let res_empty = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "skill",
+        r#"{"name": "   "}"#,
+    );
+    assert!(res_empty.is_err());
+    assert!(res_empty.unwrap_err().contains("Missing required argument 'name'"));
+
+    // 3. Create workspace skills
+    let skills_dir = root.join("skills");
+    fs::create_dir_all(skills_dir.join("best-practices")).unwrap();
+    fs::write(
+        skills_dir.join("best-practices").join("SKILL.md"),
+        "# Best Practices\nWrite modular Rust code with rigorous testing.",
+    )
+    .unwrap();
+
+    fs::write(
+        skills_dir.join("testing.md"),
+        "# Testing Skill\nDeterministic tests first.",
+    )
+    .unwrap();
+
+    // 4. Load skill from directory (./skills/best-practices/SKILL.md)
+    let res_dir_skill = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "skill",
+        r#"{"name": "best-practices"}"#,
+    )
+    .unwrap();
+    assert!(res_dir_skill.contains("<skill_content name=\"best-practices\">"));
+    assert!(res_dir_skill.contains("Write modular Rust code with rigorous testing."));
+    assert!(res_dir_skill.contains("</skill_content>"));
+
+    // 5. Load skill from markdown file (./skills/testing.md)
+    let res_file_skill = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "skill",
+        r#"{"name": "testing"}"#,
+    )
+    .unwrap();
+    assert!(res_file_skill.contains("<skill_content name=\"testing\">"));
+    assert!(res_file_skill.contains("Deterministic tests first."));
+    assert!(res_file_skill.contains("</skill_content>"));
+
+    // 6. Non-existent skill returns available skills list
+    let res_not_found = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "skill",
+        r#"{"name": "non-existent-skill"}"#,
+    );
+    assert!(res_not_found.is_err());
+    let err_msg = res_not_found.unwrap_err();
+    assert!(err_msg.contains("Skill \"non-existent-skill\" not found. Available skills:"));
+    assert!(err_msg.contains("best-practices"));
+    assert!(err_msg.contains("testing"));
+}
+
+#[test]
+fn test_webfetch_mock_http_and_offline() {
+    let (_root, workspace) = workspace("webfetch-mock");
+
+    // 1. Mock HTTP server using std::net::TcpListener
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server_thread = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let html = r#"
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Mock Doc</title>
+                    <style>h1 { color: red; }</style>
+                    <script>console.log("drop me");</script>
+                </head>
+                <body>
+                    <h1>Rust Documentation</h1>
+                    <p>Welcome to &quot;safe&quot; &amp; fast systems programming.</p>
+                    <ul>
+                        <li>Memory safety without GC</li>
+                        <li>Zero-cost abstractions</li>
+                    </ul>
+                </body>
+                </html>
+            "#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                html.len(),
+                html
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let fetch_url = format!("http://127.0.0.1:{port}/docs");
+    let args = serde_json::json!({ "url": fetch_url }).to_string();
+    let res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "webfetch",
+        &args,
+    )
+    .unwrap();
+
+    server_thread.join().unwrap();
+
+    assert!(!res.contains("console.log"));
+    assert!(!res.contains("color: red"));
+    assert!(res.contains("Rust Documentation"));
+    assert!(res.contains("Welcome to \"safe\" & fast systems programming."));
+    assert!(res.contains("- Memory safety without GC"));
+    assert!(res.contains("- Zero-cost abstractions"));
+
+    // 2. Offline / unreachable connection error
+    let offline_args = serde_json::json!({ "url": "http://127.0.0.1:1/offline" }).to_string();
+    let offline_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "webfetch",
+        &offline_args,
+    );
+    assert!(offline_res.is_err());
+    let err_msg = offline_res.unwrap_err();
+    assert!(err_msg.contains("Webfetch failed for 'http://127.0.0.1:1/offline'"));
+}
+
+#[test]
+fn test_websearch_mock_http_and_offline() {
+    let (_root, workspace) = workspace("websearch-mock");
+
+    // 1. Mock HTTP server serving DuckDuckGo HTML search results
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server_thread = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let html = r##"
+                <div class="result results_links results_links_deep web-result">
+                  <div class="links_main links_deep result__body">
+                    <h2 class="result__title">
+                      <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fcrates.io%2Fcrates%2Fureq&rut=1">ureq - crates.io</a>
+                    </h2>
+                    <a class="result__snippet" href="#">A simple, safe HTTP client. Minimal dependencies.</a>
+                  </div>
+                </div>
+            "##;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                html.len(),
+                html
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    // Point DDG search URL to mock server
+    let mock_ddg_url = format!("http://127.0.0.1:{port}/html/?q=");
+    unsafe {
+        std::env::set_var("CLAWCODE_DDG_SEARCH_URL", &mock_ddg_url);
+    }
+
+    let res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "websearch",
+        r#"{"query": "rust ureq"}"#,
+    )
+    .unwrap();
+
+    server_thread.join().unwrap();
+
+    assert!(res.contains("Search results for \"rust ureq\""), "actual res was: {res}");
+    assert!(res.contains("ureq - crates.io"));
+    assert!(res.contains("https://crates.io/crates/ureq"));
+    assert!(res.contains("A simple, safe HTTP client. Minimal dependencies."));
+
+    // 2. Offline / unreachable fallback
+    unsafe {
+        std::env::set_var("CLAWCODE_DDG_SEARCH_URL", "http://127.0.0.1:1/html/?q=");
+        std::env::set_var("CLAWCODE_DDG_API_URL", "http://127.0.0.1:1/?q=");
+    }
+
+    let offline_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "websearch",
+        r#"{"query": "offline query"}"#,
+    );
+    assert!(offline_res.is_err());
+    let err_str = offline_res.unwrap_err();
+    assert!(err_str.contains("Web search failed: network unreachable"));
+
+    unsafe {
+        std::env::remove_var("CLAWCODE_DDG_SEARCH_URL");
+        std::env::remove_var("CLAWCODE_DDG_API_URL");
+    }
+}
+
+#[test]
+fn test_tui_app_web_and_skill_verbs_and_formatting() {
+    use clawcode::tui::app::{format_tool_success_detail, tool_target_and_verbs};
+
+    // 1. tool_target_and_verbs
+    let fetch_args = serde_json::json!({ "url": "https://example.com/docs" });
+    let (verb, active_verb, target) = tool_target_and_verbs("webfetch", Some(&fetch_args));
+    assert_eq!(verb, "Fetched");
+    assert_eq!(active_verb, "Fetching");
+    assert_eq!(target, "https://example.com/docs");
+
+    let search_args = serde_json::json!({ "query": "rust ownership" });
+    let (verb, active_verb, target) = tool_target_and_verbs("websearch", Some(&search_args));
+    assert_eq!(verb, "Searched");
+    assert_eq!(active_verb, "Searching");
+    assert_eq!(target, "rust ownership");
+
+    let skill_args = serde_json::json!({ "name": "best-practices" });
+    let (verb, active_verb, target) = tool_target_and_verbs("skill", Some(&skill_args));
+    assert_eq!(verb, "Loaded skill");
+    assert_eq!(active_verb, "Loading skill");
+    assert_eq!(target, "best-practices");
+
+    // 2. format_tool_success_detail
+    let fetch_detail = format_tool_success_detail("webfetch", "line 1\nline 2\nline 3\n");
+    assert_eq!(fetch_detail, "3 lines");
+
+    let fetch_single = format_tool_success_detail("webfetch", "single line");
+    assert_eq!(fetch_single, "1 line");
+
+    let search_output = "Search results for \"rust\":\n\n1. Result One\n   URL: https://one\n2. Result Two\n   URL: https://two\n";
+    let search_detail = format_tool_success_detail("websearch", search_output);
+    assert_eq!(search_detail, "2 results");
+
+    let search_none = format_tool_success_detail("websearch", "No search results found for query \"foo\".");
+    assert_eq!(search_none, "0 results");
+
+    let skill_detail = format_tool_success_detail("skill", "<skill_content name=\"test\">...</skill_content>");
+    assert_eq!(skill_detail, "skill loaded successfully");
 }
