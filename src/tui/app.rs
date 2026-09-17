@@ -2220,71 +2220,106 @@ impl App {
                             snippet.push_str("\n\n");
                             self.transcript.push_str(&snippet);
                             self.truncate_transcript();
-                        } else {
-                            let diff_info = if success && name == "edit_file" {
-                                let old_str = args
-                                    .and_then(|a| a.get("old_string"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
+                        } else if success && name == "edit_file" {
+                            let old_str = args
+                                .and_then(|a| a.get("old_string"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             let new_str = args
                                 .and_then(|a| a.get("new_string"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
-                            Some(crate::tui::diff::compute_diff(old_str, new_str, 20))
-                        } else if success && name == "write_file" {
-                            args.and_then(|a| a.get("content"))
-                                .and_then(|v| v.as_str())
-                                .map(|content| crate::tui::diff::compute_diff("", content, 20))
-                        } else {
-                            None
-                        };
-
-                        let header = if let Some(diff) = &diff_info {
-                            if target.is_empty() {
-                                format!("⬢ {verb} (+{} -{})", diff.added, diff.removed)
+                            let start_line = output
+                                .split("at line ")
+                                .nth(1)
+                                .and_then(|s| s.split_whitespace().next())
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .unwrap_or(1);
+                            let diff = crate::tui::diff::compute_diff(old_str, new_str, 0);
+                            let side_by_side = crate::tui::diff::compute_side_by_side_diff(
+                                old_str,
+                                new_str,
+                                start_line,
+                                20,
+                            );
+                            let header = if target.is_empty() {
+                                format!("• Edit (+{} -{})", diff.added, diff.removed)
                             } else {
-                                format!("⬢ {verb} {target} (+{} -{})", diff.added, diff.removed)
-                            }
-                        } else if target.is_empty() {
-                            format!("⬢ {verb}")
-                        } else {
-                            format!("⬢ {verb} {target}")
-                        };
-                        let branch = format!("  └ {detail}");
+                                format!("• Edit {target} (+{} -{})", diff.added, diff.removed)
+                            };
+                            let diff_lines_str =
+                                crate::tui::diff::format_side_by_side_diff(&side_by_side, 40);
 
-                        let mut diff_lines_str = String::new();
-                        if let Some(diff) = &diff_info {
-                            for line in &diff.lines {
-                                match line.op {
-                                    crate::tui::diff::DiffOp::Remove => {
-                                        diff_lines_str.push_str(&format!("    - {}\n", line.text));
-                                    }
-                                    crate::tui::diff::DiffOp::Add => {
-                                        diff_lines_str.push_str(&format!("    + {}\n", line.text));
-                                    }
-                                    crate::tui::diff::DiffOp::Same => {
-                                        diff_lines_str.push_str(&format!("      {}\n", line.text));
+                            let mut snippet = String::new();
+                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                snippet.push('\n');
+                            }
+                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                                snippet.push('\n');
+                            }
+                            snippet.push_str(&header);
+                            snippet.push('\n');
+                            if !diff_lines_str.is_empty() {
+                                snippet.push_str(&diff_lines_str);
+                            }
+                            snippet.push('\n');
+                            self.transcript.push_str(&snippet);
+                            self.truncate_transcript();
+                        } else {
+                            let diff_info = if success && name == "write_file" {
+                                args.and_then(|a| a.get("content"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|content| crate::tui::diff::compute_diff("", content, 20))
+                            } else {
+                                None
+                            };
+
+                            let header = if let Some(diff) = &diff_info {
+                                if target.is_empty() {
+                                    format!("⬢ {verb} (+{} -{})", diff.added, diff.removed)
+                                } else {
+                                    format!("⬢ {verb} {target} (+{} -{})", diff.added, diff.removed)
+                                }
+                            } else if target.is_empty() {
+                                format!("⬢ {verb}")
+                            } else {
+                                format!("⬢ {verb} {target}")
+                            };
+                            let branch = format!("  └ {detail}");
+
+                            let mut diff_lines_str = String::new();
+                            if let Some(diff) = &diff_info {
+                                for line in &diff.lines {
+                                    match line.op {
+                                        crate::tui::diff::DiffOp::Remove => {
+                                            diff_lines_str.push_str(&format!("    - {}\n", line.text));
+                                        }
+                                        crate::tui::diff::DiffOp::Add => {
+                                            diff_lines_str.push_str(&format!("    + {}\n", line.text));
+                                        }
+                                        crate::tui::diff::DiffOp::Same => {
+                                            diff_lines_str.push_str(&format!("      {}\n", line.text));
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        let mut snippet = String::new();
-                        if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                            let mut snippet = String::new();
+                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                snippet.push('\n');
+                            }
+                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                                snippet.push('\n');
+                            }
+                            snippet.push_str(&header);
                             snippet.push('\n');
-                        }
-                        if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-                            snippet.push('\n');
-                        }
-                        snippet.push_str(&header);
-                        snippet.push('\n');
-                        if !diff_lines_str.is_empty() {
-                            snippet.push_str(&diff_lines_str);
-                        }
-                        snippet.push_str(&branch);
-                        snippet.push_str("\n\n");
-                        self.transcript.push_str(&snippet);
-                        self.truncate_transcript();
+                            if !diff_lines_str.is_empty() {
+                                snippet.push_str(&diff_lines_str);
+                            }
+                            snippet.push_str(&branch);
+                            snippet.push_str("\n\n");
+                            self.transcript.push_str(&snippet);
+                            self.truncate_transcript();
                         }
                     }
                 }

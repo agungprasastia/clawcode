@@ -762,9 +762,14 @@ pub fn execute_tool(
 
             let old_lines = old_string.lines().count();
             let new_lines = new_string.lines().count();
+            let start_line = if let Some(idx) = content.find(old_string) {
+                content[..idx].lines().count() + 1
+            } else {
+                1
+            };
             Ok(format!(
-                "Successfully edited '{}' (-{old_lines} lines, +{new_lines} lines)",
-                path_str
+                "Successfully edited '{}' at line {} (-{} lines, +{} lines)",
+                path_str, start_line, old_lines, new_lines
             ))
         }
         "list_dir" => {

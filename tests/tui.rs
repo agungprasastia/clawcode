@@ -2304,3 +2304,55 @@ fn test_websearch_visual_card_formatting() {
     let url_span = url_line.unwrap().spans.iter().find(|s| s.content == "https://tokio.rs").unwrap();
     assert_eq!(url_span.style.fg, Some(theme.teal));
 }
+
+#[test]
+fn test_edit_file_opencode_side_by_side_diff_in_transcript() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+    let payload_args = serde_json::json!({
+        "path": "src/main.rs",
+        "old_string": "fn main() {\n    // old\n}",
+        "new_string": "fn main() {\n    println!(\"hello\");\n}",
+    });
+
+    let payload = serde_json::json!({
+        "name": "edit_file",
+        "arguments": payload_args,
+        "success": true,
+        "output": "Successfully edited 'src/main.rs' at line 10 (-3 lines, +3 lines)",
+    });
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executed".to_string(),
+        payload_json: payload.to_string(),
+    })
+    .unwrap();
+
+    app.poll_runtime();
+
+    let transcript = app.transcript();
+    assert!(transcript.contains("• Edit src/main.rs (+1 -1)"));
+    assert!(transcript.contains(" │ "));
+    assert!(transcript.contains("  10   fn main() {"));
+    assert!(transcript.contains("  11 -     // old"));
+    assert!(transcript.contains("  11 +     println!(\"hello\");"));
+    assert!(transcript.contains("  12   }"));
+
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("• Edit src/main.rs"));
+    assert!(text.contains("│"));
+}

@@ -504,6 +504,116 @@ pub fn split_numbered_result(text: &str) -> Option<(&str, &str)> {
     }
 }
 
+fn is_side_by_side_col(col: &str) -> bool {
+    if col.contains('⋯') {
+        return true;
+    }
+    let trimmed = col.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with('-') || trimmed.starts_with('+') {
+        return true;
+    }
+    let first_word = trimmed.split_whitespace().next().unwrap_or("");
+    first_word.chars().all(|c| c.is_ascii_digit()) && !first_word.is_empty()
+}
+
+fn parse_side_by_side_diff_line(line: &str) -> Option<(&str, &str, &str)> {
+    if !line.starts_with("  ") && !line.starts_with('\t') {
+        return None;
+    }
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('│') || trimmed.starts_with('┌') || trimmed.starts_with('└') {
+        return None;
+    }
+    let (left_part, right_col) = line.split_once(" │ ")?;
+    let indent_len = if left_part.starts_with("    ") {
+        4
+    } else {
+        left_part.chars().take_while(|c| *c == ' ').count().min(4)
+    };
+    let indent = &left_part[..indent_len];
+    let left_col = &left_part[indent_len..];
+
+    let left_valid = is_side_by_side_col(left_col);
+    let right_valid = is_side_by_side_col(right_col);
+    if left_valid || right_valid {
+        Some((indent, left_col, right_col))
+    } else {
+        None
+    }
+}
+
+fn render_side_by_side_col(col: &str, theme: &Theme) -> Vec<Span<'static>> {
+    let diff_remove_bg = Color::Rgb(55, 18, 25);
+    let diff_add_bg = Color::Rgb(18, 50, 45);
+
+    if col.trim().is_empty() {
+        return vec![Span::raw(col.to_string())];
+    }
+    if col.contains('⋯') {
+        return vec![Span::styled(col.to_string(), Style::default().fg(theme.dim))];
+    }
+
+    let trimmed = col.trim_start();
+    let first_word = trimmed.split_whitespace().next().unwrap_or("");
+    if first_word.chars().all(|c| c.is_ascii_digit()) && !first_word.is_empty() {
+        let num = first_word;
+        let after_num = &trimmed[first_word.len()..];
+
+        if let Some(content) = after_num.strip_prefix(" - ") {
+            let bg = diff_remove_bg;
+            return vec![
+                Span::styled(format!("{num:>4} "), Style::default().fg(theme.dim).bg(bg)),
+                Span::styled(
+                    "- ",
+                    Style::default().fg(theme.error).bg(bg).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
+            ];
+        } else if let Some(content) = after_num.strip_prefix(" + ") {
+            let bg = diff_add_bg;
+            return vec![
+                Span::styled(format!("{num:>4} "), Style::default().fg(theme.dim).bg(bg)),
+                Span::styled(
+                    "+ ",
+                    Style::default().fg(theme.success).bg(bg).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
+            ];
+        } else if let Some(content) = after_num.strip_prefix("   ").or_else(|| after_num.strip_prefix("  ")) {
+            return vec![
+                Span::styled(format!("{num:>4} "), Style::default().fg(theme.dim)),
+                Span::raw("  "),
+                Span::styled(content.to_string(), Style::default().fg(theme.ink)),
+            ];
+        }
+    } else if let Some(content) = trimmed.strip_prefix("- ") {
+        let bg = diff_remove_bg;
+        return vec![
+            Span::styled("     ", Style::default().bg(bg)),
+            Span::styled(
+                "- ",
+                Style::default().fg(theme.error).bg(bg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
+        ];
+    } else if let Some(content) = trimmed.strip_prefix("+ ") {
+        let bg = diff_add_bg;
+        return vec![
+            Span::styled("     ", Style::default().bg(bg)),
+            Span::styled(
+                "+ ",
+                Style::default().fg(theme.success).bg(bg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
+        ];
+    }
+
+    vec![Span::styled(col.to_string(), Style::default().fg(theme.ink))]
+}
+
 pub fn format_transcript_lines(
     transcript: &str,
     theme: &Theme,
@@ -603,9 +713,17 @@ pub fn format_transcript_lines(
             lines.push(Line::from(vec![
                 Span::styled(format!("{indent}{trimmed}"), Style::default().fg(theme.dim)),
             ]));
-        } else if let Some(rest) = line.strip_prefix("⬢ ") {
+        } else if line.starts_with("⬢ ")
+            || line.starts_with("• Edit")
+            || (line.starts_with("• ") && parse_diff_badge(line.strip_prefix("• ").unwrap_or("")).is_some())
+        {
             in_thought = false;
             in_box = false;
+            let (bullet, rest) = if let Some(r) = line.strip_prefix("⬢ ") {
+                ("⬢ ", r)
+            } else {
+                ("• ", line.strip_prefix("• ").unwrap_or(""))
+            };
             let is_failed = {
                 let mut failed = false;
                 if rest.contains("(exit ") && !rest.contains("(exit 0)") {
@@ -613,7 +731,7 @@ pub fn format_transcript_lines(
                 } else {
                     for next_line in raw_lines.iter().skip(i + 1).take(25) {
                         let trimmed = next_line.trim_start();
-                        if next_line.starts_with("⬢ ") || next_line.is_empty() {
+                        if next_line.starts_with("⬢ ") || next_line.starts_with("• ") || next_line.is_empty() {
                             break;
                         }
                         if trimmed.starts_with("└ failed:") || trimmed.starts_with("failed:") {
@@ -625,9 +743,15 @@ pub fn format_transcript_lines(
                 failed
             };
 
-            let marker_color = if is_failed { theme.error } else { theme.success };
+            let marker_color = if is_failed {
+                theme.error
+            } else if bullet == "• " {
+                theme.teal
+            } else {
+                theme.success
+            };
             let mut spans = vec![
-                Span::styled("⬢ ", Style::default().fg(marker_color).add_modifier(Modifier::BOLD)),
+                Span::styled(bullet.to_string(), Style::default().fg(marker_color).add_modifier(Modifier::BOLD)),
             ];
             let rest_trimmed = rest.trim();
             if let Some((before, add_part, rem_part)) = parse_diff_badge(rest_trimmed) {
@@ -824,6 +948,12 @@ pub fn format_transcript_lines(
             } else {
                 spans.push(Span::styled(trimmed.to_string(), Style::default().fg(theme.quiet)));
             }
+            lines.push(Line::from(spans));
+        } else if let Some((indent, left_col, right_col)) = parse_side_by_side_diff_line(line) {
+            let mut spans = vec![Span::raw(indent.to_string())];
+            spans.extend(render_side_by_side_col(left_col, theme));
+            spans.push(Span::styled(" │ ", Style::default().fg(theme.dim)));
+            spans.extend(render_side_by_side_col(right_col, theme));
             lines.push(Line::from(spans));
         } else if (line.starts_with(' ') || line.starts_with('\t'))
             && (line.trim_start().starts_with("- ") || line.trim_start() == "-")
@@ -1110,6 +1240,58 @@ mod tests {
         assert_eq!(lines[1].spans[0].style.fg, Some(theme.error));
         assert_eq!(lines[2].spans[0].style.fg, Some(theme.success));
         assert_eq!(lines[3].spans[0].content, "  └ ");
+    }
+
+    #[test]
+    fn test_format_transcript_opencode_side_by_side_diff() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+
+        let transcript = concat!(
+            "• Edit database/migrations/2025_12_11_141134_add_date_of_birth_to_users_table.php (+1 -1)\n",
+            "      11   */                                    │   11   */                                   \n",
+            "      15 -         //                            │   15 +         $table->date('dob');         \n"
+        );
+
+        let lines = format_transcript_lines(transcript, &theme, mode_color);
+        assert_eq!(lines.len(), 3);
+
+        // Line 0: Header with bullet • in theme.teal
+        assert_eq!(lines[0].spans[0].content, "• ");
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme.teal));
+        assert_eq!(lines[0].spans[1].content, "Edit");
+        assert_eq!(lines[0].spans[3].content, "database/migrations/2025_12_11_141134_add_date_of_birth_to_users_table.php");
+        let add_span = lines[0].spans.iter().find(|s| s.content == "+1").expect("+1 badge");
+        assert_eq!(add_span.style.fg, Some(theme.success));
+        let rem_span = lines[0].spans.iter().find(|s| s.content == "-1").expect("-1 badge");
+        assert_eq!(rem_span.style.fg, Some(theme.error));
+
+        // Line 1: Context row with dim line numbers and theme.dim separator
+        let sep_span = lines[1].spans.iter().find(|s| s.content == " │ ").expect("separator span");
+        assert_eq!(sep_span.style.fg, Some(theme.dim));
+        assert_eq!(lines[1].spans[1].style.fg, Some(theme.dim)); // num span
+        assert_eq!(lines[1].spans[1].style.bg, None); // normal bg
+
+        // Line 2: Side-by-side diff with red bg on left and green/teal bg on right
+        let diff_remove_bg = Color::Rgb(55, 18, 25);
+        let diff_add_bg = Color::Rgb(18, 50, 45);
+
+        // Left col has line num, minus sign with theme.error, and diff_remove_bg
+        assert_eq!(lines[2].spans[1].style.bg, Some(diff_remove_bg));
+        assert_eq!(lines[2].spans[2].content, "- ");
+        assert_eq!(lines[2].spans[2].style.fg, Some(theme.error));
+        assert_eq!(lines[2].spans[2].style.bg, Some(diff_remove_bg));
+        assert_eq!(lines[2].spans[3].style.bg, Some(diff_remove_bg));
+
+        // Separator
+        assert_eq!(lines[2].spans[4].content, " │ ");
+
+        // Right col has line num, plus sign with theme.success, and diff_add_bg
+        assert_eq!(lines[2].spans[5].style.bg, Some(diff_add_bg));
+        assert_eq!(lines[2].spans[6].content, "+ ");
+        assert_eq!(lines[2].spans[6].style.fg, Some(theme.success));
+        assert_eq!(lines[2].spans[6].style.bg, Some(diff_add_bg));
+        assert_eq!(lines[2].spans[7].style.bg, Some(diff_add_bg));
     }
 
     #[test]
