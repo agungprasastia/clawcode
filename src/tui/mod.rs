@@ -15,11 +15,12 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 pub use app::{
-    App, ConversationMode, ConversationStatus, HomeState, Input, SessionsDialogState, UiEvent,
+    App, ConversationMode, ConversationStatus, HomeState, Input, UiEvent,
     UiEventQueue,
 };
 pub use dialogs::{
-    AgentItem, AgentsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState,
+    AgentItem, AgentsDialogState, ModelsDialogState, SessionsDialogState, StatusDialogState,
+    ThemesDialogState, WhichKeyState,
 };
 pub use render::render;
 pub use theme::{Theme, ThemeKind};

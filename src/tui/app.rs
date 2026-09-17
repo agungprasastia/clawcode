@@ -7,7 +7,10 @@ use crate::provider::FinishReason;
 use crate::provider::TurnMetrics;
 use crate::runtime::{EventBus, RuntimeEvent, client::RuntimeClient};
 
-use super::dialogs::{AgentsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState};
+use super::dialogs::{
+    AgentsDialogState, ModelsDialogState, SessionsDialogState, StatusDialogState,
+    ThemesDialogState, WhichKeyState,
+};
 
 const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 const MAX_IDENTITY_BYTES: usize = 256;
@@ -292,155 +295,6 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelsDialogState {
-    pub items: Vec<crate::provider::ModelInfo>,
-    pub selected: usize,
-    pub filter: String,
-    pub scroll_offset: usize,
-}
-
-impl ModelsDialogState {
-    pub fn new(items: Vec<crate::provider::ModelInfo>, active_model: &str) -> Self {
-        let selected = items.iter().position(|m| m.id == active_model).unwrap_or(0);
-        Self {
-            items,
-            selected,
-            filter: String::new(),
-            scroll_offset: 0,
-        }
-    }
-
-    pub fn filtered_items(&self) -> Vec<&crate::provider::ModelInfo> {
-        if self.filter.is_empty() {
-            self.items.iter().collect()
-        } else {
-            let q = self.filter.to_lowercase();
-            self.items
-                .iter()
-                .filter(|m| m.id.to_lowercase().contains(&q))
-                .collect()
-        }
-    }
-
-    pub fn selected_model(&self) -> Option<&crate::provider::ModelInfo> {
-        let filtered = self.filtered_items();
-        filtered.get(self.selected).copied()
-    }
-
-    pub fn next(&mut self) {
-        let count = self.filtered_items().len();
-        if count > 0 {
-            self.selected = (self.selected + 1) % count;
-        }
-    }
-
-    pub fn previous(&mut self) {
-        let count = self.filtered_items().len();
-        if count > 0 {
-            self.selected = if self.selected == 0 {
-                count - 1
-            } else {
-                self.selected - 1
-            };
-        }
-    }
-
-    pub fn push_char(&mut self, c: char) {
-        self.filter.push(c);
-        self.selected = 0;
-        self.scroll_offset = 0;
-    }
-
-    pub fn pop_char(&mut self) {
-        self.filter.pop();
-        self.selected = 0;
-        self.scroll_offset = 0;
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionsDialogState {
-    pub items: Vec<crate::persistence::Session>,
-    pub selected: usize,
-    pub filter: String,
-    pub scroll_offset: usize,
-}
-
-impl SessionsDialogState {
-    pub fn new(items: Vec<crate::persistence::Session>, active_session_id: Option<i64>) -> Self {
-        let selected = active_session_id
-            .and_then(|id| items.iter().position(|s| s.id == id))
-            .unwrap_or(0);
-        Self {
-            items,
-            selected,
-            filter: String::new(),
-            scroll_offset: 0,
-        }
-    }
-
-    pub fn filtered_items(&self) -> Vec<&crate::persistence::Session> {
-        if self.filter.is_empty() {
-            self.items.iter().collect()
-        } else {
-            let q = self.filter.to_lowercase();
-            self.items
-                .iter()
-                .filter(|s| {
-                    s.title.to_lowercase().contains(&q)
-                        || s.id.to_string().contains(&q)
-                        || format!("ws#{}", s.workspace_id).to_lowercase().contains(&q)
-                })
-                .collect()
-        }
-    }
-
-    pub fn selected_session(&self) -> Option<&crate::persistence::Session> {
-        let filtered = self.filtered_items();
-        filtered.get(self.selected).copied()
-    }
-
-    pub fn next(&mut self) {
-        let count = self.filtered_items().len();
-        if count > 0 {
-            self.selected = (self.selected + 1) % count;
-        }
-    }
-
-    pub fn previous(&mut self) {
-        let count = self.filtered_items().len();
-        if count > 0 {
-            self.selected = if self.selected == 0 {
-                count - 1
-            } else {
-                self.selected - 1
-            };
-        }
-    }
-
-    pub fn push_char(&mut self, c: char) {
-        self.filter.push(c);
-        self.selected = 0;
-        self.scroll_offset = 0;
-    }
-
-    pub fn pop_char(&mut self) {
-        self.filter.pop();
-        self.selected = 0;
-        self.scroll_offset = 0;
-    }
-
-    pub fn remove_item(&mut self, id: i64) {
-        self.items.retain(|s| s.id != id);
-        let count = self.filtered_items().len();
-        if count == 0 {
-            self.selected = 0;
-        } else if self.selected >= count {
-            self.selected = count - 1;
-        }
-    }
-}
 
 const PHASE_DURATIONS: [u32; 5] = [14, 7, 7, 7, 14];
 const PHASE_FRAMES: [usize; 5] = [0, 1, 0, 1, 0];
