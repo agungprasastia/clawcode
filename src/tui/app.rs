@@ -414,9 +414,10 @@ pub fn split_provider_model(id: &str) -> Option<(&str, &str)> {
                 | "gemini"
                 | "openrouter"
                 | "together"
-        ) {
-            return Some((p, m));
-        }
+        )
+    {
+        return Some((p, m));
+    }
     None
 }
 
@@ -657,15 +658,17 @@ impl App {
                 }
                 UiEvent::Input(Input::Character(c)) => {
                     if let Some(dialog) = &mut self.question_dialog
-                        && (dialog.typing_custom || dialog.selected_option == dialog.options.len()) {
-                            dialog.push_char(c);
-                        }
+                        && (dialog.typing_custom || dialog.selected_option == dialog.options.len())
+                    {
+                        dialog.push_char(c);
+                    }
                 }
                 UiEvent::Input(Input::Backspace) => {
                     if let Some(dialog) = &mut self.question_dialog
-                        && (dialog.typing_custom || dialog.selected_option == dialog.options.len()) {
-                            dialog.pop_char();
-                        }
+                        && (dialog.typing_custom || dialog.selected_option == dialog.options.len())
+                    {
+                        dialog.pop_char();
+                    }
                 }
                 UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
                     self.diagnostic = "Question dismissed".to_string();
@@ -2114,9 +2117,11 @@ impl App {
     pub fn poll_runtime(&mut self) -> bool {
         self.command_service.poll_refresh();
         if let Ok(models) = self.command_service.models()
-            && !models.is_empty() && models != self.available_models {
-                self.available_models = models;
-            }
+            && !models.is_empty()
+            && models != self.available_models
+        {
+            self.available_models = models;
+        }
         let Some(receiver) = self.runtime_events.take() else {
             return false;
         };
@@ -2222,9 +2227,10 @@ impl App {
 
                         let (verb, _active_verb, mut target) = tool_target_and_verbs(name, args);
                         if target.is_empty()
-                            && let Some(prev) = prev_active {
-                                target = prev.desc;
-                            }
+                            && let Some(prev) = prev_active
+                        {
+                            target = prev.desc;
+                        }
 
                         let detail = if !success {
                             let err_line = output.lines().next().unwrap_or("error").trim();
@@ -2659,32 +2665,33 @@ impl App {
         self.selected_suggestion = 0;
 
         if self.transcript.is_empty()
-            && let Ok(messages) = self.command_service.session_messages(session_id) {
-                for msg in messages {
-                    if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-                        if self.transcript.ends_with('\n') {
-                            self.transcript.push('\n');
-                        } else {
-                            self.transcript.push_str("\n\n");
-                        }
-                    }
-                    if msg.role == "user" {
-                        self.transcript
-                            .push_str(&format!("> {}\n\n", msg.content.trim()));
-                    } else if msg.role == "assistant" {
-                        self.transcript
-                            .push_str(&format!("{}\n\n", msg.content.trim()));
+            && let Ok(messages) = self.command_service.session_messages(session_id)
+        {
+            for msg in messages {
+                if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                    if self.transcript.ends_with('\n') {
+                        self.transcript.push('\n');
                     } else {
-                        self.transcript.push_str(&format!(
-                            "[{}]: {}\n\n",
-                            msg.role,
-                            msg.content.trim()
-                        ));
+                        self.transcript.push_str("\n\n");
                     }
                 }
-                self.truncate_transcript();
-                self.scroll_to_bottom();
+                if msg.role == "user" {
+                    self.transcript
+                        .push_str(&format!("> {}\n\n", msg.content.trim()));
+                } else if msg.role == "assistant" {
+                    self.transcript
+                        .push_str(&format!("{}\n\n", msg.content.trim()));
+                } else {
+                    self.transcript.push_str(&format!(
+                        "[{}]: {}\n\n",
+                        msg.role,
+                        msg.content.trim()
+                    ));
+                }
             }
+            self.truncate_transcript();
+            self.scroll_to_bottom();
+        }
     }
 
     /// Switch the live view to `session_id`, stashing the current one first.

@@ -85,9 +85,10 @@ impl SystemPromptComposer {
 
         // 6. Custom extra instructions if any
         if let Some(ref extra) = self.custom_instructions
-            && !extra.trim().is_empty() {
-                sections.push(format!("# Additional Instructions\n{}", extra.trim()));
-            }
+            && !extra.trim().is_empty()
+        {
+            sections.push(format!("# Additional Instructions\n{}", extra.trim()));
+        }
 
         sections.join("\n\n---\n\n")
     }
@@ -215,11 +216,12 @@ You are currently operating in BUILD mode.
             for name in &candidates {
                 let p = cur.join(name);
                 if p.is_file()
-                    && let Ok(bytes) = fs::read(&p) {
-                        let len = bytes.len().min(DEFAULT_MAX_RULE_BYTES);
-                        let s = String::from_utf8_lossy(&bytes[..len]).to_string();
-                        return Some((p, s));
-                    }
+                    && let Ok(bytes) = fs::read(&p)
+                {
+                    let len = bytes.len().min(DEFAULT_MAX_RULE_BYTES);
+                    let s = String::from_utf8_lossy(&bytes[..len]).to_string();
+                    return Some((p, s));
+                }
             }
             if !cur.pop() {
                 break;
@@ -237,11 +239,12 @@ You are currently operating in BUILD mode.
             ];
             for p in &global_candidates {
                 if p.is_file()
-                    && let Ok(bytes) = fs::read(p) {
-                        let len = bytes.len().min(DEFAULT_MAX_RULE_BYTES);
-                        let s = String::from_utf8_lossy(&bytes[..len]).to_string();
-                        return Some((p.clone(), s));
-                    }
+                    && let Ok(bytes) = fs::read(p)
+                {
+                    let len = bytes.len().min(DEFAULT_MAX_RULE_BYTES);
+                    let s = String::from_utf8_lossy(&bytes[..len]).to_string();
+                    return Some((p.clone(), s));
+                }
             }
         }
 

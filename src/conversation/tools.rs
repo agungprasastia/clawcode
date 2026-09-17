@@ -1000,12 +1000,13 @@ pub fn execute_tool(
             });
             let mut out = format!("Question asked: {question}");
             if let Some(opts) = options
-                && !opts.is_empty() {
-                    out.push_str("\nOptions:\n");
-                    for (i, opt) in opts.iter().enumerate() {
-                        out.push_str(&format!(" {}. {}\n", i + 1, opt));
-                    }
+                && !opts.is_empty()
+            {
+                out.push_str("\nOptions:\n");
+                for (i, opt) in opts.iter().enumerate() {
+                    out.push_str(&format!(" {}. {}\n", i + 1, opt));
                 }
+            }
             Ok(out)
         }
         "update_plan" => {
@@ -1293,10 +1294,11 @@ fn decode_entity(entity: &str) -> Option<char> {
         "copy" => Some('©'),
         "reg" => Some('®'),
         _ => {
-            if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
-                u32::from_str_radix(hex, 16)
-                    .ok()
-                    .and_then(char::from_u32)
+            if let Some(hex) = entity
+                .strip_prefix("#x")
+                .or_else(|| entity.strip_prefix("#X"))
+            {
+                u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
             } else if let Some(digits) = entity.strip_prefix('#') {
                 digits.parse::<u32>().ok().and_then(char::from_u32)
             } else {
@@ -1403,12 +1405,14 @@ pub fn execute_websearch(query: &str) -> Result<String, String> {
                 .take(2 * 1024 * 1024)
                 .read_to_string(&mut body)
                 .is_ok()
-                && !body.contains("anomaly-modal") && !body.contains("anomaly.js") {
-                    let items = parse_ddg_html(&body);
-                    if !items.is_empty() {
-                        return Ok(format_search_results(trimmed_query, &items));
-                    }
+                && !body.contains("anomaly-modal")
+                && !body.contains("anomaly.js")
+            {
+                let items = parse_ddg_html(&body);
+                if !items.is_empty() {
+                    return Ok(format_search_results(trimmed_query, &items));
                 }
+            }
         }
         Err(e) => {
             last_net_err = Some(e.to_string());
@@ -1433,12 +1437,13 @@ pub fn execute_websearch(query: &str) -> Result<String, String> {
                 .take(2 * 1024 * 1024)
                 .read_to_string(&mut body)
                 .is_ok()
-                && let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&body) {
-                    let items = parse_instant_answer_json(&json_val);
-                    if !items.is_empty() {
-                        return Ok(format_search_results(trimmed_query, &items));
-                    }
+                && let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&body)
+            {
+                let items = parse_instant_answer_json(&json_val);
+                if !items.is_empty() {
+                    return Ok(format_search_results(trimmed_query, &items));
                 }
+            }
         }
         Err(e) => {
             if last_net_err.is_none() {
@@ -1483,10 +1488,10 @@ pub fn percent_decode(s: &str) -> String {
             let h2 = chars.next();
             if let (Some(h1), Some(h2)) = (h1, h2)
                 && let (Some(d1), Some(d2)) = ((h1 as char).to_digit(16), (h2 as char).to_digit(16))
-                {
-                    bytes.push(((d1 << 4) | d2) as u8);
-                    continue;
-                }
+            {
+                bytes.push(((d1 << 4) | d2) as u8);
+                continue;
+            }
             bytes.push(b'%');
         } else if b == b'+' {
             bytes.push(b' ');
@@ -1575,16 +1580,17 @@ fn extract_title_and_url_from_block(block: &str) -> (String, String) {
     if let Some(a_idx) = search_slice.find("<a") {
         let after_a = &search_slice[a_idx..];
         if let Some(href) = extract_attr_val(after_a, "href")
-            && let Some(end_tag) = after_a.find('>') {
-                let after_tag = &after_a[end_tag + 1..];
-                let close_idx = after_tag
-                    .find("</a>")
-                    .or_else(|| after_tag.find("</A>"))
-                    .unwrap_or(after_tag.len());
-                let raw_title = &after_tag[..close_idx];
-                let clean_title = clean_html_to_text(raw_title);
-                return (href, clean_title);
-            }
+            && let Some(end_tag) = after_a.find('>')
+        {
+            let after_tag = &after_a[end_tag + 1..];
+            let close_idx = after_tag
+                .find("</a>")
+                .or_else(|| after_tag.find("</A>"))
+                .unwrap_or(after_tag.len());
+            let raw_title = &after_tag[..close_idx];
+            let clean_title = clean_html_to_text(raw_title);
+            return (href, clean_title);
+        }
     }
     (String::new(), String::new())
 }
@@ -1752,12 +1758,13 @@ pub fn execute_skill(
 
     for candidate in &candidates {
         if candidate.is_file()
-            && let Ok(content) = std::fs::read_to_string(candidate) {
-                return Ok(format!(
-                    "<skill_content name=\"{trimmed_name}\">\n{}\n</skill_content>",
-                    content.trim()
-                ));
-            }
+            && let Ok(content) = std::fs::read_to_string(candidate)
+        {
+            return Ok(format!(
+                "<skill_content name=\"{trimmed_name}\">\n{}\n</skill_content>",
+                content.trim()
+            ));
+        }
     }
 
     let available = list_available_skills(ws_root);
@@ -1788,18 +1795,19 @@ pub fn list_available_skills(ws_root: &Path) -> Vec<String> {
                 let path = entry.path();
                 if path.is_dir() {
                     if path.join("SKILL.md").is_file()
-                        && let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                            skills.push(dir_name.to_string());
-                        }
+                        && let Some(dir_name) = path.file_name().and_then(|n| n.to_str())
+                    {
+                        skills.push(dir_name.to_string());
+                    }
                 } else if path.is_file()
                     && let Some(ext) = path.extension().and_then(|e| e.to_str())
-                        && ext.eq_ignore_ascii_case("md")
-                            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                                && !stem.eq_ignore_ascii_case("SKILL")
-                                    && !stem.eq_ignore_ascii_case("README")
-                                {
-                                    skills.push(stem.to_string());
-                                }
+                    && ext.eq_ignore_ascii_case("md")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && !stem.eq_ignore_ascii_case("SKILL")
+                    && !stem.eq_ignore_ascii_case("README")
+                {
+                    skills.push(stem.to_string());
+                }
             }
         }
     }

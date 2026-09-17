@@ -8,9 +8,10 @@ pub struct WorkspaceRoot {
 
 fn strip_unc_prefix(path: &Path) -> &Path {
     if let Some(s) = path.to_str()
-        && let Some(stripped) = s.strip_prefix(r"\\?\") {
-            return Path::new(stripped);
-        }
+        && let Some(stripped) = s.strip_prefix(r"\\?\")
+    {
+        return Path::new(stripped);
+    }
     path
 }
 

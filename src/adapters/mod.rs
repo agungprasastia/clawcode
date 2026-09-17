@@ -84,14 +84,15 @@ impl Transport for HttpTransport {
             .set("Content-Type", "application/json");
 
         if let Some(ref key) = self.api_key
-            && !key.is_empty() {
-                if endpoint.contains("anthropic") {
-                    req = req
-                        .set("x-api-key", key)
-                        .set("anthropic-version", "2023-06-01");
-                }
-                req = req.set("Authorization", &format!("Bearer {key}"));
+            && !key.is_empty()
+        {
+            if endpoint.contains("anthropic") {
+                req = req
+                    .set("x-api-key", key)
+                    .set("anthropic-version", "2023-06-01");
             }
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
         for (k, v) in &self.headers {
             req = req.set(k, v);
         }
@@ -121,14 +122,15 @@ impl Transport for HttpTransport {
             .set("Accept", "text/event-stream");
 
         if let Some(ref key) = self.api_key
-            && !key.is_empty() {
-                if endpoint.contains("anthropic") {
-                    req = req
-                        .set("x-api-key", key)
-                        .set("anthropic-version", "2023-06-01");
-                }
-                req = req.set("Authorization", &format!("Bearer {key}"));
+            && !key.is_empty()
+        {
+            if endpoint.contains("anthropic") {
+                req = req
+                    .set("x-api-key", key)
+                    .set("anthropic-version", "2023-06-01");
             }
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
         for (k, v) in &self.headers {
             req = req.set(k, v);
         }
@@ -300,10 +302,7 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
         &self.transport
     }
 
-    pub(crate) fn build_payload(
-        &self,
-        request: &StreamRequest,
-    ) -> (String, StreamEventParser) {
+    pub(crate) fn build_payload(&self, request: &StreamRequest) -> (String, StreamEventParser) {
         let messages: Vec<_> = if !request.messages.is_empty() {
             request
                 .messages
@@ -556,22 +555,23 @@ fn parse_lines(
 
     let trimmed_body = body.trim();
     if (trimmed_body.starts_with('{') || trimmed_body.starts_with('['))
-        && let Ok(value) = serde_json::from_str::<Value>(trimmed_body) {
-            let raw_usage = value.get("usage").and_then(parse_usage);
-            for event in parser(value)? {
-                let event = match event {
-                    StreamEvent::Finish { reason } => {
-                        if let Some(value) = raw_usage {
-                            events.push(StreamEvent::Usage(value));
-                        }
-                        StreamEvent::Finish { reason }
+        && let Ok(value) = serde_json::from_str::<Value>(trimmed_body)
+    {
+        let raw_usage = value.get("usage").and_then(parse_usage);
+        for event in parser(value)? {
+            let event = match event {
+                StreamEvent::Finish { reason } => {
+                    if let Some(value) = raw_usage {
+                        events.push(StreamEvent::Usage(value));
                     }
-                    other => other,
-                };
-                events.push(event);
-            }
-            return Ok(StreamResponse { events });
+                    StreamEvent::Finish { reason }
+                }
+                other => other,
+            };
+            events.push(event);
         }
+        return Ok(StreamResponse { events });
+    }
 
     let mut current_data = String::new();
     let mut parse_block = |data: &str,
@@ -685,27 +685,30 @@ pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
             return Err(ProviderError::Protocol(error.into()));
         }
         if let Some(error_obj) = value.get("error").and_then(Value::as_object)
-            && let Some(msg) = error_obj.get("message").and_then(Value::as_str) {
-                return Err(ProviderError::Protocol(msg.into()));
-            }
+            && let Some(msg) = error_obj.get("message").and_then(Value::as_str)
+        {
+            return Err(ProviderError::Protocol(msg.into()));
+        }
 
         // Content
         if let Some(s) = value
             .pointer("/choices/0/delta/content")
             .or_else(|| value.pointer("/choices/0/message/content"))
             .and_then(Value::as_str)
-            && !s.is_empty() {
-                events.push(StreamEvent::TextDelta(s.into()));
-            }
+            && !s.is_empty()
+        {
+            events.push(StreamEvent::TextDelta(s.into()));
+        }
 
         // Reasoning
         if let Some(s) = value
             .pointer("/choices/0/delta/reasoning_content")
             .or_else(|| value.pointer("/choices/0/delta/reasoning"))
             .and_then(Value::as_str)
-            && !s.is_empty() {
-                events.push(StreamEvent::ReasoningDelta(s.into()));
-            }
+            && !s.is_empty()
+        {
+            events.push(StreamEvent::ReasoningDelta(s.into()));
+        }
 
         // Streaming tool_calls delta
         if let Some(tool_calls) = value
@@ -727,12 +730,13 @@ pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
                 let call_id = active_tools.get(&index).cloned();
                 if let Some(id) = call_id
                     && let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
-                        && !args.is_empty() {
-                            events.push(StreamEvent::ToolCallDelta {
-                                id,
-                                arguments: args.to_string(),
-                            });
-                        }
+                    && !args.is_empty()
+                {
+                    events.push(StreamEvent::ToolCallDelta {
+                        id,
+                        arguments: args.to_string(),
+                    });
+                }
             }
         }
 
@@ -806,28 +810,30 @@ pub(crate) fn anthropic_parser()
             .pointer("/delta/text")
             .or_else(|| value.pointer("/content/0/text"))
             .and_then(Value::as_str)
-            && !s.is_empty() {
-                events.push(StreamEvent::TextDelta(s.into()));
-            }
+            && !s.is_empty()
+        {
+            events.push(StreamEvent::TextDelta(s.into()));
+        }
 
         // Streaming content_block_start for tool_use
         if value.get("type").and_then(Value::as_str) == Some("content_block_start") {
             let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
             if let Some(cb) = value.get("content_block").and_then(Value::as_object)
-                && cb.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    let id = cb
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let name = cb
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    active_tools.insert(index, (id.clone(), name.clone()));
-                    events.push(StreamEvent::ToolCallStart { id, name });
-                }
+                && cb.get("type").and_then(Value::as_str) == Some("tool_use")
+            {
+                let id = cb
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let name = cb
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                active_tools.insert(index, (id.clone(), name.clone()));
+                events.push(StreamEvent::ToolCallStart { id, name });
+            }
         }
 
         // Streaming content_block_delta for tool_use (input_json_delta)
@@ -835,12 +841,13 @@ pub(crate) fn anthropic_parser()
             let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
             if let Some(partial) = value.pointer("/delta/partial_json").and_then(Value::as_str)
                 && !partial.is_empty()
-                    && let Some((id, _)) = active_tools.get(&index) {
-                        events.push(StreamEvent::ToolCallDelta {
-                            id: id.clone(),
-                            arguments: partial.to_string(),
-                        });
-                    }
+                && let Some((id, _)) = active_tools.get(&index)
+            {
+                events.push(StreamEvent::ToolCallDelta {
+                    id: id.clone(),
+                    arguments: partial.to_string(),
+                });
+            }
         }
 
         // Streaming content_block_stop
@@ -911,9 +918,10 @@ pub(crate) fn ollama_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
             .pointer("/message/content")
             .or_else(|| value.get("response"))
             .and_then(Value::as_str)
-            && !s.is_empty() {
-                events.push(StreamEvent::TextDelta(s.into()));
-            }
+            && !s.is_empty()
+        {
+            events.push(StreamEvent::TextDelta(s.into()));
+        }
         let mut has_tool_calls = false;
         if let Some(tool_calls) = value
             .pointer("/message/tool_calls")
@@ -951,10 +959,11 @@ pub(crate) fn ollama_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
             }
         }
         if let Some(done) = value.get("done").and_then(Value::as_bool)
-            && done {
-                let reason = if has_tool_calls { "tool_calls" } else { "stop" };
-                events.push(finish_event(reason));
-            }
+            && done
+        {
+            let reason = if has_tool_calls { "tool_calls" } else { "stop" };
+            events.push(finish_event(reason));
+        }
         Ok(events)
     }
 }
@@ -1009,10 +1018,11 @@ impl ConfiguredRouter {
             .map(|(p, m)| (p.to_string(), m.to_string()));
 
         if let Some((prefix, stripped)) = split
-            && self.config.providers.contains_key(&prefix) {
-                p_name = prefix;
-                req.model = stripped;
-            }
+            && self.config.providers.contains_key(&prefix)
+        {
+            p_name = prefix;
+            req.model = stripped;
+        }
 
         if let Some(stripped) = req.model.strip_prefix(&format!("{p_name}/")) {
             req.model = stripped.to_string();
