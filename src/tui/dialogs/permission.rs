@@ -62,7 +62,7 @@ impl PermissionDialogState {
     }
 
     pub fn previous(&mut self) {
-        self.selected_decision = if self.selected_decision == 0 {
+        self.selected_decision = if self.selected_decision == 0 || self.selected_decision > 2 {
             2
         } else {
             self.selected_decision - 1

@@ -23,6 +23,9 @@ pub fn render_chat(
     theme: &Theme,
     mode_color: Color,
 ) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -333,8 +336,10 @@ pub fn render_chat(
                 }
             };
             let max_desc_len = (status_area.width as usize).saturating_sub(45).max(10);
-            let display_desc = if action_label.len() > max_desc_len {
-                format!("{}…", &action_label[..max_desc_len.saturating_sub(1)])
+            let display_desc = if action_label.chars().count() > max_desc_len {
+                let take_count = max_desc_len.saturating_sub(1);
+                let s: String = action_label.chars().take(take_count).collect();
+                format!("{s}…")
             } else {
                 action_label
             };
@@ -402,9 +407,11 @@ pub fn render_chat(
         let badge_text = format!(" ↓ {scroll_offset} lines up (End to bottom) ");
         let badge_width = badge_text.len() as u16;
         if transcript_area.width > badge_width + 2 {
+            let offset_x = transcript_area.width.saturating_sub(badge_width).saturating_sub(2);
+            let offset_y = transcript_area.height.saturating_sub(1);
             let badge_area = Rect {
-                x: transcript_area.x + transcript_area.width - badge_width - 2,
-                y: transcript_area.y + transcript_area.height - 1,
+                x: transcript_area.x.saturating_add(offset_x),
+                y: transcript_area.y.saturating_add(offset_y),
                 width: badge_width,
                 height: 1,
             };
@@ -430,15 +437,15 @@ pub(crate) fn visual_line_count(lines: &[Line], width: u16) -> usize {
     if width == 0 {
         return lines.len();
     }
-    let mut count = 0;
+    let mut count: usize = 0;
     for line in lines {
         let w = line.width();
         let rows = if w == 0 {
             1
         } else {
-            (w + width as usize - 1) / width as usize
+            (w.saturating_add(width as usize - 1)) / width as usize
         };
-        count += rows;
+        count = count.saturating_add(rows);
     }
     count
 }
@@ -829,9 +836,7 @@ pub fn format_transcript_lines(
                 ));
             }
             lines.push(Line::from(spans));
-        } else if line.trim_start().starts_with("└ ") {
-            let trimmed = line.trim_start();
-            let rest = &trimmed["└ ".len()..];
+        } else if let Some(rest) = line.trim_start().strip_prefix("└ ") {
             let mut spans = vec![
                 Span::styled("  └ ", Style::default().fg(theme.dim)),
             ];
@@ -845,9 +850,9 @@ pub fn format_transcript_lines(
             lines.push(Line::from(spans));
         } else if line.trim_start().starts_with("│ ") || line.trim_start() == "│" {
             let trimmed = line.trim_start();
-            let indent_len = line.len() - trimmed.len();
+            let indent_len = line.len().saturating_sub(trimmed.len());
             let indent = &line[..indent_len];
-            let rest = if trimmed == "│" { "" } else { &trimmed["│ ".len()..] };
+            let rest = if trimmed == "│" { "" } else { trimmed.strip_prefix("│ ").unwrap_or("") };
             let mut spans = vec![
                 Span::styled(format!("{indent}│ "), Style::default().fg(theme.dim)),
             ];
@@ -1052,8 +1057,9 @@ pub fn format_transcript_lines(
             lines.push(Line::from(spans));
         } else if (line.starts_with(' ') || line.starts_with('\t')) && line.trim_start().starts_with("* ") {
             let trimmed = line.trim_start();
-            let indent = &line[..line.len() - trimmed.len()];
-            let rest = &trimmed["* ".len()..];
+            let indent_len = line.len().saturating_sub(trimmed.len());
+            let indent = &line[..indent_len];
+            let rest = trimmed.strip_prefix("* ").unwrap_or("");
             let mut spans = vec![
                 Span::raw(indent.to_string()),
                 Span::styled("• ", Style::default().fg(theme.amber)),

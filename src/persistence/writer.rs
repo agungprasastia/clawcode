@@ -119,13 +119,13 @@ impl WriterHandle {
         }
     }
 
-    fn sender(&self) -> mpsc::SyncSender<Command> {
+    fn sender(&self) -> Result<mpsc::SyncSender<Command>, String> {
         self.inner
             .lock()
-            .expect("writer handle poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .as_ref()
-            .expect("writer shut down")
-            .clone()
+            .cloned()
+            .ok_or_else(|| "writer shut down".to_string())
     }
 
     /// Queue an append without waiting for the commit. Returns the receiver
@@ -147,7 +147,7 @@ impl WriterHandle {
             ));
         }
         let (reply_tx, reply_rx) = mpsc::channel();
-        self.sender()
+        self.sender()?
             .try_send(Command::Append {
                 session_id,
                 role: role.to_string(),
@@ -175,7 +175,7 @@ impl WriterHandle {
         payload_json: &str,
     ) -> Result<mpsc::Receiver<Result<i64, String>>, String> {
         let (reply_tx, reply_rx) = mpsc::channel();
-        self.sender()
+        self.sender()?
             .try_send(Command::AppendEvent {
                 session_id,
                 generation_id,
@@ -202,18 +202,20 @@ impl WriterHandle {
     /// Wait until all queued writes before this call are committed.
     pub fn flush(&self) {
         let (ack_tx, ack_rx) = mpsc::channel();
-        if self.sender().send(Command::Flush(ack_tx)).is_ok() {
-            let _ = ack_rx.recv();
+        if let Ok(sender) = self.sender() {
+            if sender.send(Command::Flush(ack_tx)).is_ok() {
+                let _ = ack_rx.recv();
+            }
         }
     }
 
     /// Stop the worker and take back the `Db`. Blocks until all other
     /// handles are dropped, so clones must die first.
     pub fn shutdown(&self) -> Option<Db> {
-        let sender = self.inner.lock().expect("writer handle poisoned").take()?;
-        let worker = self.worker.lock().expect("writer handle poisoned").take()?;
+        let sender = self.inner.lock().unwrap_or_else(|p| p.into_inner()).take()?;
+        let worker = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take()?;
         drop(sender);
-        let db = worker.join().expect("writer thread panicked");
+        let db = worker.join().ok()?;
         Some(db)
     }
 }
@@ -267,19 +269,33 @@ fn flush_events(db: &Db, pending: &mut Vec<PendingEvent>) {
         }
     };
     let mut results: Vec<Result<i64, String>> = Vec::with_capacity(batch.len());
+    let mut session_max_seq: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     for (session_id, generation_id, kind, payload_json, _) in &batch {
-        results.push(
-            tx.query_row(
-                "INSERT INTO generation_events (seq, session_id, generation_id, kind, payload_json)
-                 VALUES (
-                     COALESCE((SELECT MAX(seq) + 1 FROM generation_events WHERE session_id = ?1), 0),
-                     ?1, ?2, ?3, ?4
-                 )
-                 RETURNING seq",
-                rusqlite::params![session_id, generation_id, kind, payload_json],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string()),
+        let res = tx.query_row(
+            "INSERT INTO generation_events (seq, session_id, generation_id, kind, payload_json)
+             VALUES (
+                 COALESCE((SELECT MAX(seq) + 1 FROM generation_events WHERE session_id = ?1), 0),
+                 ?1, ?2, ?3, ?4
+             )
+             RETURNING seq",
+            rusqlite::params![session_id, generation_id, kind, payload_json],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string());
+        if let Ok(seq) = res {
+            let entry = session_max_seq.entry(*session_id).or_insert(seq);
+            if seq > *entry {
+                *entry = seq;
+            }
+        }
+        results.push(res);
+    }
+    for (session_id, max_seq) in session_max_seq {
+        let _ = tx.execute(
+            "UPDATE sessions SET last_event_seq = MAX(last_event_seq, ?2),
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1",
+            rusqlite::params![session_id, max_seq],
         );
     }
     if let Err(error) = tx.commit() {
@@ -288,21 +304,8 @@ fn flush_events(db: &Db, pending: &mut Vec<PendingEvent>) {
         }
         tracing::error!(%error, "persistence event batch commit failed");
     }
-    for ((session_id, _, _, _, reply), result) in batch.into_iter().zip(results) {
-        if let Ok(seq) = result {
-            let _ = tx_owner_update(db, session_id, seq);
-        }
+    for ((_, _, _, _, reply), result) in batch.into_iter().zip(results) {
         let _ = reply.send(result);
     }
 }
 
-/// Keep `sessions.last_event_seq` in sync after a committed event batch.
-fn tx_owner_update(db: &Db, session_id: i64, seq: i64) -> rusqlite::Result<()> {
-    db.connection.execute(
-        "UPDATE sessions SET last_event_seq = MAX(last_event_seq, ?2),
-             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-         WHERE id = ?1",
-        rusqlite::params![session_id, seq],
-    )?;
-    Ok(())
-}

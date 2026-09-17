@@ -169,6 +169,9 @@ pub fn compute_side_by_side_diff(
 }
 
 fn format_col(num: Option<usize>, sign: Option<char>, text: &str, col_width: usize) -> String {
+    if col_width == 0 {
+        return String::new();
+    }
     if num.is_none() && sign.is_none() && text.is_empty() {
         return " ".repeat(col_width);
     }
@@ -178,12 +181,20 @@ fn format_col(num: Option<usize>, sign: Option<char>, text: &str, col_width: usi
     };
     let sign_char = sign.unwrap_or(' ');
     let gutter = format!("{num_str} {sign_char} ");
+    if col_width <= gutter.len() {
+        let col: String = gutter.chars().take(col_width).collect();
+        return col;
+    }
     let max_text_len = col_width.saturating_sub(gutter.len());
     let truncated_text = if text.chars().count() > max_text_len {
-        let take_len = max_text_len.saturating_sub(3);
-        let mut s: String = text.chars().take(take_len).collect();
-        s.push_str("...");
-        s
+        if max_text_len >= 3 {
+            let take_len = max_text_len.saturating_sub(3);
+            let mut s: String = text.chars().take(take_len).collect();
+            s.push_str("...");
+            s
+        } else {
+            text.chars().take(max_text_len).collect()
+        }
     } else {
         text.to_string()
     };
@@ -250,7 +261,7 @@ fn lcs_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
         let n = mid_old.len();
         let m = mid_new.len();
 
-        if n * m > 250_000 {
+        if n.checked_mul(m).map_or(true, |prod| prod > 250_000) {
             for &line in mid_old {
                 result.push(DiffLine {
                     op: DiffOp::Remove,
@@ -519,5 +530,38 @@ mod tests {
         assert!(formatted.contains(" │ "));
         assert!(formatted.contains("  15 - //"));
         assert!(formatted.contains("  15 + $table->date('dob');"));
+    }
+
+    #[test]
+    fn test_diff_edge_cases() {
+        // Empty inputs
+        let res = compute_diff("", "", 10);
+        assert_eq!(res.added, 0);
+        assert_eq!(res.removed, 0);
+        assert!(res.lines.is_empty());
+
+        // Single character inputs
+        let res = compute_diff("a", "b", 10);
+        assert_eq!(res.added, 1);
+        assert_eq!(res.removed, 1);
+
+        // Identical inputs
+        let res = compute_diff("same\ntext", "same\ntext", 10);
+        assert_eq!(res.added, 0);
+        assert_eq!(res.removed, 0);
+
+        // Side-by-side with small col_width (narrow terminal)
+        let rows = vec![SideBySideRow {
+            left_num: Some(1),
+            left_sign: Some('-'),
+            left_text: "old line of text".to_string(),
+            right_num: Some(1),
+            right_sign: Some('+'),
+            right_text: "new line of text".to_string(),
+        }];
+        for width in [0, 1, 5, 8, 10, 20, 30] {
+            let formatted = format_side_by_side_diff(&rows, width);
+            assert!(!formatted.is_empty());
+        }
     }
 }

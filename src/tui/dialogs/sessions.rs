@@ -48,24 +48,32 @@ impl SessionsDialogState {
 
     pub fn selected_session(&self) -> Option<&Session> {
         let filtered = self.filtered_items();
-        filtered.get(self.selected).copied()
+        if filtered.is_empty() {
+            return None;
+        }
+        let idx = self.selected.min(filtered.len() - 1);
+        filtered.get(idx).copied()
     }
 
     pub fn next(&mut self) {
         let count = self.filtered_items().len();
         if count > 0 {
             self.selected = (self.selected + 1) % count;
+        } else {
+            self.selected = 0;
         }
     }
 
     pub fn previous(&mut self) {
         let count = self.filtered_items().len();
         if count > 0 {
-            self.selected = if self.selected == 0 {
+            self.selected = if self.selected == 0 || self.selected >= count {
                 count - 1
             } else {
                 self.selected - 1
             };
+        } else {
+            self.selected = 0;
         }
     }
 
@@ -175,7 +183,7 @@ pub fn render_sessions_dialog(
     active_session_id: Option<i64>,
     theme: &Theme,
 ) {
-    let width = area.width.clamp(40, 78);
+    let width = area.width.clamp(40, 78).min(area.width);
     let filtered = dialog.filtered_items();
     let max_items_visible = 12.min(area.height.saturating_sub(8) as usize).max(3);
     let visible_items_count = filtered.len().min(max_items_visible).max(1);
@@ -270,9 +278,9 @@ pub fn render_sessions_dialog(
     );
 
     let list_height = chunks[2].height as usize;
-    let selected_idx = dialog.selected;
+    let selected_idx = if filtered.is_empty() { 0 } else { dialog.selected.min(filtered.len() - 1) };
     let scroll_offset = if selected_idx >= list_height {
-        selected_idx + 1 - list_height
+        (selected_idx + 1).saturating_sub(list_height)
     } else {
         0
     };

@@ -91,24 +91,32 @@ impl AgentsDialogState {
 
     pub fn selected_agent(&self) -> Option<&AgentItem> {
         let filtered = self.filtered_items();
-        filtered.get(self.selected).copied()
+        if filtered.is_empty() {
+            return None;
+        }
+        let idx = self.selected.min(filtered.len() - 1);
+        filtered.get(idx).copied()
     }
 
     pub fn next(&mut self) {
         let count = self.filtered_items().len();
         if count > 0 {
             self.selected = (self.selected + 1) % count;
+        } else {
+            self.selected = 0;
         }
     }
 
     pub fn previous(&mut self) {
         let count = self.filtered_items().len();
         if count > 0 {
-            self.selected = if self.selected == 0 {
+            self.selected = if self.selected == 0 || self.selected >= count {
                 count - 1
             } else {
                 self.selected - 1
             };
+        } else {
+            self.selected = 0;
         }
     }
 
@@ -132,7 +140,7 @@ pub fn render_agents_dialog(
     active_mode: ConversationMode,
     theme: &Theme,
 ) {
-    let width = area.width.clamp(36, 74);
+    let width = area.width.clamp(36, 74).min(area.width);
     let filtered = dialog.filtered_items();
     let max_items_visible = 8.min(area.height.saturating_sub(8) as usize).max(2);
     let visible_items_count = filtered.len().min(max_items_visible).max(1);
@@ -222,7 +230,7 @@ pub fn render_agents_dialog(
         chunks[1],
     );
 
-    let selected_idx = dialog.selected;
+    let selected_idx = if filtered.is_empty() { 0 } else { dialog.selected.min(filtered.len() - 1) };
     let item_lines: Vec<Line> = if filtered.is_empty() {
         vec![Line::from(Span::styled(
             format!("  No agents matching \"{}\"", dialog.filter),

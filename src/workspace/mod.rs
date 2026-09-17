@@ -6,7 +6,7 @@ mod snapshot;
 
 use crate::core::error::{Diagnostic, ErrorCategory};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub use files::{FileSystem, RealFileSystem};
@@ -78,6 +78,10 @@ impl<F: FileSystem> Workspace<F> {
             }),
         })
     }
+    pub fn resolve_path(&self, relative: impl AsRef<Path>) -> Result<PathBuf, Diagnostic> {
+        self.root.resolve(relative)
+    }
+
 
     pub fn read(
         &self,

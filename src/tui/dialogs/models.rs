@@ -49,17 +49,21 @@ impl ModelsDialogState {
         let count = self.filtered_items().len();
         if count > 0 {
             self.selected = (self.selected + 1) % count;
+        } else {
+            self.selected = 0;
         }
     }
 
     pub fn previous(&mut self) {
         let count = self.filtered_items().len();
         if count > 0 {
-            self.selected = if self.selected == 0 {
+            self.selected = if self.selected == 0 || self.selected >= count {
                 count - 1
             } else {
                 self.selected - 1
             };
+        } else {
+            self.selected = 0;
         }
     }
 
@@ -99,11 +103,14 @@ pub fn render_model_suggestions_popup(
         return;
     }
 
+    if input_area.width < 10 {
+        return;
+    }
     let available_space = input_area.y as usize;
     if available_space < 3 {
         return;
     }
-    let max_visible = 8.min(available_space - 2);
+    let max_visible = 8.min(available_space.saturating_sub(2));
     let visible_count = suggestions.len().min(max_visible);
     if visible_count == 0 {
         return;
@@ -125,7 +132,7 @@ pub fn render_model_suggestions_popup(
 
     let selected_idx = app.selected_suggestion_index();
     let scroll_offset = if selected_idx >= visible_count {
-        selected_idx + 1 - visible_count
+        (selected_idx + 1).saturating_sub(visible_count)
     } else {
         0
     };
@@ -212,7 +219,7 @@ pub fn render_models_dialog(
     active_model: &str,
     theme: &Theme,
 ) {
-    let width = area.width.clamp(36, 74);
+    let width = area.width.clamp(36, 74).min(area.width);
     let filtered = dialog.filtered_items();
     let max_items_visible = 12.min(area.height.saturating_sub(8) as usize).max(3);
     let visible_items_count = filtered.len().min(max_items_visible).max(1);
@@ -307,9 +314,9 @@ pub fn render_models_dialog(
     );
 
     let list_height = chunks[2].height as usize;
-    let selected_idx = dialog.selected;
+    let selected_idx = if filtered.is_empty() { 0 } else { dialog.selected.min(filtered.len() - 1) };
     let scroll_offset = if selected_idx >= list_height {
-        selected_idx + 1 - list_height
+        (selected_idx + 1).saturating_sub(list_height)
     } else {
         0
     };

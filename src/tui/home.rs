@@ -175,6 +175,9 @@ pub fn render_compact_home(
     theme: &Theme,
     mode_color: Color,
 ) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

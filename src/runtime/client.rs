@@ -126,7 +126,7 @@ impl RuntimeClient {
     fn send(&self, command: ClientCommand) -> Result<(), String> {
         self.sender
             .as_ref()
-            .expect("client shut down")
+            .ok_or_else(|| "client shut down".to_string())?
             .send(command)
             .map_err(|error| error.to_string())
     }
@@ -134,7 +134,7 @@ impl RuntimeClient {
     fn try_send(&self, command: ClientCommand) -> Result<(), String> {
         self.sender
             .as_ref()
-            .expect("client shut down")
+            .ok_or_else(|| "client shut down".to_string())?
             .try_send(command)
             .map_err(|error| error.to_string())
     }
@@ -151,7 +151,7 @@ impl SharedDb {
     }
 
     fn with<R>(&self, f: impl FnOnce(&Db) -> R) -> R {
-        let guard = self.0.lock().expect("runtime db poisoned");
+        let guard = self.0.lock().unwrap_or_else(|p| p.into_inner());
         f(&guard)
     }
 
@@ -201,6 +201,20 @@ fn worker_loop(
                 model,
                 prompt,
             } => {
+                if active
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .iter()
+                    .any(|(s, _)| *s == session_id)
+                {
+                    publish_error(
+                        &bus,
+                        session_id,
+                        None,
+                        "generation already in progress for this session",
+                    );
+                    continue;
+                }
                 let generation = match db
                     .with(|db| db.start_generation(session_id, &agent_mode, &provider_name, &model))
                 {
@@ -212,7 +226,7 @@ fn worker_loop(
                 };
                 active
                     .lock()
-                    .expect("active slot poisoned")
+                    .unwrap_or_else(|p| p.into_inner())
                     .push((session_id, generation.id));
                 let ctx = SharedGenerationCtx {
                     db: db.clone(),
@@ -251,24 +265,26 @@ fn worker_loop(
                 }));
             }
             ClientCommand::CancelGeneration { session_id } => {
-                let generation_id = active
+                let generation_ids: Vec<i64> = active
                     .lock()
-                    .expect("active slot poisoned")
+                    .unwrap_or_else(|p| p.into_inner())
                     .iter()
-                    .find(|(active_session, _)| *active_session == session_id)
-                    .map(|(_, generation_id)| *generation_id);
-                match generation_id {
-                    Some(generation_id) => match db.with(|db| db.request_cancel(generation_id)) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            publish_status(&bus, session_id, Some(generation_id), "cancel_noop")
+                    .filter(|(active_session, _)| *active_session == session_id)
+                    .map(|(_, generation_id)| *generation_id)
+                    .collect();
+                if generation_ids.is_empty() {
+                    publish_status(&bus, session_id, None, "cancel_rejected");
+                } else {
+                    for generation_id in generation_ids {
+                        match db.with(|db| db.request_cancel(generation_id)) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                publish_status(&bus, session_id, Some(generation_id), "cancel_noop")
+                            }
+                            Err(error) => {
+                                publish_error(&bus, session_id, Some(generation_id), &error.to_string())
+                            }
                         }
-                        Err(error) => {
-                            publish_error(&bus, session_id, Some(generation_id), &error.to_string())
-                        }
-                    },
-                    None => {
-                        publish_status(&bus, session_id, None, "cancel_rejected");
                     }
                 }
             }
@@ -330,7 +346,7 @@ impl SharedGenerationCtx {
     fn deactivate(&self) {
         self.active
             .lock()
-            .expect("active slot poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .retain(|&(session_id, generation_id)| {
                 session_id != self.session_id || generation_id != self.generation_id
             });
@@ -594,8 +610,7 @@ fn run_generation(
 
         for (call_id, tool_name, args_str) in turn_tool_calls {
             let args_val: serde_json::Value = serde_json::from_str(&args_str)
-                .unwrap_or_else(|_| serde_json::json!({}));
-
+                .unwrap_or_else(|_| serde_json::json!({ "raw": args_str }));
             ctx.emit(
                 "tool_executing",
                 &serde_json::json!({
@@ -647,6 +662,16 @@ fn run_generation(
         }
 
         ctx.emit("agent_turn", &serde_json::json!({ "turn": turn + 1 }));
+    }
+
+    if cancel_requested(&ctx.db, ctx.generation_id) {
+        ctx.db.clear_last_error(ctx.session_id);
+        let _ = ctx
+            .db
+            .with(|db| db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None));
+        ctx.emit_status("cancelled");
+        ctx.deactivate();
+        return;
     }
 
     let metrics_json = if total_usage.input_tokens > 0 || total_usage.output_tokens > 0 {
@@ -708,4 +733,115 @@ fn publish_error(bus: &EventBus, session_id: i64, generation_id: Option<i64>, me
         kind: "error".to_string(),
         payload_json: serde_json::json!({ "message": message }).to_string(),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{ModelInfo, ProviderCapabilities, ProviderError, ProviderId, StreamResponse};
+
+    #[derive(Debug)]
+    struct SlowProvider;
+
+    impl Provider for SlowProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("fake"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities { streaming: true, tools: false }
+        }
+        fn models(&self) -> Vec<ModelInfo> { Vec::new() }
+        fn send(&self, _request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            Ok(StreamResponse { events: vec![] })
+        }
+        fn stream(&self, _request: &StreamRequest) -> Result<crate::provider::ProviderStream, ProviderError> {
+            let (sender, stream) = crate::provider::ProviderStream::channel(16);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _ = sender.send(StreamEvent::TextDelta("delayed text".into()));
+                let _ = sender.flush();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _ = sender.send(StreamEvent::Finish { reason: FinishReason::Stop });
+                let _ = sender.flush();
+            });
+            Ok(stream)
+        }
+    }
+
+    #[test]
+    fn cancel_generation_marks_cancelled_not_completed() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("cancel_test").unwrap();
+        let session_id = session.id;
+        let bus = EventBus::new();
+        let (_sub_id, rx) = bus.subscribe(Some(session_id));
+        let writer = WriterHandle::spawn(Db::open_in_memory().unwrap());
+        let client = RuntimeClient::spawn(db, writer, Box::new(SlowProvider), bus);
+
+        client.start_generation(session_id, "plan", "fake", "slow", "hello").unwrap();
+        client.cancel_generation(session_id).unwrap();
+
+        let mut got_cancelled = false;
+        let mut got_completed = false;
+        let mut target_generation_id = None;
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(2) {
+            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                if event.kind == "generation_finished" {
+                    target_generation_id = event.generation_id;
+                    if event.payload_json.contains("cancelled") {
+                        got_cancelled = true;
+                    }
+                    if event.payload_json.contains("completed") {
+                        got_completed = true;
+                    }
+                    break;
+                }
+            }
+        }
+
+        assert!(got_cancelled, "generation should emit cancelled event");
+        assert!(!got_completed, "generation must never emit completed when cancelled");
+
+        let db = client.shutdown();
+        let gid = target_generation_id.expect("must have generation id");
+        assert_eq!(db.generation_status(gid).unwrap(), Some(GenerationStatus::Cancelled));
+    }
+
+    #[test]
+    fn concurrent_generation_on_same_session_is_rejected() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("concurrent_test").unwrap();
+        let session_id = session.id;
+        let bus = EventBus::new();
+        let (_sub_id, rx) = bus.subscribe(Some(session_id));
+        let writer = WriterHandle::spawn(Db::open_in_memory().unwrap());
+        let client = RuntimeClient::spawn(db, writer, Box::new(SlowProvider), bus);
+
+        client.start_generation(session_id, "plan", "fake", "slow", "turn 1").unwrap();
+        client.start_generation(session_id, "plan", "fake", "slow", "turn 2").unwrap();
+
+        let mut error_seen = false;
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(1) {
+            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                if event.kind == "error" && event.payload_json.contains("already in progress") {
+                    error_seen = true;
+                    break;
+                }
+            }
+        }
+        assert!(error_seen, "concurrent generation on same session must be rejected");
+        let _ = client.shutdown();
+    }
+
+    #[test]
+    fn send_after_shutdown_returns_err() {
+        let client = RuntimeClient { sender: None, worker: None };
+        let res = client.create_session(1, "test");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("client shut down"));
+    }
 }

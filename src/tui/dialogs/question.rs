@@ -43,7 +43,7 @@ impl QuestionDialogState {
 
     pub fn previous(&mut self) {
         let total_count = self.options.len() + 1;
-        self.selected_option = if self.selected_option == 0 {
+        self.selected_option = if self.selected_option == 0 || self.selected_option >= total_count {
             total_count - 1
         } else {
             self.selected_option - 1
@@ -64,8 +64,8 @@ impl QuestionDialogState {
     }
 
     pub fn selected_answer(&self) -> String {
-        if self.selected_option < self.options.len() {
-            self.options[self.selected_option].clone()
+        if let Some(opt) = self.options.get(self.selected_option) {
+            opt.clone()
         } else {
             self.custom_answer.clone()
         }

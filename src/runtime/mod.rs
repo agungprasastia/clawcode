@@ -68,7 +68,7 @@ impl EventBus {
         self.inner
             .subscribers
             .lock()
-            .expect("event bus poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .push(Subscriber {
                 id,
                 session_id,
@@ -81,7 +81,7 @@ impl EventBus {
         self.inner
             .subscribers
             .lock()
-            .expect("event bus poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .retain(|subscriber| subscriber.id != id);
     }
 
@@ -89,7 +89,7 @@ impl EventBus {
     /// whose queue is full or whose receiver was dropped is pruned here and
     /// must replay from the log to catch up.
     pub fn publish(&self, event: RuntimeEvent) {
-        let mut subscribers = self.inner.subscribers.lock().expect("event bus poisoned");
+        let mut subscribers = self.inner.subscribers.lock().unwrap_or_else(|p| p.into_inner());
         subscribers.retain(|subscriber| {
             if subscriber.session_id.is_none_or(|s| s == event.session_id) {
                 subscriber.sender.try_send(event.clone()).is_ok()

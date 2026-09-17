@@ -178,8 +178,9 @@ pub(crate) fn render_input_card(
     }
 
     if area.height <= 2 {
+        let prompt_width = ratatui::text::Span::raw(app.prompt()).width();
         let cursor_x =
-            content_area.x + (app.prompt().len() as u16).min(content_area.width.saturating_sub(1));
+            content_area.x + (prompt_width as u16).min(content_area.width.saturating_sub(1));
         frame.set_cursor_position((cursor_x, inner_area.y));
 
         if inner_area.height == 1 {
@@ -221,8 +222,9 @@ pub(crate) fn render_input_card(
             ])
             .split(inner_area);
 
+        let prompt_width = ratatui::text::Span::raw(app.prompt()).width();
         let cursor_x =
-            content_area.x + (app.prompt().len() as u16).min(content_area.width.saturating_sub(1));
+            content_area.x + (prompt_width as u16).min(content_area.width.saturating_sub(1));
         frame.set_cursor_position((cursor_x, mini_chunks[0].y));
 
         frame.render_widget(
@@ -269,8 +271,9 @@ pub(crate) fn render_input_card(
         .split(inner_area);
 
     // Hardware terminal cursor positioning
+    let prompt_width = ratatui::text::Span::raw(app.prompt()).width();
     let cursor_x =
-        content_area.x + (app.prompt().len() as u16).min(content_area.width.saturating_sub(1));
+        content_area.x + (prompt_width as u16).min(content_area.width.saturating_sub(1));
     let cursor_y = v_chunks[1].y;
     frame.set_cursor_position((cursor_x, cursor_y));
 
@@ -309,6 +312,9 @@ pub(crate) fn render_input_card(
 }
 
 pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let mode_color = match app.mode() {
         super::ConversationMode::Plan => theme.amber,
         super::ConversationMode::Build => theme.teal,
@@ -435,6 +441,9 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
 
 
 fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let cwd_display = repo_cwd_display();
 
     let mut left_spans = vec![Span::styled(cwd_display, Style::default().fg(theme.dim))];
@@ -474,8 +483,7 @@ fn repo_cwd_display() -> String {
     let cwd_with_tilde =
         if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
             let home_str = home.to_string_lossy();
-            if cwd.starts_with(&*home_str) {
-                let relative = &cwd[home_str.len()..];
+            if let Some(relative) = cwd.strip_prefix(&*home_str) {
                 let relative = relative.trim_start_matches(['/', '\\']);
                 format!("~/{relative}")
             } else {
@@ -485,13 +493,15 @@ fn repo_cwd_display() -> String {
             cwd
         };
 
-    if cwd_with_tilde.len() > 30 {
-        format!("...{}", &cwd_with_tilde[cwd_with_tilde.len() - 27..])
+    let char_count = cwd_with_tilde.chars().count();
+    if char_count > 30 {
+        let skip = char_count.saturating_sub(27);
+        let suffix: String = cwd_with_tilde.chars().skip(skip).collect();
+        format!("...{suffix}")
     } else {
         cwd_with_tilde
     }
 }
-
 pub(crate) fn mode_label(app: &App) -> &'static str {
     match app.mode() {
         super::ConversationMode::Plan => "PLAN",
@@ -535,12 +545,15 @@ pub(crate) fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app:
     if suggestions.is_empty() {
         return;
     }
+    if input_area.width < 10 {
+        return;
+    }
 
     let available_space = input_area.y as usize;
     if available_space < 3 {
         return;
     }
-    let max_visible = 6.min(available_space - 2);
+    let max_visible = 6.min(available_space.saturating_sub(2));
     let visible_count = suggestions.len().min(max_visible);
     if visible_count == 0 {
         return;
@@ -562,7 +575,7 @@ pub(crate) fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app:
 
     let selected_idx = app.selected_suggestion_index();
     let scroll_offset = if selected_idx >= visible_count {
-        selected_idx + 1 - visible_count
+        (selected_idx + 1).saturating_sub(visible_count)
     } else {
         0
     };
@@ -614,4 +627,30 @@ pub(crate) fn render_command_popup(frame: &mut Frame<'_>, input_area: Rect, app:
         ));
 
     frame.render_widget(Paragraph::new(items).block(block), popup_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::render_to_test_backend;
+
+    #[test]
+    fn test_render_tiny_terminals_no_panic() {
+        let mut app = App::default();
+
+        // Home screen with various tiny dimensions
+        for width in [0, 1, 5, 10, 25, 40] {
+            for height in [0, 1, 2, 3, 5, 8] {
+                let _ = render_to_test_backend(&app, width, height);
+            }
+        }
+
+        // Chat screen with transcript
+        app.apply(crate::tui::UiEvent::StreamDelta("Hello world!\n🦀 Unicode test 🚀\n".to_string()));
+        for width in [0, 1, 5, 10, 25, 40] {
+            for height in [0, 1, 2, 3, 5, 8] {
+                let _ = render_to_test_backend(&app, width, height);
+            }
+        }
+    }
 }

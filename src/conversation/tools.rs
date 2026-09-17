@@ -729,6 +729,9 @@ pub fn execute_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Missing required argument 'new_string'".to_string())?;
 
+            if old_string.is_empty() {
+                return Err("old_string cannot be empty".to_string());
+            }
             if old_string == new_string {
                 return Err("old_string and new_string are identical; no edit applied".to_string());
             }
@@ -739,19 +742,63 @@ pub fn execute_tool(
             let content = String::from_utf8(read_res.bytes)
                 .map_err(|_| format!("File '{path_str}' is not valid UTF-8 text"))?;
 
-            let count = content.matches(old_string).count();
-            if count == 0 {
-                return Err(format!(
-                    "old_string not found in '{path_str}'. Verify exact line breaks, whitespace, and surrounding context."
-                ));
-            }
-            if count > 1 {
+            let (target_old, target_new) = if content.matches(old_string).count() == 1 {
+                (old_string.to_string(), new_string.to_string())
+            } else if content.matches(old_string).count() > 1 {
+                let count = content.matches(old_string).count();
                 return Err(format!(
                     "old_string matches {count} locations in '{path_str}'. Provide more surrounding lines to uniquely locate the target edit."
                 ));
-            }
+            } else {
+                // Fallback 1: CRLF / LF line ending mismatch
+                let is_crlf = content.contains("\r\n");
+                let norm_old = if is_crlf && !old_string.contains("\r\n") {
+                    old_string.replace('\n', "\r\n")
+                } else if !is_crlf && old_string.contains("\r\n") {
+                    old_string.replace("\r\n", "\n")
+                } else {
+                    old_string.to_string()
+                };
+                let norm_new = if is_crlf && !new_string.contains("\r\n") {
+                    new_string.replace('\n', "\r\n")
+                } else if !is_crlf && new_string.contains("\r\n") {
+                    new_string.replace("\r\n", "\n")
+                } else {
+                    new_string.to_string()
+                };
 
-            let updated = content.replacen(old_string, new_string, 1);
+                if content.matches(&norm_old).count() == 1 {
+                    (norm_old, norm_new)
+                } else if content.matches(&norm_old).count() > 1 {
+                    let count = content.matches(&norm_old).count();
+                    return Err(format!(
+                        "old_string matches {count} locations in '{path_str}'. Provide more surrounding lines to uniquely locate the target edit."
+                    ));
+                } else {
+                    // Fallback 2: old_string is at EOF without trailing newline or vice versa
+                    let trimmed_old = norm_old
+                        .strip_suffix("\r\n")
+                        .or_else(|| norm_old.strip_suffix('\n'));
+                    if let Some(t_old) = trimmed_old {
+                        if !t_old.is_empty()
+                            && content.ends_with(t_old)
+                            && content.matches(t_old).count() == 1
+                        {
+                            (t_old.to_string(), norm_new)
+                        } else {
+                            return Err(format!(
+                                "old_string not found in '{path_str}'. Verify exact line breaks, whitespace, and surrounding context."
+                            ));
+                        }
+                    } else {
+                        return Err(format!(
+                            "old_string not found in '{path_str}'. Verify exact line breaks, whitespace, and surrounding context."
+                        ));
+                    }
+                }
+            };
+
+            let updated = content.replacen(&target_old, &target_new, 1);
             let mutation = Mutation::Write {
                 path: PathBuf::from(path_str),
                 bytes: updated.into_bytes(),
@@ -760,9 +807,9 @@ pub fn execute_tool(
                 .build(mode, vec![mutation], true)
                 .map_err(|e| format!("Failed to apply edit to '{path_str}': {e}"))?;
 
-            let old_lines = old_string.lines().count();
-            let new_lines = new_string.lines().count();
-            let start_line = if let Some(idx) = content.find(old_string) {
+            let old_lines = target_old.lines().count();
+            let new_lines = target_new.lines().count();
+            let start_line = if let Some(idx) = content.find(&target_old) {
                 content[..idx].lines().count() + 1
             } else {
                 1
@@ -780,8 +827,13 @@ pub fn execute_tool(
             let target_dir = if subpath == "." || subpath.is_empty() {
                 workspace.root_path().to_path_buf()
             } else {
-                workspace.root_path().join(subpath)
+                workspace
+                    .resolve_path(subpath)
+                    .map_err(|e| format!("Access denied for path '{subpath}': {e}"))?
             };
+            if !target_dir.is_dir() {
+                return Err(format!("'{}' is not a directory", target_dir.display()));
+            }
 
             let entries = std::fs::read_dir(&target_dir)
                 .map_err(|e| format!("Failed to read directory '{}': {e}", target_dir.display()))?;
@@ -828,8 +880,13 @@ pub fn execute_tool(
             let target_dir = if subpath == "." || subpath.is_empty() {
                 workspace.root_path().to_path_buf()
             } else {
-                workspace.root_path().join(subpath)
+                workspace
+                    .resolve_path(subpath)
+                    .map_err(|e| format!("Access denied for path '{subpath}': {e}"))?
             };
+            if !target_dir.is_dir() {
+                return Err(format!("'{}' is not a directory", target_dir.display()));
+            }
 
             let mut matched = Vec::new();
             walk_dir_glob(&target_dir, workspace.root_path(), pattern, &mut matched, 100);
@@ -853,8 +910,13 @@ pub fn execute_tool(
             let target_dir = if subpath == "." || subpath.is_empty() {
                 workspace.root_path().to_path_buf()
             } else {
-                workspace.root_path().join(subpath)
+                workspace
+                    .resolve_path(subpath)
+                    .map_err(|e| format!("Access denied for path '{subpath}': {e}"))?
             };
+            if !target_dir.is_dir() {
+                return Err(format!("'{}' is not a directory", target_dir.display()));
+            }
 
             let mut matches = Vec::new();
             walk_dir_grep(&target_dir, workspace.root_path(), query, &mut matches, 100);
@@ -1042,8 +1104,12 @@ pub fn execute_webfetch(url: &str) -> Result<String, String> {
         ));
     }
 
-    let resp = ureq::get(trimmed_url)
+    let agent = ureq::builder()
         .timeout(std::time::Duration::from_secs(12))
+        .redirects(5)
+        .build();
+    let resp = agent
+        .get(trimmed_url)
         .set(
             "User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1090,6 +1156,9 @@ pub fn clean_html_to_text(html: &str) -> String {
                     break;
                 }
                 tag_content.push(next_ch);
+                if tag_content.len() > 1024 {
+                    break;
+                }
             }
 
             let trimmed_tag = tag_content.trim();
@@ -1118,6 +1187,8 @@ pub fn clean_html_to_text(html: &str) -> String {
 
             if let Some(skip) = &skip_until_tag {
                 if is_closing && tag_name == *skip {
+                    skip_until_tag = None;
+                } else if !is_closing && matches!(tag_name.as_str(), "body" | "article" | "main") {
                     skip_until_tag = None;
                 }
                 continue;
@@ -1165,7 +1236,7 @@ pub fn clean_html_to_text(html: &str) -> String {
                     found_semi = true;
                     break;
                 }
-                if next_ch.is_alphanumeric() || next_ch == '#' {
+                if (next_ch.is_alphanumeric() || next_ch == '#') && entity.len() < 32 {
                     entity.push(next_ch);
                     chars.next();
                 } else {
@@ -1173,8 +1244,13 @@ pub fn clean_html_to_text(html: &str) -> String {
                 }
             }
             if found_semi {
-                let decoded = decode_entity(&entity);
-                out.push(decoded);
+                if let Some(decoded) = decode_entity(&entity) {
+                    out.push(decoded);
+                } else {
+                    out.push('&');
+                    out.push_str(&entity);
+                    out.push(';');
+                }
             } else {
                 out.push('&');
                 out.push_str(&entity);
@@ -1203,30 +1279,36 @@ fn ensure_newline(s: &mut String) {
     }
 }
 
-fn decode_entity(entity: &str) -> char {
+fn decode_entity(entity: &str) -> Option<char> {
     match entity {
-        "amp" => '&',
-        "lt" => '<',
-        "gt" => '>',
-        "quot" => '"',
-        "apos" => '\'',
-        "nbsp" => ' ',
-        "copy" => '©',
-        "reg" => '®',
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some(' '),
+        "copy" => Some('©'),
+        "reg" => Some('®'),
         _ => {
             if entity.starts_with("#x") || entity.starts_with("#X") {
-                u32::from_str_radix(&entity[2..], 16)
-                    .ok()
-                    .and_then(char::from_u32)
-                    .unwrap_or('?')
+                if entity.len() > 2 {
+                    u32::from_str_radix(&entity[2..], 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                } else {
+                    None
+                }
             } else if entity.starts_with('#') {
-                entity[1..]
-                    .parse::<u32>()
-                    .ok()
-                    .and_then(char::from_u32)
-                    .unwrap_or('?')
+                if entity.len() > 1 {
+                    entity[1..]
+                        .parse::<u32>()
+                        .ok()
+                        .and_then(char::from_u32)
+                } else {
+                    None
+                }
             } else {
-                ' '
+                None
             }
         }
     }
@@ -1309,8 +1391,12 @@ pub fn execute_websearch(query: &str) -> Result<String, String> {
 
     // 1. Try DuckDuckGo HTML search
     let search_url = format!("{html_endpoint}{}", url_encode(trimmed_query));
-    let html_res = ureq::get(&search_url)
+    let agent = ureq::builder()
         .timeout(std::time::Duration::from_secs(12))
+        .redirects(5)
+        .build();
+    let html_res = agent
+        .get(&search_url)
         .set(
             "User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1341,8 +1427,8 @@ pub fn execute_websearch(query: &str) -> Result<String, String> {
 
     // 2. Fallback to DuckDuckGo Instant Answer API
     let api_url = format!("{api_endpoint}{}", url_encode(trimmed_query));
-    let api_res = ureq::get(&api_url)
-        .timeout(std::time::Duration::from_secs(12))
+    let api_res = agent
+        .get(&api_url)
         .set(
             "User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1504,11 +1590,13 @@ fn extract_title_and_url_from_block(block: &str) -> (String, String) {
         if let Some(href) = extract_attr_val(after_a, "href") {
             if let Some(end_tag) = after_a.find('>') {
                 let after_tag = &after_a[end_tag + 1..];
-                if let Some(close_a) = after_tag.find("</a>") {
-                    let raw_title = &after_tag[..close_a];
-                    let clean_title = clean_html_to_text(raw_title);
-                    return (href, clean_title);
-                }
+                let close_idx = after_tag
+                    .find("</a>")
+                    .or_else(|| after_tag.find("</A>"))
+                    .unwrap_or(after_tag.len());
+                let raw_title = &after_tag[..close_idx];
+                let clean_title = clean_html_to_text(raw_title);
+                return (href, clean_title);
             }
         }
     }
@@ -1538,7 +1626,10 @@ fn extract_link_and_text(slice: &str, marker: &str) -> Option<(String, String)> 
         let href = extract_attr_val(after_a, "href")?;
         let close_open_tag = after_a.find('>')?;
         let after_open = &after_a[close_open_tag + 1..];
-        let close_a = after_open.find("</a>")?;
+        let close_a = after_open
+            .find("</a>")
+            .or_else(|| after_open.find("</A>"))
+            .unwrap_or(after_open.len());
         let text = clean_html_to_text(&after_open[..close_a]);
         return Some((href, text));
     }
@@ -2156,5 +2247,121 @@ mod tests {
         assert_eq!(parsed_win.selector, Some(LineSelector::Range(10, 20)));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_path_traversal_guards() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "clawcode-path-guard-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let workspace = Workspace::open(&temp_dir).unwrap();
+
+        // list_dir with parent traversal
+        let res = execute_tool(&workspace, Mode::Plan, "list_dir", r#"{"path": "../"}"#);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Access denied"));
+
+        // glob_search with parent traversal
+        let res = execute_tool(&workspace, Mode::Plan, "glob_search", r#"{"pattern": "*.rs", "path": "../../"}"#);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Access denied"));
+
+        // grep_search with parent traversal
+        let res = execute_tool(&workspace, Mode::Plan, "grep_search", r#"{"query": "secret", "path": "../"}"#);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Access denied"));
+
+        // read_file with parent traversal
+        let res = execute_tool(&workspace, Mode::Plan, "read_file", r#"{"path": "../secret.txt"}"#);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Failed to read"));
+
+        // write_file with parent traversal
+        let res = execute_tool(&workspace, Mode::Build, "write_file", r#"{"path": "../secret.txt", "content": "bad"}"#);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Failed to write"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_edit_file_edge_cases() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "clawcode-edit-edge-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let workspace = Workspace::open(&temp_dir).unwrap();
+
+        // 1. File at EOF without newline, LLM provides old_string with newline
+        let path = "eof_no_newline.txt";
+        let content = "def hello():\n    print(\"hello\")";
+        let _ = execute_tool(&workspace, Mode::Build, "write_file", &serde_json::json!({
+            "path": path,
+            "content": content
+        }).to_string()).unwrap();
+
+        let edit_res = execute_tool(&workspace, Mode::Build, "edit_file", &serde_json::json!({
+            "path": path,
+            "old_string": "    print(\"hello\")\n",
+            "new_string": "    print(\"world\")\n"
+        }).to_string());
+        assert!(edit_res.is_ok(), "Expected edit to succeed at EOF without newline: {:?}", edit_res);
+
+        let read_back = execute_tool(&workspace, Mode::Plan, "read_file", &serde_json::json!({
+            "path": format!("{path}:raw")
+        }).to_string()).unwrap();
+        assert!(read_back.contains("print(\"world\")"));
+
+        // 2. CRLF file edited with LF strings
+        let crlf_path = "crlf.txt";
+        let crlf_content = "line 1\r\nline 2\r\nline 3";
+        let _ = execute_tool(&workspace, Mode::Build, "write_file", &serde_json::json!({
+            "path": crlf_path,
+            "content": crlf_content
+        }).to_string()).unwrap();
+
+        let crlf_edit = execute_tool(&workspace, Mode::Build, "edit_file", &serde_json::json!({
+            "path": crlf_path,
+            "old_string": "line 2\n",
+            "new_string": "line two\n"
+        }).to_string());
+        assert!(crlf_edit.is_ok(), "Expected CRLF file edit with LF string to succeed: {:?}", crlf_edit);
+
+        // 3. Empty old_string is rejected
+        let empty_edit = execute_tool(&workspace, Mode::Build, "edit_file", &serde_json::json!({
+            "path": crlf_path,
+            "old_string": "",
+            "new_string": "new"
+        }).to_string());
+        assert!(empty_edit.is_err());
+        assert!(empty_edit.unwrap_err().contains("old_string cannot be empty"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_clean_html_to_text_robustness() {
+        // Unclosed script followed by main content
+        let html = "<html><script>let x = 1; <main><h1>Header</h1><p>Body paragraph &amp; more</p></main></html>";
+        let text = clean_html_to_text(html);
+        assert!(text.contains("Header"));
+        assert!(text.contains("Body paragraph & more"));
+
+        // Malformed entity does not produce '?'
+        let html_entity = "Price: &#not_a_number; and &unknown; item";
+        let text_entity = clean_html_to_text(html_entity);
+        assert!(!text_entity.contains('?'));
+        assert!(text_entity.contains("&#not_a_number;"));
     }
 }

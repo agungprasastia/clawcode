@@ -54,7 +54,7 @@ pub fn render_status_dialog(
     dialog: &StatusDialogState,
     theme: &Theme,
 ) {
-    let width = area.width.clamp(40, 72);
+    let width = area.width.clamp(40, 72).min(area.width);
     let height = 13.min(area.height.saturating_sub(2));
 
     let dialog_area = Rect {

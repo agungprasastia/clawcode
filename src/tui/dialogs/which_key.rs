@@ -32,7 +32,7 @@ impl WhichKeyState {
 }
 
 pub fn render_which_key(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-    let width = area.width.clamp(36, 72);
+    let width = area.width.clamp(36, 72).min(area.width);
     let height = 14.min(area.height.saturating_sub(2));
 
     let popup_area = Rect {

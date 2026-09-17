@@ -169,9 +169,7 @@ impl Db {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         // Every connection (runtime + writer) waits for a competing writer
         // instead of failing the batch with SQLITE_BUSY.
-        connection
-            .busy_timeout(std::time::Duration::from_millis(2_000))
-            .expect("set busy timeout");
+        let _ = connection.busy_timeout(std::time::Duration::from_millis(2_000));
         schema::migrate(&connection)?;
         // If workspace 1 exists with an empty root_path, seed it with current working directory
         if let Ok(cwd) = std::env::current_dir() {
@@ -189,9 +187,7 @@ impl Db {
     /// How long a SQLite access waits for a competing writer before failing.
     /// Relevant once the `Db` is shared behind a mutex across threads.
     pub fn set_busy_timeout(&self, timeout: std::time::Duration) {
-        self.connection
-            .busy_timeout(timeout)
-            .expect("set busy timeout");
+        let _ = self.connection.busy_timeout(timeout);
     }
 
     /// Record or clear a session's last error.

@@ -141,27 +141,16 @@ impl Transport for HttpTransport {
         let reader = std::io::BufReader::new(resp.into_reader());
         use std::io::BufRead;
         let mut usage = None;
+        let mut current_data = String::new();
 
-        for line_result in reader.lines() {
-            let line = match line_result {
-                Ok(l) => l,
-                Err(e) => {
-                    let _ = sender.send(StreamEvent::Error(e.to_string()));
-                    let _ = sender.flush();
-                    return Err(ProviderError::Network(e.to_string()));
-                }
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with(':') {
-                continue;
+        let mut process_data = |data: &str| -> Result<(), ProviderError> {
+            let trimmed = data.trim();
+            if trimmed.is_empty() || trimmed == "[DONE]" {
+                return Ok(());
             }
-            if trimmed == "data: [DONE]" || trimmed == "[DONE]" {
-                break;
-            }
-            let json_str = trimmed.strip_prefix("data:").unwrap_or(trimmed).trim();
-            let value: Value = match serde_json::from_str(json_str) {
+            let value: Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(_) => return Ok(()),
             };
 
             usage = usage.or_else(|| value.get("usage").and_then(parse_usage));
@@ -183,13 +172,85 @@ impl Transport for HttpTransport {
                         }
                     }
                     let _ = sender.flush();
+                    Ok(())
                 }
                 Err(e) => {
                     let _ = sender.send(StreamEvent::Error(e.to_string()));
                     let _ = sender.flush();
-                    return Err(e);
+                    Err(e)
                 }
             }
+        };
+
+        for line_result in reader.lines() {
+            let line = match line_result {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = sender.send(StreamEvent::Error(e.to_string()));
+                    let _ = sender.flush();
+                    return Err(ProviderError::Network(e.to_string()));
+                }
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                if !current_data.is_empty() {
+                    let to_process = std::mem::take(&mut current_data);
+                    if process_data(&to_process).is_err() {
+                        return Ok(());
+                    }
+                }
+                continue;
+            }
+            if trimmed.starts_with(':') {
+                continue;
+            }
+            if trimmed == "data: [DONE]" || trimmed == "[DONE]" {
+                break;
+            }
+            if let Some(rest) = trimmed.strip_prefix("data:") {
+                let payload = rest.trim();
+                if payload == "[DONE]" {
+                    break;
+                }
+                if current_data.is_empty() && serde_json::from_str::<Value>(payload).is_ok() {
+                    if process_data(payload).is_err() {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                if !current_data.is_empty() {
+                    current_data.push('\n');
+                }
+                current_data.push_str(payload);
+                if serde_json::from_str::<Value>(&current_data).is_ok() {
+                    let to_process = std::mem::take(&mut current_data);
+                    if process_data(&to_process).is_err() {
+                        return Ok(());
+                    }
+                }
+            } else if trimmed.starts_with("event:") || trimmed.starts_with("id:") || trimmed.starts_with("retry:") {
+                continue;
+            } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                if current_data.is_empty() && serde_json::from_str::<Value>(trimmed).is_ok() {
+                    if process_data(trimmed).is_err() {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                if !current_data.is_empty() {
+                    current_data.push('\n');
+                }
+                current_data.push_str(trimmed);
+                if serde_json::from_str::<Value>(&current_data).is_ok() {
+                    let to_process = std::mem::take(&mut current_data);
+                    if process_data(&to_process).is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        if !current_data.is_empty() {
+            let _ = process_data(&current_data);
         }
         let _ = sender.flush();
         Ok(())
@@ -274,25 +335,116 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
             serde_json::Value,
             Box<dyn FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send>,
         ) = match self.id.as_str() {
-            "anthropic" => (
-                serde_json::json!({
+            "anthropic" => {
+                let mut system_prompt = None;
+                let mut anthropic_messages = Vec::new();
+
+                for m in &request.messages {
+                    if m.role == "system" {
+                        system_prompt = Some(m.content.clone());
+                    } else if m.role == "tool" {
+                        anthropic_messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                                "content": m.content,
+                            }]
+                        }));
+                    } else if m.role == "assistant" && m.tool_calls.is_some() {
+                        let mut contents = Vec::new();
+                        if !m.content.is_empty() {
+                            contents.push(serde_json::json!({
+                                "type": "text",
+                                "text": m.content,
+                            }));
+                        }
+                        if let Some(tcalls) = &m.tool_calls {
+                            for call in tcalls {
+                                let id = call.get("id").and_then(Value::as_str).unwrap_or("");
+                                let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+                                let args_val: Value = call
+                                    .pointer("/function/arguments")
+                                    .and_then(|a| match a {
+                                        Value::String(s) => serde_json::from_str(s).ok(),
+                                        other => Some(other.clone()),
+                                    })
+                                    .unwrap_or_else(|| serde_json::json!({}));
+                                contents.push(serde_json::json!({
+                                    "type": "tool_use",
+                                    "id": id,
+                                    "name": name,
+                                    "input": args_val,
+                                }));
+                            }
+                        }
+                        anthropic_messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": contents,
+                        }));
+                    } else {
+                        anthropic_messages.push(serde_json::json!({
+                            "role": m.role,
+                            "content": m.content,
+                        }));
+                    }
+                }
+
+                if anthropic_messages.is_empty() {
+                    anthropic_messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": request.prompt,
+                    }));
+                }
+
+                let mut payload = serde_json::json!({
                     "model": request.model,
-                    "messages": messages,
+                    "messages": anthropic_messages,
                     "max_tokens": request.max_output_tokens,
                     "stream": true,
-                }),
-                Box::new(anthropic_parser()),
-            ),
+                });
+                if let Some(sys) = system_prompt {
+                    payload["system"] = serde_json::Value::String(sys);
+                }
+                if !request.tools.is_empty() {
+                    let anthropic_tools: Vec<Value> = request
+                        .tools
+                        .iter()
+                        .filter_map(|t| {
+                            let func = t.get("function")?;
+                            let name = func.get("name")?;
+                            let desc = func
+                                .get("description")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!(""));
+                            let params = func
+                                .get("parameters")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            Some(serde_json::json!({
+                                "name": name,
+                                "description": desc,
+                                "input_schema": params,
+                            }))
+                        })
+                        .collect();
+                    if !anthropic_tools.is_empty() {
+                        payload["tools"] = serde_json::Value::Array(anthropic_tools);
+                    }
+                }
+                (payload, Box::new(anthropic_parser()))
+            }
             "ollama" => {
                 if self.endpoint.contains("/api/chat") {
-                    (
-                        serde_json::json!({
-                            "model": request.model,
-                            "messages": messages,
-                            "stream": true,
-                        }),
-                        Box::new(ollama_parser()),
-                    )
+                    let mut payload = serde_json::json!({
+                        "model": request.model,
+                        "messages": messages,
+                        "stream": true,
+                    });
+                    if !request.tools.is_empty() {
+                        payload["tools"] = serde_json::Value::Array(request.tools.clone());
+                    }
+                    (payload, Box::new(ollama_parser()))
                 } else {
                     (
                         serde_json::json!({
@@ -388,18 +540,43 @@ fn parse_lines(
 ) -> Result<StreamResponse, ProviderError> {
     let mut events = Vec::new();
     let mut usage = None;
-    for line in body
-        .lines()
-        .filter(|line| !line.trim().is_empty() && *line != "data: [DONE]")
-    {
-        let json = line.strip_prefix("data:").unwrap_or(line).trim();
-        let value: Value = serde_json::from_str(json)
+
+    let trimmed_body = body.trim();
+    if trimmed_body.starts_with('{') || trimmed_body.starts_with('[') {
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed_body) {
+            let raw_usage = value.get("usage").and_then(parse_usage);
+            for event in parser(value)? {
+                let event = match event {
+                    StreamEvent::Finish { reason } => {
+                        if let Some(value) = raw_usage {
+                            events.push(StreamEvent::Usage(value));
+                        }
+                        StreamEvent::Finish { reason }
+                    }
+                    other => other,
+                };
+                events.push(event);
+            }
+            return Ok(StreamResponse { events });
+        }
+    }
+
+    let mut current_data = String::new();
+    let mut parse_block = |data: &str,
+                           events: &mut Vec<StreamEvent>,
+                           usage: &mut Option<crate::provider::Usage>|
+     -> Result<(), ProviderError> {
+        let trimmed = data.trim();
+        if trimmed.is_empty() || trimmed == "[DONE]" {
+            return Ok(());
+        }
+        let value: Value = serde_json::from_str(trimmed)
             .map_err(|error| ProviderError::Protocol(error.to_string()))?;
-        usage = usage.or_else(|| value.get("usage").and_then(parse_usage));
+        *usage = usage.or_else(|| value.get("usage").and_then(parse_usage));
         for event in parser(value)? {
             let event = match event {
                 StreamEvent::Finish { reason } => {
-                    if let Some(value) = usage {
+                    if let Some(value) = *usage {
                         events.push(StreamEvent::Usage(value));
                     }
                     StreamEvent::Finish { reason }
@@ -408,7 +585,66 @@ fn parse_lines(
             };
             events.push(event);
         }
+        Ok(())
+    };
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !current_data.is_empty() {
+                let data = std::mem::take(&mut current_data);
+                parse_block(&data, &mut events, &mut usage)?;
+            }
+            continue;
+        }
+        if trimmed.starts_with(':') {
+            continue;
+        }
+        if trimmed == "data: [DONE]" || trimmed == "[DONE]" {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("data:") {
+            let payload = rest.trim();
+            if payload == "[DONE]" {
+                break;
+            }
+            if current_data.is_empty() && serde_json::from_str::<Value>(payload).is_ok() {
+                parse_block(payload, &mut events, &mut usage)?;
+                continue;
+            }
+            if !current_data.is_empty() {
+                current_data.push('\n');
+            }
+            current_data.push_str(payload);
+            if serde_json::from_str::<Value>(&current_data).is_ok() {
+                let data = std::mem::take(&mut current_data);
+                parse_block(&data, &mut events, &mut usage)?;
+            }
+        } else if trimmed.starts_with("event:")
+            || trimmed.starts_with("id:")
+            || trimmed.starts_with("retry:")
+        {
+            continue;
+        } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            if current_data.is_empty() && serde_json::from_str::<Value>(trimmed).is_ok() {
+                parse_block(trimmed, &mut events, &mut usage)?;
+                continue;
+            }
+            if !current_data.is_empty() {
+                current_data.push('\n');
+            }
+            current_data.push_str(trimmed);
+            if serde_json::from_str::<Value>(&current_data).is_ok() {
+                let data = std::mem::take(&mut current_data);
+                parse_block(&data, &mut events, &mut usage)?;
+            }
+        }
     }
+
+    if !current_data.is_empty() {
+        parse_block(&current_data, &mut events, &mut usage)?;
+    }
+
     Ok(StreamResponse { events })
 }
 
@@ -551,6 +787,8 @@ pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
 }
 
 pub(crate) fn anthropic_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send {
+    let mut active_tools: std::collections::HashMap<usize, (String, String)> =
+        std::collections::HashMap::new();
     move |value: Value| -> Result<Vec<StreamEvent>, ProviderError> {
         let mut events = Vec::new();
         if value.get("type").and_then(Value::as_str) == Some("error") {
@@ -560,6 +798,8 @@ pub(crate) fn anthropic_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>
                 .unwrap_or("anthropic error");
             return Err(ProviderError::Protocol(msg.into()));
         }
+
+        // Streaming text
         if let Some(s) = value
             .pointer("/delta/text")
             .or_else(|| value.pointer("/content/0/text"))
@@ -569,9 +809,75 @@ pub(crate) fn anthropic_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>
                 events.push(StreamEvent::TextDelta(s.into()));
             }
         }
-        if let Some(stop) = value.get("stop_reason").and_then(Value::as_str) {
+
+        // Streaming content_block_start for tool_use
+        if value.get("type").and_then(Value::as_str) == Some("content_block_start") {
+            let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if let Some(cb) = value.get("content_block").and_then(Value::as_object) {
+                if cb.get("type").and_then(Value::as_str) == Some("tool_use") {
+                    let id = cb.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                    let name = cb.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                    active_tools.insert(index, (id.clone(), name.clone()));
+                    events.push(StreamEvent::ToolCallStart { id, name });
+                }
+            }
+        }
+
+        // Streaming content_block_delta for tool_use (input_json_delta)
+        if value.get("type").and_then(Value::as_str) == Some("content_block_delta") {
+            let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if let Some(partial) = value.pointer("/delta/partial_json").and_then(Value::as_str) {
+                if !partial.is_empty() {
+                    if let Some((id, _)) = active_tools.get(&index) {
+                        events.push(StreamEvent::ToolCallDelta {
+                            id: id.clone(),
+                            arguments: partial.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Streaming content_block_stop
+        if value.get("type").and_then(Value::as_str) == Some("content_block_stop") {
+            let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if let Some((id, _)) = active_tools.remove(&index) {
+                events.push(StreamEvent::ToolCallEnd { id });
+            }
+        }
+
+        // Non-streaming / message content array with tool_use
+        if let Some(content_array) = value.get("content").and_then(Value::as_array) {
+            for (idx, block) in content_array.iter().enumerate() {
+                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                    let id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("call_{idx}"));
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                    let args = block.get("input").map(|v| v.to_string()).unwrap_or_default();
+                    events.push(StreamEvent::ToolCallStart { id: id.clone(), name });
+                    if !args.is_empty() {
+                        events.push(StreamEvent::ToolCallDelta { id: id.clone(), arguments: args });
+                    }
+                    events.push(StreamEvent::ToolCallEnd { id });
+                }
+            }
+        }
+
+        // Stop reason (streaming in message_delta, or non-streaming in top-level stop_reason)
+        let stop_reason = value
+            .pointer("/delta/stop_reason")
+            .or_else(|| value.get("stop_reason"))
+            .and_then(Value::as_str);
+        if let Some(stop) = stop_reason {
+            for (_, (id, _)) in active_tools.drain() {
+                events.push(StreamEvent::ToolCallEnd { id });
+            }
             events.push(finish_event(stop));
         }
+
         Ok(events)
     }
 }
@@ -591,9 +897,46 @@ pub(crate) fn ollama_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
                 events.push(StreamEvent::TextDelta(s.into()));
             }
         }
+        let mut has_tool_calls = false;
+        if let Some(tool_calls) = value
+            .pointer("/message/tool_calls")
+            .and_then(Value::as_array)
+        {
+            for (idx, call) in tool_calls.iter().enumerate() {
+                has_tool_calls = true;
+                let id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_else(|| format!("ollama_call_{idx}"));
+                let name = call
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let args = match call.pointer("/function/arguments") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(val) => val.to_string(),
+                    None => String::new(),
+                };
+
+                events.push(StreamEvent::ToolCallStart {
+                    id: id.clone(),
+                    name,
+                });
+                if !args.is_empty() {
+                    events.push(StreamEvent::ToolCallDelta {
+                        id: id.clone(),
+                        arguments: args,
+                    });
+                }
+                events.push(StreamEvent::ToolCallEnd { id });
+            }
+        }
         if let Some(done) = value.get("done").and_then(Value::as_bool) {
             if done {
-                events.push(finish_event("stop"));
+                let reason = if has_tool_calls { "tool_calls" } else { "stop" };
+                events.push(finish_event(reason));
             }
         }
         Ok(events)
@@ -826,5 +1169,94 @@ mod tests {
         assert_eq!(msgs[0]["name"], "read_file");
         assert_eq!(msgs[0]["tool_call_id"], "call_123");
         assert_eq!(msgs[0]["content"], "file content");
+    }
+    #[test]
+    fn parses_sse_with_comments_and_event_lines() {
+        let body = ": keepalive ping\nevent: message\ndata: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n: another comment\nevent: done\ndata: [DONE]\n";
+        let response = JsonProvider::<MockTransport>::parse_openai(body).unwrap();
+        assert_eq!(response.text(), "hello");
+    }
+
+    #[test]
+    fn parses_sse_multiline_data() {
+        let body = "data: {\"choices\":\ndata: [{\"delta\":{\"content\":\"multi\"}}]}\ndata: [DONE]";
+        let response = JsonProvider::<MockTransport>::parse_openai(body).unwrap();
+        assert_eq!(response.text(), "multi");
+    }
+
+    #[test]
+    fn parses_anthropic_streaming_tool_use() {
+        let body = r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"read_file","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"foo.rs\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}
+"#;
+        let response = JsonProvider::<MockTransport>::parse_anthropic(body).unwrap();
+        assert_eq!(response.events.len(), 4);
+        assert!(matches!(&response.events[0], StreamEvent::ToolCallStart { id, name } if id == "toolu_01" && name == "read_file"));
+        assert!(matches!(&response.events[1], StreamEvent::ToolCallDelta { id, arguments } if id == "toolu_01" && arguments.contains("foo.rs")));
+        assert!(matches!(&response.events[2], StreamEvent::ToolCallEnd { id } if id == "toolu_01"));
+        assert!(matches!(&response.events[3], StreamEvent::Finish { reason } if *reason == crate::provider::FinishReason::ToolCall));
+    }
+
+    #[test]
+    fn parses_ollama_tool_calls() {
+        let body = r#"{"model":"llama3","message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","function":{"name":"read_file","arguments":{"path":"src/main.rs"}}}]},"done":true}"#;
+        let response = JsonProvider::<MockTransport>::parse_ollama(body).unwrap();
+        assert!(matches!(&response.events[0], StreamEvent::ToolCallStart { id, name } if id == "call_1" && name == "read_file"));
+        assert!(matches!(&response.events[1], StreamEvent::ToolCallDelta { id, arguments } if id == "call_1" && arguments.contains("src/main.rs")));
+        assert!(matches!(&response.events[2], StreamEvent::ToolCallEnd { id } if id == "call_1"));
+        assert!(matches!(&response.events[3], StreamEvent::Finish { reason } if *reason == crate::provider::FinishReason::ToolCall));
+    }
+
+    #[test]
+    fn build_payload_anthropic_extracts_system_and_tools() {
+        let provider = JsonProvider::new(
+            "anthropic",
+            "https://api.anthropic.com/v1/messages",
+            MockTransport("".into()),
+        );
+        let request = StreamRequest::new("claude-3-opus", "", 100)
+            .with_messages(vec![
+                crate::provider::ChatMessage {
+                    role: "system".into(),
+                    content: "system instructions".into(),
+                    tool_call_id: None,
+                    tool_calls: None,
+                    name: None,
+                },
+                crate::provider::ChatMessage {
+                    role: "user".into(),
+                    content: "hello".into(),
+                    tool_call_id: None,
+                    tool_calls: None,
+                    name: None,
+                },
+            ])
+            .with_tools(vec![serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "edit_file",
+                    "description": "Edits file",
+                    "parameters": { "type": "object" }
+                }
+            })]);
+        let (body, _) = provider.build_payload(&request);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["system"], "system instructions");
+        let msgs = parsed["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        let tools = parsed["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["name"], "edit_file");
+        assert_eq!(tools[0]["description"], "Edits file");
+        assert!(tools[0]["input_schema"].is_object());
     }
 }

@@ -1424,7 +1424,12 @@ impl App {
     }
 
     pub fn selected_suggestion_index(&self) -> usize {
-        self.selected_suggestion
+        let count = self.suggestion_count();
+        if count == 0 {
+            0
+        } else {
+            self.selected_suggestion.min(count - 1)
+        }
     }
 
     pub fn permission_dialog(&self) -> Option<&PermissionDialogState> {
@@ -1593,7 +1598,7 @@ impl App {
         if !self.prompt.starts_with("/model ") {
             return Vec::new();
         }
-        let query = self.prompt[7..].trim().to_lowercase();
+        let query = self.prompt.strip_prefix("/model ").unwrap_or("").trim().to_lowercase();
         self.available_models
             .iter()
             .map(|m| m.id.clone())
@@ -1613,17 +1618,21 @@ impl App {
         let count = self.suggestion_count();
         if count > 0 {
             self.selected_suggestion = (self.selected_suggestion + 1) % count;
+        } else {
+            self.selected_suggestion = 0;
         }
     }
 
     pub fn previous_suggestion(&mut self) {
         let count = self.suggestion_count();
         if count > 0 {
-            self.selected_suggestion = if self.selected_suggestion == 0 {
+            self.selected_suggestion = if self.selected_suggestion == 0 || self.selected_suggestion >= count {
                 count - 1
             } else {
                 self.selected_suggestion - 1
             };
+        } else {
+            self.selected_suggestion = 0;
         }
     }
 
@@ -1640,13 +1649,21 @@ impl App {
                 self.draft_prompt = self.prompt.clone();
                 let last_idx = self.prompt_history.len() - 1;
                 self.history_index = Some(last_idx);
-                self.prompt = self.prompt_history[last_idx].clone();
+                if let Some(p) = self.prompt_history.get(last_idx) {
+                    self.prompt = p.clone();
+                }
             }
             Some(idx) => {
-                if idx > 0 {
-                    let next_idx = idx - 1;
+                let valid_idx = idx.min(self.prompt_history.len().saturating_sub(1));
+                if valid_idx > 0 {
+                    let next_idx = valid_idx - 1;
                     self.history_index = Some(next_idx);
-                    self.prompt = self.prompt_history[next_idx].clone();
+                    if let Some(p) = self.prompt_history.get(next_idx) {
+                        self.prompt = p.clone();
+                    }
+                } else if let Some(p) = self.prompt_history.get(0) {
+                    self.history_index = Some(0);
+                    self.prompt = p.clone();
                 }
             }
         }
@@ -1657,7 +1674,9 @@ impl App {
             if idx + 1 < self.prompt_history.len() {
                 let next_idx = idx + 1;
                 self.history_index = Some(next_idx);
-                self.prompt = self.prompt_history[next_idx].clone();
+                if let Some(p) = self.prompt_history.get(next_idx) {
+                    self.prompt = p.clone();
+                }
             } else {
                 self.history_index = None;
                 self.prompt = std::mem::take(&mut self.draft_prompt);
@@ -1753,13 +1772,8 @@ impl App {
             if trimmed == "/compact" {
                 if self.transcript.len() > 1024 {
                     let keep_bytes = 1024.min(self.transcript.len());
-                    let split_idx = self.transcript.len() - keep_bytes;
-                    let mut boundary = split_idx;
-                    while boundary < self.transcript.len()
-                        && !self.transcript.is_char_boundary(boundary)
-                    {
-                        boundary += 1;
-                    }
+                    let split_idx = self.transcript.len().saturating_sub(keep_bytes);
+                    let boundary = ceil_char_boundary(&self.transcript, split_idx);
                     let tail = self.transcript[boundary..].to_string();
                     self.transcript = format!("[earlier transcript compacted]\n{tail}");
                     self.diagnostic = "session context compacted".to_string();
@@ -2461,10 +2475,9 @@ impl App {
                 self.diagnostic = format!("provider connected: {provider}");
             }
             CommandOutput::ModelSelected(model) => {
-                let model_to_set = if !self.provider.is_empty()
-                    && model.starts_with(&format!("{}/", self.provider))
-                {
-                    model[self.provider.len() + 1..].to_string()
+                let model_to_set = if !self.provider.is_empty() {
+                    let prefix = format!("{}/", self.provider);
+                    model.strip_prefix(&prefix).unwrap_or(&model).to_string()
                 } else {
                     model
                 };
@@ -2540,7 +2553,7 @@ impl App {
             return;
         }
 
-        let retained_bytes = Self::MAX_TRANSCRIPT_BYTES - Self::TRUNCATION_MARKER.len();
+        let retained_bytes = Self::MAX_TRANSCRIPT_BYTES.saturating_sub(Self::TRUNCATION_MARKER.len());
         let start = ceil_char_boundary(
             &self.transcript,
             self.transcript.len().saturating_sub(retained_bytes),
@@ -2569,12 +2582,12 @@ impl UiEventQueue {
     pub const MAX_COALESCED_STREAM_BYTES: usize = 64 * 1024;
 
     pub fn new(capacity: usize) -> Self {
-        assert!(capacity >= 3, "UI event queue capacity must be at least 3");
+        let capacity = capacity.max(3);
         Self {
             capacity,
             quit: false,
             cancel: false,
-            events: VecDeque::with_capacity(capacity - 3),
+            events: VecDeque::with_capacity(capacity.saturating_sub(3)),
             delta: String::new(),
         }
     }
@@ -2589,10 +2602,13 @@ impl UiEventQueue {
                 self.delta.push_str(&delta[..end]);
             }
             event => {
-                if self.events.len() == self.capacity - 3 {
+                let max_events = self.capacity.saturating_sub(3);
+                while self.events.len() >= max_events && !self.events.is_empty() {
                     self.events.pop_front();
                 }
-                self.events.push_back(event);
+                if max_events > 0 {
+                    self.events.push_back(event);
+                }
             }
         }
     }
@@ -2640,16 +2656,126 @@ impl UiEventQueue {
     }
 }
 
-fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+fn floor_char_boundary(value: &str, index: usize) -> usize {
+    let mut index = index.min(value.len());
     while !value.is_char_boundary(index) {
-        index -= 1;
+        index = index.saturating_sub(1);
     }
     index
 }
 
 fn ceil_char_boundary(value: &str, mut index: usize) -> usize {
+    if index >= value.len() {
+        return value.len();
+    }
     while !value.is_char_boundary(index) {
         index += 1;
     }
     index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_char_boundary_helpers_multibyte_and_oob() {
+        let text = "🦀 clawcode 🚀 日本語";
+        assert_eq!(floor_char_boundary(text, 0), 0);
+        assert_eq!(floor_char_boundary(text, 1), 0); // Inside 🦀
+        assert_eq!(floor_char_boundary(text, 2), 0);
+        assert_eq!(floor_char_boundary(text, 3), 0);
+        assert_eq!(floor_char_boundary(text, 4), 4); // After 🦀
+        assert_eq!(floor_char_boundary(text, text.len() + 100), text.len());
+
+        assert_eq!(ceil_char_boundary(text, 0), 0);
+        assert_eq!(ceil_char_boundary(text, 1), 4); // Rounds up to end of 🦀
+        assert_eq!(ceil_char_boundary(text, 2), 4);
+        assert_eq!(ceil_char_boundary(text, 3), 4);
+        assert_eq!(ceil_char_boundary(text, 4), 4);
+        assert_eq!(ceil_char_boundary(text, text.len()), text.len());
+        assert_eq!(ceil_char_boundary(text, text.len() + 100), text.len());
+    }
+
+    #[test]
+    fn test_bounded_string_utf8() {
+        let text = "🦀 clawcode 🚀".to_string();
+        let truncated = bounded(text, 2);
+        assert_eq!(truncated, ""); // 2 bytes is inside 4-byte 🦀, clamped to 0
+
+        let text2 = "🦀 clawcode 🚀".to_string();
+        let truncated2 = bounded(text2, 4);
+        assert_eq!(truncated2, "🦀");
+    }
+
+    #[test]
+    fn test_ui_event_queue_safety() {
+        let mut queue = UiEventQueue::new(0); // Should clamp to >= 3 without panicking
+        assert!(queue.capacity() >= 3);
+
+        for i in 0..100 {
+            queue.push(UiEvent::Input(Input::Character((b'a' + (i % 26) as u8) as char)));
+        }
+        assert!(queue.len() <= queue.capacity());
+    }
+
+    #[test]
+    fn test_prompt_history_navigation_bounds() {
+        let mut app = App::default();
+        // Empty history
+        app.navigate_history_up();
+        assert_eq!(app.prompt(), "");
+        app.navigate_history_down();
+        assert_eq!(app.prompt(), "");
+
+        // Submit some prompts
+        app.prompt = "first".to_string();
+        app.submit_prompt();
+        app.prompt = "second".to_string();
+        app.submit_prompt();
+
+        app.navigate_history_up();
+        assert_eq!(app.prompt(), "second");
+        app.navigate_history_up();
+        assert_eq!(app.prompt(), "first");
+        app.navigate_history_up(); // Should clamp, not panic
+        assert_eq!(app.prompt(), "first");
+        app.navigate_history_down();
+        assert_eq!(app.prompt(), "second");
+        app.navigate_history_down();
+        assert_eq!(app.prompt(), "");
+    }
+
+    #[test]
+    fn test_suggestion_navigation_bounds() {
+        let mut app = App::default();
+        assert_eq!(app.selected_suggestion_index(), 0);
+        app.previous_suggestion();
+        assert_eq!(app.selected_suggestion_index(), 0);
+        app.next_suggestion();
+        assert_eq!(app.selected_suggestion_index(), 0);
+
+        app.prompt = "/m".to_string();
+        let count = app.suggestion_count();
+        if count > 0 {
+            app.next_suggestion();
+            assert!(app.selected_suggestion_index() < count);
+            app.previous_suggestion();
+            assert!(app.selected_suggestion_index() < count);
+        }
+    }
+
+    #[test]
+    fn test_truncate_transcript_multibyte() {
+        let mut app = App::default();
+        // Fill with Japanese text
+        let chunk = "こんにちは世界！🦀\n";
+        let mut s = String::new();
+        while s.len() < App::MAX_TRANSCRIPT_BYTES + 1000 {
+            s.push_str(chunk);
+        }
+        app.apply(UiEvent::StreamDelta(s));
+        assert!(app.transcript().len() <= App::MAX_TRANSCRIPT_BYTES);
+        assert!(app.transcript().starts_with(App::TRUNCATION_MARKER));
+    }
 }

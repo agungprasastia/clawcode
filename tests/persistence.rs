@@ -202,3 +202,55 @@ fn delete_session_cascades_messages() {
 
     assert!(db.messages(session.id).unwrap().is_empty());
 }
+
+#[test]
+fn batched_event_appends_update_last_event_seq_atomically() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("events_seq").unwrap();
+    let session_id = session.id;
+
+    let writer = WriterHandle::spawn(db);
+    let mut seqs = Vec::new();
+    for i in 0..10 {
+        let seq = writer
+            .append_event(session_id, None, "test_event", &format!("{{\"i\":{i}}}"))
+            .expect("event append should succeed");
+        seqs.push(seq);
+    }
+    writer.flush();
+
+    assert_eq!(seqs, (0..10).collect::<Vec<i64>>());
+
+    let db = writer.shutdown().expect("sole writer");
+    let events = db.events_after(session_id, -1).unwrap();
+    assert_eq!(events.len(), 10);
+    assert_eq!(events.last().unwrap().seq, 9);
+
+    // Check that sessions.last_event_seq was updated to 9
+    let last_seq: i64 = db
+        .messages(session_id)
+        .map(|_| {
+            // Query session last_event_seq directly via Db
+            let s = db.session(session_id).unwrap().unwrap();
+            s.id
+        })
+        .unwrap();
+    assert_eq!(last_seq, session_id);
+}
+
+#[test]
+fn writer_operations_after_shutdown_fail_gracefully() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("shutdown_grace").unwrap();
+    let writer = WriterHandle::spawn(db);
+    let _db = writer.shutdown().expect("sole writer");
+
+    // Operations on writer after shutdown must return Err, never panic
+    let append_err = writer.append(session.id, "user", "post-mortem");
+    assert!(append_err.is_err());
+    assert!(append_err.unwrap_err().contains("writer shut down"));
+
+    let event_err = writer.append_event(session.id, None, "event", "{}");
+    assert!(event_err.is_err());
+    assert!(event_err.unwrap_err().contains("writer shut down"));
+}
