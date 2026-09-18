@@ -19,11 +19,17 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let has_gap = area.height >= 16;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(4),
+            if has_gap {
+                Constraint::Length(1)
+            } else {
+                Constraint::Length(0)
+            },
             Constraint::Length(5),
             Constraint::Length(1),
         ])
@@ -80,8 +86,7 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         chunks[0],
     );
 
-    let conversation_block = Block::default()
-        .borders(Borders::NONE);
+    let conversation_block = Block::default().borders(Borders::NONE);
 
     let mut tool_row_lines = Vec::new();
     let mut lines = if !app.stream_parts().is_empty() {
@@ -124,15 +129,18 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
 
     if app.is_typing() {
         let is_empty_or_prompt = lines.is_empty()
-            || lines.last().map(|l| {
-                l.spans.is_empty()
-                    || l.spans.iter().all(|s| s.content.trim().is_empty())
-                    || l.spans.first().is_some_and(|s| {
-                        s.content.as_ref() == "▌"
-                            || s.content.as_ref() == "▌ "
-                            || s.content.as_ref() == "┃ "
-                    })
-            }).unwrap_or(false);
+            || lines
+                .last()
+                .map(|l| {
+                    l.spans.is_empty()
+                        || l.spans.iter().all(|s| s.content.trim().is_empty())
+                        || l.spans.first().is_some_and(|s| {
+                            s.content.as_ref() == "▌"
+                                || s.content.as_ref() == "▌ "
+                                || s.content.as_ref() == "┃ "
+                        })
+                })
+                .unwrap_or(false);
 
         if is_empty_or_prompt {
             lines.push(Line::from(vec![
@@ -229,8 +237,12 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
     let clicks = tool_row_lines
         .into_iter()
         .filter_map(|(call_id, line_index)| {
-            let before = visual_line_count(&lines[..line_index.min(lines.len())], content_width) as u16;
-            let y = transcript_area.y.saturating_add(before).saturating_sub(scroll_y);
+            let before =
+                visual_line_count(&lines[..line_index.min(lines.len())], content_width) as u16;
+            let y = transcript_area
+                .y
+                .saturating_add(before)
+                .saturating_sub(scroll_y);
             (y >= transcript_area.y && y < transcript_area.y + transcript_area.height).then_some((
                 call_id,
                 Rect {
@@ -293,22 +305,30 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         }
     }
 
-    render_input_card(frame, chunks[2], app, theme, mode_color);
-    render_command_popup(frame, chunks[2], app, theme);
-    render_hints_row(frame, chunks[3], app, theme);
+    render_input_card(frame, chunks[3], app, theme, mode_color);
+    render_command_popup(frame, chunks[3], app, theme);
+    render_hints_row(frame, chunks[4], app, theme);
 }
 
 fn indent_assistant_line(line: &mut Line<'static>) {
     if line.spans.is_empty() {
         return;
     }
-    if line.spans.first().is_some_and(|s| s.content.as_ref() == "▌" || s.content.as_ref() == "▌ ") {
+    if line
+        .spans
+        .first()
+        .is_some_and(|s| s.content.as_ref() == "▌" || s.content.as_ref() == "▌ ")
+    {
         return;
     }
     if line.style.bg.is_some() {
         return;
     }
-    if line.spans.first().is_some_and(|s| s.content.starts_with("   ")) {
+    if line
+        .spans
+        .first()
+        .is_some_and(|s| s.content.starts_with("   "))
+    {
         return;
     }
     line.spans.insert(0, Span::raw("   "));
@@ -343,7 +363,9 @@ fn append_stream_parts(
                         Span::raw("   "),
                         Span::styled(
                             format!("{} Thinking", app.wave_spinner().compact_frame()),
-                            Style::default().fg(theme.amber).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(theme.amber)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]));
                 } else {
@@ -378,15 +400,7 @@ fn append_stream_parts(
                 let Some(row) = app.tool_rows().iter().find(|row| row.call_id == *call_id) else {
                     continue;
                 };
-                render_tool_card_or_row(
-                    lines,
-                    row,
-                    app,
-                    theme,
-                    mode_color,
-                    width,
-                    tool_row_lines,
-                );
+                render_tool_card_or_row(lines, row, app, theme, mode_color, width, tool_row_lines);
             }
         }
     }
@@ -410,7 +424,11 @@ fn shell_command(row: &ToolRow) -> String {
             return clean.to_string();
         }
     }
-    let clean = row.arguments.strip_prefix("$ ").unwrap_or(&row.arguments).trim();
+    let clean = row
+        .arguments
+        .strip_prefix("$ ")
+        .unwrap_or(&row.arguments)
+        .trim();
     if !clean.is_empty() {
         clean.to_string()
     } else {
@@ -421,14 +439,20 @@ fn shell_command(row: &ToolRow) -> String {
 fn pad_card_line(mut line: Line<'static>, card_width: usize, bg: Color) -> Line<'static> {
     let current_width = line.width();
     if current_width < card_width {
-        line.spans.push(Span::styled(" ".repeat(card_width - current_width), Style::default().bg(bg)));
+        line.spans.push(Span::styled(
+            " ".repeat(card_width - current_width),
+            Style::default().bg(bg),
+        ));
     }
     line.style(Style::default().bg(bg))
 }
 
 fn empty_card_line(card_width: usize, bg: Color) -> Line<'static> {
-    Line::from(Span::styled(" ".repeat(card_width), Style::default().bg(bg)))
-        .style(Style::default().bg(bg))
+    Line::from(Span::styled(
+        " ".repeat(card_width),
+        Style::default().bg(bg),
+    ))
+    .style(Style::default().bg(bg))
 }
 pub fn strip_ansi_codes(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -446,7 +470,6 @@ pub fn strip_ansi_codes(s: &str) -> String {
     }
     out
 }
-
 
 fn render_shell_card(
     lines: &mut Vec<Line<'static>>,
@@ -486,7 +509,9 @@ fn render_shell_card(
             Span::raw("  "),
             Span::styled(
                 spinner_frame,
-                Style::default().fg(marker_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(marker_color)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(cmd, Style::default().fg(theme.ink)),
         ]);
@@ -521,7 +546,9 @@ fn render_shell_card(
                 Span::raw("  "),
                 Span::styled(
                     "$ ",
-                    Style::default().fg(marker_color).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(marker_color)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(cmd, Style::default().fg(text_color)),
             ]);
@@ -554,18 +581,16 @@ fn render_shell_card(
                 Span::raw("  "),
                 Span::styled(
                     "$ ",
-                    Style::default().fg(marker_color).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(marker_color)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(cmd, Style::default().fg(text_color)),
             ]);
             lines.push(pad_card_line(cmd_line, card_width, theme.bg_element));
             tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
 
-            // Line 3: blank gap line
-            lines.push(empty_card_line(card_width, theme.bg_element));
-            tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
-
-            // Line 4..N: output lines
+            // Line 3..N: output lines
             let raw_lines: Vec<&str> = row.output.lines().collect();
             let total = raw_lines.len();
             let max_preview = 10;
@@ -578,7 +603,7 @@ fn render_shell_card(
             for line_text in display_lines {
                 let out_line = Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(strip_ansi_codes(line_text), Style::default().fg(theme.quiet)),
+                    Span::styled(strip_ansi_codes(line_text), Style::default().fg(theme.ink)),
                 ]);
                 lines.push(pad_card_line(out_line, card_width, theme.bg_element));
                 tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
@@ -586,10 +611,13 @@ fn render_shell_card(
 
             // If output > 10 lines:
             if total > max_preview {
+                let remaining = total - max_preview;
                 let hint_text = if is_expanded {
                     "↳ click to collapse".to_string()
+                } else if remaining == 1 {
+                    "↳ click to expand (1 more line)".to_string()
                 } else {
-                    format!("↳ click to expand ({} more lines)", total - max_preview)
+                    format!("↳ click to expand ({} more lines)", remaining)
                 };
                 let hint_line = Line::from(vec![
                     Span::raw("  "),
@@ -630,25 +658,25 @@ fn extract_diff_lines(row: &ToolRow) -> Vec<crate::tui::diff::DiffLine> {
         && let Some(patch_str) = args.get("patch").and_then(|v| v.as_str())
     {
         let mut diff_lines = Vec::new();
-            for l in patch_str.lines() {
-                if l.starts_with('+') && !l.starts_with("+++") {
-                    diff_lines.push(crate::tui::diff::DiffLine {
-                        op: crate::tui::diff::DiffOp::Add,
-                        text: l[1..].to_string(),
-                    });
-                } else if l.starts_with('-') && !l.starts_with("---") {
-                    diff_lines.push(crate::tui::diff::DiffLine {
-                        op: crate::tui::diff::DiffOp::Remove,
-                        text: l[1..].to_string(),
-                    });
-                } else if let Some(stripped) = l.strip_prefix(' ') {
-                    diff_lines.push(crate::tui::diff::DiffLine {
-                        op: crate::tui::diff::DiffOp::Same,
-                        text: stripped.to_string(),
-                    });
-                }
+        for l in patch_str.lines() {
+            if l.starts_with('+') && !l.starts_with("+++") {
+                diff_lines.push(crate::tui::diff::DiffLine {
+                    op: crate::tui::diff::DiffOp::Add,
+                    text: l[1..].to_string(),
+                });
+            } else if l.starts_with('-') && !l.starts_with("---") {
+                diff_lines.push(crate::tui::diff::DiffLine {
+                    op: crate::tui::diff::DiffOp::Remove,
+                    text: l[1..].to_string(),
+                });
+            } else if let Some(stripped) = l.strip_prefix(' ') {
+                diff_lines.push(crate::tui::diff::DiffLine {
+                    op: crate::tui::diff::DiffOp::Same,
+                    text: stripped.to_string(),
+                });
             }
-            return diff_lines;
+        }
+        return diff_lines;
     }
     Vec::new()
 }
@@ -701,7 +729,9 @@ fn render_diff_card(
             Span::raw("  "),
             Span::styled(
                 spinner_frame,
-                Style::default().fg(marker_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(marker_color)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(title, Style::default().fg(theme.ink)),
         ]);
@@ -731,7 +761,9 @@ fn render_diff_card(
                 Span::raw("  "),
                 Span::styled(
                     "• ",
-                    Style::default().fg(marker_color).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(marker_color)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     title,
@@ -766,7 +798,9 @@ fn render_diff_card(
                 Span::raw("  "),
                 Span::styled(
                     "• ",
-                    Style::default().fg(marker_color).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(marker_color)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     title,
@@ -814,10 +848,13 @@ fn render_diff_card(
 
             // If diff > 10 lines:
             if total > max_preview {
+                let remaining = total - max_preview;
                 let hint_text = if is_expanded {
                     "↳ click to collapse".to_string()
+                } else if remaining == 1 {
+                    "↳ click to expand (1 more line)".to_string()
                 } else {
-                    format!("↳ click to expand ({} more lines)", total - max_preview)
+                    format!("↳ click to expand ({} more lines)", remaining)
                 };
                 let hint_line = Line::from(vec![
                     Span::raw("  "),
@@ -848,7 +885,10 @@ fn render_tool_card_or_row(
 ) {
     if matches!(row.name.as_str(), "bash" | "sh") {
         render_shell_card(lines, row, app, theme, mode_color, width, tool_row_lines);
-    } else if matches!(row.name.as_str(), "edit_file" | "edit" | "patch" | "apply_patch") {
+    } else if matches!(
+        row.name.as_str(),
+        "edit_file" | "edit" | "patch" | "apply_patch"
+    ) {
         render_diff_card(lines, row, app, theme, mode_color, width, tool_row_lines);
     } else {
         tool_row_lines.push((row.call_id.clone(), lines.len()));
@@ -857,11 +897,7 @@ fn render_tool_card_or_row(
     }
 }
 
-fn append_specialized_detail(
-    lines: &mut Vec<Line<'static>>,
-    row: &ToolRow,
-    theme: &Theme,
-) {
+fn append_specialized_detail(lines: &mut Vec<Line<'static>>, row: &ToolRow, theme: &Theme) {
     let terminal = row.state == ToolRowState::Completed || row.state == ToolRowState::Failed;
     if !terminal && !matches!(row.name.as_str(), "task" | "execute") {
         return;
@@ -881,7 +917,11 @@ fn append_specialized_detail(
                 .or_else(|| args.get("prompt"))
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
-            let suffix = if description.is_empty() { String::new() } else { format!(": {description}") };
+            let suffix = if description.is_empty() {
+                String::new()
+            } else {
+                format!(": {description}")
+            };
             lines.push(Line::from(Span::styled(
                 format!("      ↳ {agent}{suffix}"),
                 Style::default().fg(theme.quiet),
@@ -914,9 +954,7 @@ fn append_specialized_detail(
                     let (marker, color) = match status {
                         "completed" | "complete" => ("✓", theme.success),
                         "error" | "failed" => ("×", theme.error),
-                        "running" | "pending" | "in_progress" | "in-progress" => {
-                            ("⠋", theme.quiet)
-                        }
+                        "running" | "pending" | "in_progress" | "in-progress" => ("⠋", theme.quiet),
                         _ => ("·", theme.quiet),
                     };
                     lines.push(Line::from(Span::styled(
@@ -941,14 +979,16 @@ fn append_specialized_detail(
                 };
                 lines.push(Line::from(vec![
                     Span::styled("      │ ", Style::default().fg(theme.dim)),
-                    Span::styled(format!("{}. {}", index + 1, step), Style::default().fg(theme.quiet)),
+                    Span::styled(
+                        format!("{}. {}", index + 1, step),
+                        Style::default().fg(theme.quiet),
+                    ),
                 ]));
             }
         }
         _ => {}
     }
 }
-
 
 fn tool_icon(name: &str) -> &'static str {
     match name {
@@ -973,21 +1013,30 @@ fn compact_tool_line(
     width: u16,
 ) -> Line<'static> {
     let is_bash = matches!(row.name.as_str(), "bash" | "sh");
-    let is_diff_tool = matches!(row.name.as_str(), "edit_file" | "edit" | "patch" | "apply_patch");
+    let is_diff_tool = matches!(
+        row.name.as_str(),
+        "edit_file" | "edit" | "patch" | "apply_patch"
+    );
     let is_block_tool = is_bash || is_diff_tool;
     let (marker, marker_color) = match row.state {
         ToolRowState::Pending => {
             if row.name == "task" {
                 ("│ ".to_string(), theme.dim)
             } else {
-                (format!("{} ", app.wave_spinner().compact_frame()), theme.dim)
+                (
+                    format!("{} ", app.wave_spinner().compact_frame()),
+                    theme.dim,
+                )
             }
         }
         ToolRowState::Running => {
             if row.name == "task" {
                 ("│ ".to_string(), mode_color)
             } else {
-                (format!("{} ", app.wave_spinner().compact_frame()), mode_color)
+                (
+                    format!("{} ", app.wave_spinner().compact_frame()),
+                    mode_color,
+                )
             }
         }
         ToolRowState::Completed => {
@@ -1031,9 +1080,14 @@ fn compact_tool_line(
         Span::raw(if is_block_tool { "  " } else { "   " }),
         Span::styled(
             marker,
-            Style::default().fg(marker_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(marker_color)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(truncate_tool_text(&detail, max_chars), Style::default().fg(text_color)),
+        Span::styled(
+            truncate_tool_text(&detail, max_chars),
+            Style::default().fg(text_color),
+        ),
     ]);
     if is_block_tool {
         line.style(Style::default().bg(theme.bg_element))
@@ -1041,8 +1095,6 @@ fn compact_tool_line(
         line
     }
 }
-
-
 
 pub(crate) fn visual_line_count(lines: &[Line], width: u16) -> usize {
     if width == 0 {
@@ -1103,8 +1155,14 @@ fn tool_row_detail(row: &ToolRow) -> String {
     };
     if matches!(row.name.as_str(), "edit_file" | "edit")
         && let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
-        && let Some(old_str) = args.get("old_string").or_else(|| args.get("old_str")).and_then(|v| v.as_str())
-        && let Some(new_str) = args.get("new_string").or_else(|| args.get("new_str")).and_then(|v| v.as_str())
+        && let Some(old_str) = args
+            .get("old_string")
+            .or_else(|| args.get("old_str"))
+            .and_then(|v| v.as_str())
+        && let Some(new_str) = args
+            .get("new_string")
+            .or_else(|| args.get("new_str"))
+            .and_then(|v| v.as_str())
     {
         let diff = crate::tui::diff::compute_diff(old_str, new_str, 0);
         let count_suffix = format!(" (+{} -{})", diff.added, diff.removed);
@@ -1134,15 +1192,23 @@ fn tool_row_detail(row: &ToolRow) -> String {
         } else {
             format!("{label} {clean_target}{count_suffix}")
         }
-    } else if matches!(row.name.as_str(), "glob_search" | "glob" | "grep_search" | "grep")
-        && row.state == ToolRowState::Completed
+    } else if matches!(
+        row.name.as_str(),
+        "glob_search" | "glob" | "grep_search" | "grep"
+    ) && row.state == ToolRowState::Completed
     {
-        let count = row.metadata.as_ref()
+        let count = row
+            .metadata
+            .as_ref()
             .and_then(|m| m.get("count").or_else(|| m.get("matches")))
             .and_then(|v| v.as_u64())
             .map(|c| c as usize)
             .unwrap_or_else(|| row.output.lines().filter(|l| !l.trim().is_empty()).count());
-        let count_suffix = format!(" ({} {})", count, if count == 1 { "match" } else { "matches" });
+        let count_suffix = format!(
+            " ({} {})",
+            count,
+            if count == 1 { "match" } else { "matches" }
+        );
         let clean_target = target
             .strip_prefix("Glob ")
             .or_else(|| target.strip_prefix("Grep "))
@@ -1171,7 +1237,6 @@ fn tool_row_detail(row: &ToolRow) -> String {
         format!("{label} {target}")
     }
 }
-
 
 fn text_cell_width(text: &str) -> usize {
     text.chars()
@@ -1208,7 +1273,9 @@ fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
             let mut spans = format_inline_code(&text[..open], theme);
             spans.push(Span::styled(
                 text[open + 1..label_end].to_string(),
-                Style::default().fg(theme.teal).add_modifier(Modifier::UNDERLINED),
+                Style::default()
+                    .fg(theme.teal)
+                    .add_modifier(Modifier::UNDERLINED),
             ));
             spans.extend(format_inline_code(&text[url_end + 1..], theme));
             return spans;
@@ -1232,7 +1299,6 @@ fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
                     before.to_string(),
                     Style::default().fg(theme.ink),
                 ));
-
             }
             let code_content = &remainder[start_idx + 1..start_idx + 1 + end_idx];
             spans.push(Span::styled(
@@ -1433,49 +1499,38 @@ pub fn format_transcript_lines_with_width(
         if line.trim_start().starts_with("```") {
             if in_code_block {
                 in_code_block = false;
-                lines.push(Line::from(vec![Span::styled(
-                    "└───",
-                    Style::default().fg(theme.dim),
-                )]));
+                lines.push(Line::from(""));
             } else {
                 in_code_block = true;
                 let lang = line.trim_start().trim_start_matches('`').trim();
-                if lang.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("┌───", Style::default().fg(theme.dim)),
-                        Span::styled(
-                            "─────────────────────────────────────",
-                            Style::default().fg(theme.dim),
-                        ),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::styled("┌─── ", Style::default().fg(theme.dim)),
-                        Span::styled(
-                            lang.to_string(),
-                            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            " ─────────────────────────────",
-                            Style::default().fg(theme.dim),
-                        ),
-                    ]));
+                if !lang.is_empty() {
+                    let header_line = Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(lang.to_string(), Style::default().fg(theme.dim)),
+                    ]);
+                    lines.push(pad_card_line(header_line, card_width, theme.bg_element));
                 }
             }
             continue;
         }
 
         if in_code_block {
-            lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(theme.dim)),
+            let code_line = Line::from(vec![
+                Span::raw("  "),
                 Span::styled(line.to_string(), Style::default().fg(theme.ink)),
-            ]));
+            ]);
+            lines.push(pad_card_line(code_line, card_width, theme.bg_element));
             continue;
         }
         if line.trim().is_empty() {
             in_thought = false;
             in_shell_output = false;
-            let is_last_empty = lines.last().map(|l| l.spans.is_empty() || (l.spans.len() == 1 && l.spans[0].content.is_empty())).unwrap_or(false);
+            let is_last_empty = lines
+                .last()
+                .map(|l| {
+                    l.spans.is_empty() || (l.spans.len() == 1 && l.spans[0].content.is_empty())
+                })
+                .unwrap_or(false);
             if !lines.is_empty() && !is_last_empty {
                 lines.push(Line::from(""));
             }
@@ -1484,8 +1539,6 @@ pub fn format_transcript_lines_with_width(
         if let Some(prompt) = line.strip_prefix("> ") {
             in_thought = false;
             in_box = false;
-            let top_line = Line::from(Span::styled("▌", Style::default().fg(mode_color)));
-            lines.push(pad_card_line(top_line, card_width, theme.bg_element));
             let content_line = Line::from(vec![
                 Span::styled(
                     "▌ ",
@@ -1497,8 +1550,6 @@ pub fn format_transcript_lines_with_width(
                 ),
             ]);
             lines.push(pad_card_line(content_line, card_width, theme.bg_element));
-            let bot_line = Line::from(Span::styled("▌", Style::default().fg(mode_color)));
-            lines.push(pad_card_line(bot_line, card_width, theme.bg_element));
             lines.push(Line::from(""));
             continue;
         }
@@ -1508,12 +1559,10 @@ pub fn format_transcript_lines_with_width(
         {
             in_thought = true;
             in_box = false;
-            let spans = vec![
-                Span::styled(
-                    format!("+ Thought for {rest}"),
-                    Style::default().fg(theme.amber),
-                ),
-            ];
+            let spans = vec![Span::styled(
+                format!("+ Thought for {rest}"),
+                Style::default().fg(theme.amber),
+            )];
             lines.push(Line::from(spans));
         } else if let Some(rest) = line
             .strip_prefix("- Thought for ")
@@ -1521,12 +1570,10 @@ pub fn format_transcript_lines_with_width(
         {
             in_thought = false;
             in_box = false;
-            let spans = vec![
-                Span::styled(
-                    format!("- Thought for {rest}"),
-                    Style::default().fg(theme.amber),
-                ),
-            ];
+            let spans = vec![Span::styled(
+                format!("- Thought for {rest}"),
+                Style::default().fg(theme.amber),
+            )];
             lines.push(Line::from(spans));
         } else if let Some(rest) = line
             .strip_prefix("Thought for ")
@@ -1536,22 +1583,18 @@ pub fn format_transcript_lines_with_width(
         {
             in_thought = true;
             in_box = false;
-            let spans = vec![
-                Span::styled(
-                    format!("Thought for {rest}"),
-                    Style::default().fg(theme.amber),
-                ),
-            ];
+            let spans = vec![Span::styled(
+                format!("Thought for {rest}"),
+                Style::default().fg(theme.amber),
+            )];
             lines.push(Line::from(spans));
         } else if let Some(rest) = line.strip_prefix("💭 ") {
             in_thought = true;
             in_box = false;
-            let spans = vec![
-                Span::styled(
-                    rest.to_string(),
-                    Style::default().fg(theme.amber),
-                ),
-            ];
+            let spans = vec![Span::styled(
+                rest.to_string(),
+                Style::default().fg(theme.amber),
+            )];
             lines.push(Line::from(spans));
         } else if line.trim_start().starts_with("┌──") {
             in_box = true;
@@ -2236,29 +2279,22 @@ mod tests {
         let theme = ThemeKind::ClawcodeDark.to_theme();
         let mode_color = Color::Cyan;
         let lines = format_transcript_lines("> Hello Clawcode", &theme, mode_color);
-        assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0].spans[0].content, "▌");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].content, "▌ ");
+        assert_eq!(lines[0].spans[1].content, "Hello Clawcode");
         assert_eq!(lines[0].style.bg, Some(theme.bg_element));
-        assert_eq!(lines[1].spans[0].content, "▌ ");
-        assert_eq!(lines[1].spans[1].content, "Hello Clawcode");
-        assert_eq!(lines[1].style.bg, Some(theme.bg_element));
-        assert_eq!(lines[2].spans[0].content, "▌");
-        assert_eq!(lines[2].style.bg, Some(theme.bg_element));
-        assert!(lines[3].spans.is_empty() || lines[3].spans[0].content.is_empty());
+        assert!(lines[1].spans.is_empty() || lines[1].spans[0].content.is_empty());
     }
 
     #[test]
     fn test_format_transcript_user_prompt_width_padding() {
         let theme = ThemeKind::ClawcodeDark.to_theme();
         let mode_color = Color::Cyan;
-        let lines = format_transcript_lines_with_width("> Hello Clawcode", &theme, mode_color, Some(80));
-        assert_eq!(lines.len(), 4);
+        let lines =
+            format_transcript_lines_with_width("> Hello Clawcode", &theme, mode_color, Some(80));
+        assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].width(), 78);
-        assert_eq!(lines[1].width(), 78);
-        assert_eq!(lines[2].width(), 78);
         assert_eq!(lines[0].style.bg, Some(theme.bg_element));
-        assert_eq!(lines[1].style.bg, Some(theme.bg_element));
-        assert_eq!(lines[2].style.bg, Some(theme.bg_element));
     }
 
     #[test]
@@ -2291,8 +2327,17 @@ mod tests {
             started_at: std::time::Instant::now(),
         };
         let app = App::default();
-        render_shell_card(&mut lines, &row, &app, &theme, Color::Cyan, 60, &mut tool_lines);
+        render_shell_card(
+            &mut lines,
+            &row,
+            &app,
+            &theme,
+            Color::Cyan,
+            60,
+            &mut tool_lines,
+        );
         let card_width = 58;
+        assert_eq!(lines.len(), 6);
         assert_eq!(lines[0].width(), card_width);
         assert_eq!(lines[0].style.bg, Some(theme.bg_element));
         assert_eq!(lines[1].width(), card_width);
@@ -2303,10 +2348,92 @@ mod tests {
         assert_eq!(lines[3].style.bg, Some(theme.bg_element));
         assert_eq!(lines[4].width(), card_width);
         assert_eq!(lines[4].style.bg, Some(theme.bg_element));
-        assert_eq!(lines[5].width(), card_width);
-        assert_eq!(lines[5].style.bg, Some(theme.bg_element));
-        assert_eq!(lines[6].width(), 0);
-        assert_eq!(lines[6].style.bg, None);
+        assert_eq!(lines[5].width(), 0);
+        assert_eq!(lines[5].style.bg, None);
+    }
+    #[test]
+    fn test_shell_card_expansion_hint_grammar() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let app = App::default();
+        let mut tool_lines = Vec::new();
+
+        // Exactly 11 lines (10 preview + 1 remaining) -> "(1 more line)"
+        let mut lines1 = Vec::new();
+        let row1 = ToolRow {
+            call_id: "test-1".to_string(),
+            name: "bash".to_string(),
+            arguments: "echo test".to_string(),
+            desc: "echo test".to_string(),
+            output: (1..=11)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            state: ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: std::time::Instant::now(),
+        };
+        render_shell_card(
+            &mut lines1,
+            &row1,
+            &app,
+            &theme,
+            Color::Cyan,
+            60,
+            &mut tool_lines,
+        );
+        let hint_line1 = lines1.iter().find(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains("click to expand"))
+        });
+        assert!(hint_line1.is_some());
+        assert!(
+            hint_line1
+                .unwrap()
+                .spans
+                .iter()
+                .any(|s| s.content.contains("(1 more line)"))
+        );
+
+        // 12 lines (10 preview + 2 remaining) -> "(2 more lines)"
+        let mut lines2 = Vec::new();
+        let row2 = ToolRow {
+            call_id: "test-2".to_string(),
+            name: "bash".to_string(),
+            arguments: "echo test".to_string(),
+            desc: "echo test".to_string(),
+            output: (1..=12)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            state: ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: std::time::Instant::now(),
+        };
+        render_shell_card(
+            &mut lines2,
+            &row2,
+            &app,
+            &theme,
+            Color::Cyan,
+            60,
+            &mut tool_lines,
+        );
+        let hint_line2 = lines2.iter().find(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains("click to expand"))
+        });
+        assert!(hint_line2.is_some());
+        assert!(
+            hint_line2
+                .unwrap()
+                .spans
+                .iter()
+                .any(|s| s.content.contains("(2 more lines)"))
+        );
     }
 
     #[test]
@@ -2321,7 +2448,8 @@ mod tests {
                 "path": "src/main.rs",
                 "old_string": "line1\nline2",
                 "new_string": "line1\nline_new",
-            }).to_string(),
+            })
+            .to_string(),
             desc: "edit src/main.rs".to_string(),
             output: "ok".to_string(),
             state: ToolRowState::Completed,
@@ -2330,7 +2458,15 @@ mod tests {
             started_at: std::time::Instant::now(),
         };
         let app = App::default();
-        render_diff_card(&mut lines, &row, &app, &theme, Color::Cyan, 70, &mut tool_lines);
+        render_diff_card(
+            &mut lines,
+            &row,
+            &app,
+            &theme,
+            Color::Cyan,
+            70,
+            &mut tool_lines,
+        );
         let card_width = 68;
         for line in &lines[..lines.len() - 1] {
             assert_eq!(line.width(), card_width);
@@ -2563,20 +2699,19 @@ mod tests {
         assert_eq!(lines.len(), 3);
 
         // Header
-        assert_eq!(lines[0].spans[0].content, "┌─── ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[0].spans[0].content, "  ");
         assert_eq!(lines[0].spans[1].content, "rust");
-        assert_eq!(lines[0].spans[1].style.fg, Some(theme.teal));
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme.dim));
+        assert_eq!(lines[0].style.bg, Some(theme.bg_element));
 
         // Content
-        assert_eq!(lines[1].spans[0].content, "│ ");
-        assert_eq!(lines[1].spans[0].style.fg, Some(theme.dim));
+        assert_eq!(lines[1].spans[0].content, "  ");
         assert_eq!(lines[1].spans[1].content, "fn main() {}");
         assert_eq!(lines[1].spans[1].style.fg, Some(theme.ink));
+        assert_eq!(lines[1].style.bg, Some(theme.bg_element));
 
         // Footer
-        assert_eq!(lines[2].spans[0].content, "└───");
-        assert_eq!(lines[2].spans[0].style.fg, Some(theme.dim));
+        assert!(lines[2].spans.is_empty() || lines[2].spans[0].content.is_empty());
     }
 
     #[test]
@@ -2747,7 +2882,10 @@ mod tests {
     fn test_strip_ansi_codes() {
         assert_eq!(strip_ansi_codes("\x1b[34;40m.agents\x1b[0m"), ".agents");
         assert_eq!(strip_ansi_codes("plain text"), "plain text");
-        assert_eq!(strip_ansi_codes("\x1b[1;32mhello\x1b[0m \x1b[31mworld\x1b[m"), "hello world");
+        assert_eq!(
+            strip_ansi_codes("\x1b[1;32mhello\x1b[0m \x1b[31mworld\x1b[m"),
+            "hello world"
+        );
     }
 
     #[test]
@@ -2767,10 +2905,25 @@ mod tests {
         let app = App::default();
         let theme = ThemeKind::ClawcodeDark.to_theme();
         let mut tool_lines = Vec::new();
-        render_shell_card(&mut lines, &row, &app, &theme, Color::Cyan, 60, &mut tool_lines);
-        let output_line = lines.iter().find(|l| l.spans.iter().any(|s| s.content.contains(".agents")));
+        render_shell_card(
+            &mut lines,
+            &row,
+            &app,
+            &theme,
+            Color::Cyan,
+            60,
+            &mut tool_lines,
+        );
+        let output_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains(".agents")));
         assert!(output_line.is_some());
-        let span = output_line.unwrap().spans.iter().find(|s| s.content.contains(".agents")).unwrap();
+        let span = output_line
+            .unwrap()
+            .spans
+            .iter()
+            .find(|s| s.content.contains(".agents"))
+            .unwrap();
         assert_eq!(span.content, ".agents");
         assert!(!span.content.contains("\x1b"));
     }
@@ -2801,22 +2954,62 @@ mod tests {
         // Collapsed by default
         let mut lines = Vec::new();
         let mut tool_lines = Vec::new();
-        append_stream_parts(&mut lines, &parts, &app, &theme, mode_color, 80, &mut tool_lines);
+        append_stream_parts(
+            &mut lines,
+            &parts,
+            &app,
+            &theme,
+            mode_color,
+            80,
+            &mut tool_lines,
+        );
         assert!(tool_lines.iter().any(|(id, _)| id == "__thought__"));
-        let thought_header = lines.iter().find(|l| l.spans.iter().any(|s| s.content.starts_with("+ Thought for ")));
+        let thought_header = lines.iter().find(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.starts_with("+ Thought for "))
+        });
         assert!(thought_header.is_some());
-        assert!(!lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("Line one"))));
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content.contains("Line one")))
+        );
 
         // Toggle to expanded
         app.toggle_thought_expanded();
         assert!(app.is_thought_expanded());
         let mut lines_exp = Vec::new();
         let mut tool_lines_exp = Vec::new();
-        append_stream_parts(&mut lines_exp, &parts, &app, &theme, mode_color, 80, &mut tool_lines_exp);
-        let expanded_header = lines_exp.iter().find(|l| l.spans.iter().any(|s| s.content.starts_with("- Thought for ")));
+        append_stream_parts(
+            &mut lines_exp,
+            &parts,
+            &app,
+            &theme,
+            mode_color,
+            80,
+            &mut tool_lines_exp,
+        );
+        let expanded_header = lines_exp.iter().find(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.starts_with("- Thought for "))
+        });
         assert!(expanded_header.is_some());
-        assert!(lines_exp.iter().any(|l| l.spans.iter().any(|s| s.content == "Line one")));
-        assert!(lines_exp.iter().any(|l| l.spans.iter().any(|s| s.content == "Line two")));
-        assert!(lines_exp.iter().any(|l| l.spans.iter().any(|s| s.content == "      │ ")));
+        assert!(
+            lines_exp
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content == "Line one"))
+        );
+        assert!(
+            lines_exp
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content == "Line two"))
+        );
+        assert!(
+            lines_exp
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content == "      │ "))
+        );
     }
 }

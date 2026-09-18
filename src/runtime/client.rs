@@ -522,8 +522,9 @@ fn run_generation(
                         "id": &id,
                         "arguments_complete": true,
                     });
-                    if let Some((_, name, _)) =
-                        turn_tool_calls.iter().find(|(call_id, _, _)| call_id == &id)
+                    if let Some((_, name, _)) = turn_tool_calls
+                        .iter()
+                        .find(|(call_id, _, _)| call_id == &id)
                     {
                         payload["name"] = serde_json::Value::String(name.clone());
                     }

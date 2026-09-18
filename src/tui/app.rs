@@ -1,6 +1,6 @@
+use ratatui::layout::Rect;
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
-use ratatui::layout::Rect;
 
 use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
 use crate::conversation::ConversationEvent;
@@ -239,7 +239,10 @@ pub(crate) fn tool_names_match(a: &str, b: &str) -> bool {
             | ("glob_search" | "glob", "glob_search" | "glob")
             | ("read_file" | "read", "read_file" | "read")
             | ("write_file" | "write", "write_file" | "write")
-            | ("edit_file" | "edit" | "patch" | "apply_patch", "edit_file" | "edit" | "patch" | "apply_patch")
+            | (
+                "edit_file" | "edit" | "patch" | "apply_patch",
+                "edit_file" | "edit" | "patch" | "apply_patch"
+            )
             | ("bash" | "sh", "bash" | "sh")
     )
 }
@@ -1127,11 +1130,8 @@ impl App {
             return;
         }
 
-        if let UiEvent::MouseClick { x, y }
-            | UiEvent::Input(Input::Click {
-                column: x,
-                row: y,
-            }) = event
+        if let UiEvent::MouseClick { x, y } | UiEvent::Input(Input::Click { column: x, row: y }) =
+            event
         {
             self.handle_mouse_click(x, y);
             return;
@@ -1476,9 +1476,10 @@ impl App {
             || (self.text_stream_active
                 && matches!(self.status, ConversationStatus::Active)
                 && !self.is_reasoning()
-                && !self.tool_rows.iter().any(|row| {
-                    matches!(row.state, ToolRowState::Pending | ToolRowState::Running)
-                }))
+                && !self
+                    .tool_rows
+                    .iter()
+                    .any(|row| matches!(row.state, ToolRowState::Pending | ToolRowState::Running)))
     }
 
     /// Whether generation, text, reasoning, or any tool row is active.
@@ -1576,7 +1577,8 @@ impl App {
                 {
                     existing.push_str(&delta);
                     if existing.len() > Self::MAX_TRANSCRIPT_BYTES {
-                        existing.truncate(floor_char_boundary(existing, Self::MAX_TRANSCRIPT_BYTES));
+                        existing
+                            .truncate(floor_char_boundary(existing, Self::MAX_TRANSCRIPT_BYTES));
                     }
                 } else {
                     self.stream_parts.push(StreamPart::Reasoning(delta));
@@ -1586,26 +1588,36 @@ impl App {
                 if let Some(StreamPart::Text(existing)) = self.stream_parts.last_mut() {
                     existing.push_str(&delta);
                     if existing.len() > Self::MAX_TRANSCRIPT_BYTES {
-                        existing.truncate(floor_char_boundary(existing, Self::MAX_TRANSCRIPT_BYTES));
+                        existing
+                            .truncate(floor_char_boundary(existing, Self::MAX_TRANSCRIPT_BYTES));
                     }
                 } else {
                     self.stream_parts.push(StreamPart::Text(delta));
                 }
             }
             StreamPart::Tool(call_id) => {
-                if !self.stream_parts.iter().any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id)) {
+                if !self
+                    .stream_parts
+                    .iter()
+                    .any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id))
+                {
                     self.stream_parts.push(StreamPart::Tool(call_id));
                 }
             }
         }
         if self.stream_parts.len() > MAX_TOOL_ROWS * 2 {
-            self.stream_parts.drain(..self.stream_parts.len() - MAX_TOOL_ROWS * 2);
+            self.stream_parts
+                .drain(..self.stream_parts.len() - MAX_TOOL_ROWS * 2);
         }
     }
 
     fn push_tool_part(&mut self, call_id: String) {
         self.ensure_stream_parts();
-        if !self.stream_parts.iter().any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id)) {
+        if !self
+            .stream_parts
+            .iter()
+            .any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id))
+        {
             self.stream_parts.push(StreamPart::Tool(call_id));
         }
     }
@@ -1636,7 +1648,9 @@ impl App {
         self.last_tool_row_clicks
             .borrow()
             .iter()
-            .find(|(_, area)| x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height)
+            .find(|(_, area)| {
+                x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height
+            })
             .map(|(id, _)| id.clone())
     }
     fn upsert_tool_row(
@@ -1683,9 +1697,13 @@ impl App {
         bounded(call_id.to_string(), MAX_IDENTITY_BYTES)
     }
 
-
-
-    fn complete_tool_row(&mut self, call_id: &str, name: &str, success: bool, output: &str) -> bool {
+    fn complete_tool_row(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        success: bool,
+        output: &str,
+    ) -> bool {
         let found_index = if !call_id.is_empty() {
             let norm_id = Self::normalized_tool_call_id(call_id);
             self.tool_rows
@@ -1705,21 +1723,24 @@ impl App {
                         && matches!(r.state, ToolRowState::Pending | ToolRowState::Running)
                 })
                 .or_else(|| {
-                    self.tool_rows
-                        .iter()
-                        .rposition(|r| matches!(r.state, ToolRowState::Pending | ToolRowState::Running))
+                    self.tool_rows.iter().rposition(|r| {
+                        matches!(r.state, ToolRowState::Pending | ToolRowState::Running)
+                    })
                 })
         };
         let Some(idx) = found_index else {
             return false;
         };
         let row = &mut self.tool_rows[idx];
-        row.state = if success { ToolRowState::Completed } else { ToolRowState::Failed };
+        row.state = if success {
+            ToolRowState::Completed
+        } else {
+            ToolRowState::Failed
+        };
         row.output = bounded(output.to_string(), MAX_TOOL_OUTPUT_BYTES);
         self.refresh_active_tool();
         true
     }
-
 
     fn refresh_active_tool(&mut self) {
         self.active_tool = self
@@ -1737,8 +1758,6 @@ impl App {
                 started_at: row.started_at,
             });
     }
-
-
 
     pub fn wave_spinner(&self) -> &crate::tui::WaveSpinner {
         &self.wave_spinner
@@ -1998,8 +2017,14 @@ impl App {
                         row.output.lines().count() > 10
                     } else if matches!(row.name.as_str(), "edit_file" | "edit") {
                         if let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
-                            && let Some(old_str) = args.get("old_string").or_else(|| args.get("old_str")).and_then(|v| v.as_str())
-                            && let Some(new_str) = args.get("new_string").or_else(|| args.get("new_str")).and_then(|v| v.as_str())
+                            && let Some(old_str) = args
+                                .get("old_string")
+                                .or_else(|| args.get("old_str"))
+                                .and_then(|v| v.as_str())
+                            && let Some(new_str) = args
+                                .get("new_string")
+                                .or_else(|| args.get("new_str"))
+                                .and_then(|v| v.as_str())
                         {
                             let diff = crate::tui::diff::compute_diff(old_str, new_str, 20);
                             diff.lines.len() > 10
@@ -2010,7 +2035,11 @@ impl App {
                         if let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
                             && let Some(patch_str) = args.get("patch").and_then(|v| v.as_str())
                         {
-                            patch_str.lines().filter(|l| l.starts_with(['+', '-', ' '])).count() > 10
+                            patch_str
+                                .lines()
+                                .filter(|l| l.starts_with(['+', '-', ' ']))
+                                .count()
+                                > 10
                         } else {
                             false
                         }
@@ -2030,10 +2059,10 @@ impl App {
         }
 
         let has_command_suggestions = !self.matching_suggestions().is_empty();
-        let has_model_suggestions = self.prompt.starts_with("/model ")
-            && !self.matching_model_suggestions().is_empty();
-        let has_theme_suggestions = self.prompt.starts_with("/theme ")
-            && !self.matching_theme_suggestions().is_empty();
+        let has_model_suggestions =
+            self.prompt.starts_with("/model ") && !self.matching_model_suggestions().is_empty();
+        let has_theme_suggestions =
+            self.prompt.starts_with("/theme ") && !self.matching_theme_suggestions().is_empty();
 
         if (has_command_suggestions || has_model_suggestions || has_theme_suggestions)
             && let Some(popup_area) = self.get_or_compute_popup_area()
@@ -2049,8 +2078,7 @@ impl App {
             let rel_row = if y <= popup_area.y + 1 {
                 0
             } else {
-                ((y.saturating_sub(popup_area.y + 1)) as usize)
-                    .min(visible_count.saturating_sub(1))
+                ((y.saturating_sub(popup_area.y + 1)) as usize).min(visible_count.saturating_sub(1))
             };
             let selected_idx = self.selected_suggestion_index();
             let scroll_offset = if selected_idx >= visible_count {
@@ -2095,10 +2123,7 @@ impl App {
             && let Some(cards) = self.get_or_compute_quick_actions_area()
         {
             for (idx, card) in cards.iter().enumerate() {
-                if x >= card.x
-                    && x < card.x + card.width
-                    && y >= card.y
-                    && y < card.y + card.height
+                if x >= card.x && x < card.x + card.width && y >= card.y && y < card.y + card.height
                 {
                     self.prompt.clear();
                     self.cursor_position = 0;
@@ -2423,7 +2448,10 @@ impl App {
         if self.prompt.starts_with("/model ") {
             let model_suggestions = self.matching_model_suggestions();
             let idx = self.selected_suggestion_index();
-            if let Some(first) = model_suggestions.get(idx).or_else(|| model_suggestions.first()) {
+            if let Some(first) = model_suggestions
+                .get(idx)
+                .or_else(|| model_suggestions.first())
+            {
                 self.prompt = format!("/model {first}");
                 self.cursor_position = self.prompt.chars().count();
                 self.selected_suggestion = 0;
@@ -2433,7 +2461,10 @@ impl App {
         if self.prompt.starts_with("/theme ") {
             let theme_suggestions = self.matching_theme_suggestions();
             let idx = self.selected_suggestion_index();
-            if let Some(first) = theme_suggestions.get(idx).or_else(|| theme_suggestions.first()) {
+            if let Some(first) = theme_suggestions
+                .get(idx)
+                .or_else(|| theme_suggestions.first())
+            {
                 self.prompt = format!("/theme {first}");
                 self.cursor_position = self.prompt.chars().count();
                 self.selected_suggestion = 0;
@@ -2442,7 +2473,11 @@ impl App {
         }
         let suggestions = self.matching_suggestions();
         let idx = self.selected_suggestion_index();
-        if let Some(suggestion) = suggestions.get(idx).copied().or_else(|| suggestions.first().copied()) {
+        if let Some(suggestion) = suggestions
+            .get(idx)
+            .copied()
+            .or_else(|| suggestions.first().copied())
+        {
             self.prompt = suggestion.template.to_string();
             self.cursor_position = self.prompt.chars().count();
             self.selected_suggestion = 0;
@@ -2779,7 +2814,8 @@ impl App {
             }
             match event.kind.as_str() {
                 "reasoning_delta" => {
-                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
                     {
                         if self.reasoning_start.is_none() {
@@ -2826,12 +2862,16 @@ impl App {
                             .get("arguments")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        if let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == call_id) {
+                        if let Some(row) =
+                            self.tool_rows.iter_mut().find(|row| row.call_id == call_id)
+                        {
                             row.arguments = bounded(
                                 format!("{}{}", row.arguments, delta),
                                 MAX_TOOL_ARGUMENT_BYTES,
                             );
-                            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments) {
+                            if let Ok(args) =
+                                serde_json::from_str::<serde_json::Value>(&row.arguments)
+                            {
                                 let (_, _, desc) = tool_target_and_verbs(&row.name, Some(&args));
                                 if !desc.is_empty() {
                                     row.desc = bounded(desc, MAX_TOOL_ARGUMENT_BYTES);
@@ -2842,19 +2882,23 @@ impl App {
                     }
                 }
                 "tool_call_end" => {
-                    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json) else {
+                    let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    else {
                         continue;
                     };
                     let Some(call_id) = payload.get("id").and_then(|v| v.as_str()) else {
                         continue;
                     };
-                    if let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == call_id) {
+                    if let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == call_id)
+                    {
                         row.arguments_complete = true;
                         if let Some(metadata) = payload.get("metadata") {
                             row.metadata = Some(metadata.clone());
                         }
                         if row.desc == "preparing arguments..."
-                            && let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
+                            && let Ok(args) =
+                                serde_json::from_str::<serde_json::Value>(&row.arguments)
                         {
                             let (_, _, desc) = tool_target_and_verbs(&row.name, Some(&args));
                             if !desc.is_empty() {
@@ -2867,7 +2911,8 @@ impl App {
                     self.reasoning_active = false;
                     self.record_reasoning_duration();
                     self.flush_reasoning();
-                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
                     {
                         self.push_stream_part(StreamPart::Text(delta.to_string()));
@@ -2969,10 +3014,7 @@ impl App {
                         } else {
                             format_tool_success_detail(name, output)
                         };
-                        let call_id = payload
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let call_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         let existing_id = if !call_id.is_empty() {
                             if self.tool_rows.iter().any(|row| row.call_id == call_id) {
                                 Some(call_id.to_string())
@@ -2980,19 +3022,33 @@ impl App {
                                 self.tool_rows
                                     .iter()
                                     .rev()
-                                    .find(|row| tool_names_match(&row.name, name) && matches!(row.state, ToolRowState::Pending | ToolRowState::Running))
+                                    .find(|row| {
+                                        tool_names_match(&row.name, name)
+                                            && matches!(
+                                                row.state,
+                                                ToolRowState::Pending | ToolRowState::Running
+                                            )
+                                    })
                                     .map(|row| row.call_id.clone())
                             }
                         } else {
                             self.tool_rows
                                 .iter()
                                 .rev()
-                                .find(|row| tool_names_match(&row.name, name) && matches!(row.state, ToolRowState::Pending | ToolRowState::Running))
+                                .find(|row| {
+                                    tool_names_match(&row.name, name)
+                                        && matches!(
+                                            row.state,
+                                            ToolRowState::Pending | ToolRowState::Running
+                                        )
+                                })
                                 .or_else(|| {
-                                    self.tool_rows
-                                        .iter()
-                                        .rev()
-                                        .find(|row| matches!(row.state, ToolRowState::Pending | ToolRowState::Running))
+                                    self.tool_rows.iter().rev().find(|row| {
+                                        matches!(
+                                            row.state,
+                                            ToolRowState::Pending | ToolRowState::Running
+                                        )
+                                    })
                                 })
                                 .map(|row| row.call_id.clone())
                         };
@@ -3003,7 +3059,9 @@ impl App {
                                 format!("inline:{}:{}", name, event.seq)
                             }
                         });
-                        let had_row = existing_id.is_some() || (!call_id.is_empty() && self.tool_rows.iter().any(|row| row.call_id == call_id));
+                        let had_row = existing_id.is_some()
+                            || (!call_id.is_empty()
+                                && self.tool_rows.iter().any(|row| row.call_id == call_id));
                         if !had_row {
                             if !call_id.is_empty() {
                                 self.upsert_tool_row(
@@ -3015,9 +3073,13 @@ impl App {
                                     payload.get("metadata").cloned(),
                                 );
                             }
-                        } else if let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == part_id) {
+                        } else if let Some(row) =
+                            self.tool_rows.iter_mut().find(|row| row.call_id == part_id)
+                        {
                             row.name = name.to_string();
-                            if !target.is_empty() && (row.desc == "preparing arguments..." || row.desc.is_empty()) {
+                            if !target.is_empty()
+                                && (row.desc == "preparing arguments..." || row.desc.is_empty())
+                            {
                                 row.desc = bounded(target.clone(), MAX_TOOL_ARGUMENT_BYTES);
                             }
                             if let Some(a) = args {
@@ -3085,41 +3147,46 @@ impl App {
                         if structured {
                             self.push_tool_part(part_id);
                         } else {
-                            self.stream_parts.retain(|part| !matches!(part, StreamPart::Tool(id) if id == &part_id));
+                            self.stream_parts.retain(
+                                |part| !matches!(part, StreamPart::Tool(id) if id == &part_id),
+                            );
                             self.tool_rows.retain(|row| row.call_id != part_id);
-                        if name == "update_plan" {
-                            let parsed_args_holder: Option<serde_json::Value> = match args {
-                                Some(serde_json::Value::String(s)) => serde_json::from_str(s).ok(),
-                                Some(v @ serde_json::Value::Object(_)) => Some(v.clone()),
-                                _ => None,
-                            };
-                            let args_ref = parsed_args_holder.as_ref().or(args);
+                            if name == "update_plan" {
+                                let parsed_args_holder: Option<serde_json::Value> = match args {
+                                    Some(serde_json::Value::String(s)) => {
+                                        serde_json::from_str(s).ok()
+                                    }
+                                    Some(v @ serde_json::Value::Object(_)) => Some(v.clone()),
+                                    _ => None,
+                                };
+                                let args_ref = parsed_args_holder.as_ref().or(args);
 
-                            let explanation = args_ref
-                                .and_then(|a| a.get("explanation"))
-                                .and_then(|v| v.as_str())
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                                .map(ToString::to_string);
+                                let explanation = args_ref
+                                    .and_then(|a| a.get("explanation"))
+                                    .and_then(|v| v.as_str())
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(ToString::to_string);
 
-                            let plan_items: Vec<(String, String)> = args_ref
-                                .and_then(|a| a.get("plan"))
-                                .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|item| {
-                                            let obj = item.as_object()?;
-                                            let step = obj
-                                                .get("step")
-                                                .or_else(|| obj.get("content"))
-                                                .or_else(|| obj.get("title"))
-                                                .and_then(|v| v.as_str())?
-                                                .trim();
-                                            if step.is_empty() {
-                                                return None;
-                                            }
-                                            let clean_step =
-                                                if let Some((num, rest)) = step.split_once(". ") {
+                                let plan_items: Vec<(String, String)> = args_ref
+                                    .and_then(|a| a.get("plan"))
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|item| {
+                                                let obj = item.as_object()?;
+                                                let step = obj
+                                                    .get("step")
+                                                    .or_else(|| obj.get("content"))
+                                                    .or_else(|| obj.get("title"))
+                                                    .and_then(|v| v.as_str())?
+                                                    .trim();
+                                                if step.is_empty() {
+                                                    return None;
+                                                }
+                                                let clean_step = if let Some((num, rest)) =
+                                                    step.split_once(". ")
+                                                {
                                                     if !num.is_empty()
                                                         && num.chars().all(|c| c.is_ascii_digit())
                                                     {
@@ -3131,318 +3198,335 @@ impl App {
                                                     step
                                                 };
 
-                                            let status = obj
-                                                .get("status")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("pending")
-                                                .trim()
-                                                .to_ascii_lowercase();
-                                            let norm_status = match status.as_str() {
-                                                "todo" | "open" | "pending" | "not_started"
-                                                | "not-started" => "pending",
-                                                "in_progress" | "in-progress" | "in progress"
-                                                | "doing" | "active" => "in_progress",
-                                                "done" | "completed" | "complete" => "completed",
-                                                other => other,
-                                            };
-                                            Some((clean_step.to_string(), norm_status.to_string()))
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
+                                                let status = obj
+                                                    .get("status")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("pending")
+                                                    .trim()
+                                                    .to_ascii_lowercase();
+                                                let norm_status = match status.as_str() {
+                                                    "todo" | "open" | "pending" | "not_started"
+                                                    | "not-started" => "pending",
+                                                    "in_progress" | "in-progress"
+                                                    | "in progress" | "doing" | "active" => {
+                                                        "in_progress"
+                                                    }
+                                                    "done" | "completed" | "complete" => {
+                                                        "completed"
+                                                    }
+                                                    other => other,
+                                                };
+                                                Some((
+                                                    clean_step.to_string(),
+                                                    norm_status.to_string(),
+                                                ))
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
 
-                            if success {
-                                self.current_plan = plan_items.clone();
-                            }
+                                if success {
+                                    self.current_plan = plan_items.clone();
+                                }
 
-                            let header = "⬢ Updated Plan";
-                            let branch = if !success {
-                                let err_line = output.lines().next().unwrap_or("error").trim();
-                                let cleaned = err_line
-                                    .strip_prefix(&format!("Error executing {name}: "))
-                                    .unwrap_or(err_line);
-                                format!("  └ failed: {cleaned}")
-                            } else if !plan_items.is_empty() {
-                                format!("  └ Plan updated: {} steps", plan_items.len())
-                            } else {
-                                format!("  └ {detail}")
-                            };
-
-                            let mut snippet = String::new();
-                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
-                                snippet.push('\n');
-                            }
-                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-                                snippet.push('\n');
-                            }
-                            snippet.push_str(header);
-                            snippet.push('\n');
-                            if let Some(exp) = &explanation {
-                                snippet.push_str(&format!("  │ {exp}\n"));
-                            }
-                            for (i, (step, status)) in plan_items.iter().enumerate() {
-                                let marker = match status.as_str() {
-                                    "completed" => "✔",
-                                    "in_progress" => "•",
-                                    _ => "□",
+                                let header = "⬢ Updated Plan";
+                                let branch = if !success {
+                                    let err_line = output.lines().next().unwrap_or("error").trim();
+                                    let cleaned = err_line
+                                        .strip_prefix(&format!("Error executing {name}: "))
+                                        .unwrap_or(err_line);
+                                    format!("  └ failed: {cleaned}")
+                                } else if !plan_items.is_empty() {
+                                    format!("  └ Plan updated: {} steps", plan_items.len())
+                                } else {
+                                    format!("  └ {detail}")
                                 };
-                                snippet.push_str(&format!("  │ {marker} {}. {step}\n", i + 1));
-                            }
-                            snippet.push_str(&branch);
-                            snippet.push_str("\n\n");
-                            self.transcript.push_str(&snippet);
-                            self.truncate_transcript();
-                        } else if name == "bash" || name == "sh" {
-                            let mut cleaned_lines: Vec<&str> = Vec::new();
-                            for l in output.lines() {
-                                let t = l.trim();
-                                if t.starts_with("[Process exited with code ") && t.ends_with(']') {
-                                    continue;
-                                }
-                                if t == "[Command finished with no output]" {
-                                    continue;
-                                }
-                                cleaned_lines.push(l);
-                            }
 
-                            let clean_cmd = target.strip_prefix("$ ").unwrap_or(&target);
-                            let header = format!("$ {clean_cmd}");
-
-                            let mut snippet = String::new();
-                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
-                                snippet.push('\n');
-                            }
-                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-                                snippet.push('\n');
-                            }
-                            snippet.push_str(&header);
-                            snippet.push('\n');
-
-                            let max_lines = 25;
-                            if cleaned_lines.len() <= max_lines {
-                                for l in &cleaned_lines {
-                                    snippet.push_str(l);
+                                let mut snippet = String::new();
+                                if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
                                     snippet.push('\n');
                                 }
-                            } else {
-                                for l in &cleaned_lines[..max_lines] {
-                                    snippet.push_str(l);
-                                    snippet.push('\n');
-                                }
-                                snippet.push_str(&format!(
-                                    "... ({} more lines)\n",
-                                    cleaned_lines.len() - max_lines
-                                ));
-                            }
-                            if !success && cleaned_lines.is_empty() {
-                                snippet.push_str(&format!("failed: {detail}\n"));
-                            }
-                            snippet.push('\n');
-                            self.transcript.push_str(&snippet);
-                            self.truncate_transcript();
-                        } else if name == "websearch" {
-                            let header = if target.starts_with('"') {
-                                format!("⬢ Searched {target}")
-                            } else {
-                                format!("⬢ Searched \"{target}\"")
-                            };
-
-                            let mut results = Vec::new();
-                            let mut current_title: Option<String> = None;
-                            let mut current_url: Option<String> = None;
-
-                            for l in output.lines() {
-                                let trimmed = l.trim();
-                                if let Some((_num, title)) =
-                                    crate::tui::chat::split_numbered_result(trimmed)
+                                if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n")
                                 {
-                                    if let Some(t) = current_title.take() {
-                                        results.push((t, current_url.take().unwrap_or_default()));
-                                    }
-                                    current_title = Some(title.to_string());
-                                } else if let Some(url) = trimmed.strip_prefix("URL: ") {
-                                    current_url = Some(url.to_string());
+                                    snippet.push('\n');
                                 }
-                            }
-                            if let Some(t) = current_title {
-                                results.push((t, current_url.unwrap_or_default()));
-                            }
-
-                            let mut snippet = String::new();
-                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                snippet.push_str(header);
                                 snippet.push('\n');
-                            }
-                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-                                snippet.push('\n');
-                            }
-                            snippet.push_str(&header);
-                            snippet.push('\n');
-
-                            if !results.is_empty() {
-                                snippet.push_str(
-                                    "  ┌── Results ──────────────────────────────────────\n",
-                                );
-                                for (i, (title, url)) in results.iter().take(5).enumerate() {
-                                    snippet.push_str(&format!("  │ {}. {}\n", i + 1, title));
-                                    if !url.is_empty() {
-                                        snippet.push_str(&format!("  │    URL: {}\n", url));
-                                    }
+                                if let Some(exp) = &explanation {
+                                    snippet.push_str(&format!("  │ {exp}\n"));
                                 }
-                                if results.len() > 5 {
+                                for (i, (step, status)) in plan_items.iter().enumerate() {
+                                    let marker = match status.as_str() {
+                                        "completed" => "✔",
+                                        "in_progress" => "•",
+                                        _ => "□",
+                                    };
+                                    snippet.push_str(&format!("  │ {marker} {}. {step}\n", i + 1));
+                                }
+                                snippet.push_str(&branch);
+                                snippet.push_str("\n\n");
+                                self.transcript.push_str(&snippet);
+                                self.truncate_transcript();
+                            } else if name == "bash" || name == "sh" {
+                                let mut cleaned_lines: Vec<&str> = Vec::new();
+                                for l in output.lines() {
+                                    let t = l.trim();
+                                    if t.starts_with("[Process exited with code ")
+                                        && t.ends_with(']')
+                                    {
+                                        continue;
+                                    }
+                                    if t == "[Command finished with no output]" {
+                                        continue;
+                                    }
+                                    cleaned_lines.push(l);
+                                }
+
+                                let clean_cmd = target.strip_prefix("$ ").unwrap_or(&target);
+                                let header = format!("$ {clean_cmd}");
+
+                                let mut snippet = String::new();
+                                if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                    snippet.push('\n');
+                                }
+                                if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n")
+                                {
+                                    snippet.push('\n');
+                                }
+                                snippet.push_str(&header);
+                                snippet.push('\n');
+
+                                let max_lines = 25;
+                                if cleaned_lines.len() <= max_lines {
+                                    for l in &cleaned_lines {
+                                        snippet.push_str(l);
+                                        snippet.push('\n');
+                                    }
+                                } else {
+                                    for l in &cleaned_lines[..max_lines] {
+                                        snippet.push_str(l);
+                                        snippet.push('\n');
+                                    }
                                     snippet.push_str(&format!(
-                                        "  │ ... ({} more results)\n",
-                                        results.len() - 5
+                                        "... ({} more lines)\n",
+                                        cleaned_lines.len() - max_lines
                                     ));
                                 }
-                                snippet.push_str("  └───\n");
-                            }
-
-                            let branch = if !success {
-                                let err_line = output.lines().next().unwrap_or("error").trim();
-                                let cleaned = err_line
-                                    .strip_prefix(&format!("Error executing {name}: "))
-                                    .unwrap_or(err_line);
-                                format!("  └ failed: {cleaned}")
-                            } else if results.is_empty() {
-                                "  └ 0 results found".to_string()
-                            } else if results.len() == 1 {
-                                "  └ 1 result found".to_string()
-                            } else {
-                                format!("  └ {} results found", results.len())
-                            };
-
-                            snippet.push_str(&branch);
-                            snippet.push_str("\n\n");
-                            self.transcript.push_str(&snippet);
-                            self.truncate_transcript();
-                        } else if success && matches!(name, "edit_file" | "edit") {
-                            let old_str = args
-                                .and_then(|a| a.get("old_string"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let new_str = args
-                                .and_then(|a| a.get("new_string"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let start_line = output
-                                .split("at line ")
-                                .nth(1)
-                                .and_then(|s| s.split_whitespace().next())
-                                .and_then(|s| s.parse::<usize>().ok())
-                                .unwrap_or(1);
-                            let diff = crate::tui::diff::compute_diff(old_str, new_str, 0);
-                            let side_by_side = crate::tui::diff::compute_side_by_side_diff(
-                                old_str, new_str, start_line, 20,
-                            );
-                            let header = if target.is_empty() {
-                                format!("• Edit (+{} -{})", diff.added, diff.removed)
-                            } else {
-                                format!("• Edit {target} (+{} -{})", diff.added, diff.removed)
-                            };
-                            let diff_lines_str =
-                                crate::tui::diff::format_side_by_side_diff(&side_by_side, 40);
-
-                            let mut snippet = String::new();
-                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
-                                snippet.push('\n');
-                            }
-                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-                                snippet.push('\n');
-                            }
-                            snippet.push_str(&header);
-                            snippet.push('\n');
-                            if !diff_lines_str.is_empty() {
-                                snippet.push_str(&diff_lines_str);
-                            }
-                            snippet.push('\n');
-                            self.transcript.push_str(&snippet);
-                            self.truncate_transcript();
-                        } else if success && matches!(name, "patch" | "apply_patch") {
-                            let patch_str = args
-                                .and_then(|a| a.get("patch"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let mut added = 0usize;
-                            let mut removed = 0usize;
-                            let mut diff_lines = Vec::new();
-                            for l in patch_str.lines() {
-                                if l.starts_with('+') && !l.starts_with("+++") {
-                                    added += 1;
-                                    diff_lines.push(format!("    + {}", &l[1..]));
-                                } else if l.starts_with('-') && !l.starts_with("---") {
-                                    removed += 1;
-                                    diff_lines.push(format!("    - {}", &l[1..]));
-                                } else if l.starts_with(' ') {
-                                    diff_lines.push(format!("    {}", l));
+                                if !success && cleaned_lines.is_empty() {
+                                    snippet.push_str(&format!("failed: {detail}\n"));
                                 }
-                            }
-                            let header = if target.is_empty() {
-                                format!("• Applied patch (+{added} -{removed})")
-                            } else {
-                                format!("• Applied patch {target} (+{added} -{removed})")
-                            };
-                            let mut snippet = String::new();
-                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
                                 snippet.push('\n');
-                            }
-                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-                                snippet.push('\n');
-                            }
-                            snippet.push_str(&header);
-                            snippet.push('\n');
-                            for dl in diff_lines.iter().take(25) {
-                                snippet.push_str(dl);
-                                snippet.push('\n');
-                            }
-                            snippet.push('\n');
-                            self.transcript.push_str(&snippet);
-                            self.truncate_transcript();
-                        } else if matches!(name, "write_file" | "write") {
-                            let line_count = args
-                                .and_then(|a| a.get("content"))
-                                .and_then(|v| v.as_str())
-                                .map(|c| c.lines().count())
-                                .unwrap_or_else(|| output.lines().count());
-                            let header = if line_count > 0 {
-                                format!("• Write {target} ({line_count} lines)")
-                            } else {
-                                format!("• Write {target}")
-                            };
-                            let branch = format!("  └ {detail}");
-                            let mut snippet = String::new();
-                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
-                                snippet.push('\n');
-                            }
-                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-                                snippet.push('\n');
-                            }
-                            snippet.push_str(&header);
-                            snippet.push('\n');
-                            snippet.push_str(&branch);
-                            snippet.push_str("\n\n");
-                            self.transcript.push_str(&snippet);
-                            self.truncate_transcript();
-                        } else {
-                            let header = if target.is_empty() {
-                                format!("⬢ {verb}")
-                            } else {
-                                format!("⬢ {verb} {target}")
-                            };
-                            let branch = format!("  └ {detail}");
+                                self.transcript.push_str(&snippet);
+                                self.truncate_transcript();
+                            } else if name == "websearch" {
+                                let header = if target.starts_with('"') {
+                                    format!("⬢ Searched {target}")
+                                } else {
+                                    format!("⬢ Searched \"{target}\"")
+                                };
 
-                            let mut snippet = String::new();
-                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                let mut results = Vec::new();
+                                let mut current_title: Option<String> = None;
+                                let mut current_url: Option<String> = None;
+
+                                for l in output.lines() {
+                                    let trimmed = l.trim();
+                                    if let Some((_num, title)) =
+                                        crate::tui::chat::split_numbered_result(trimmed)
+                                    {
+                                        if let Some(t) = current_title.take() {
+                                            results
+                                                .push((t, current_url.take().unwrap_or_default()));
+                                        }
+                                        current_title = Some(title.to_string());
+                                    } else if let Some(url) = trimmed.strip_prefix("URL: ") {
+                                        current_url = Some(url.to_string());
+                                    }
+                                }
+                                if let Some(t) = current_title {
+                                    results.push((t, current_url.unwrap_or_default()));
+                                }
+
+                                let mut snippet = String::new();
+                                if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                    snippet.push('\n');
+                                }
+                                if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n")
+                                {
+                                    snippet.push('\n');
+                                }
+                                snippet.push_str(&header);
                                 snippet.push('\n');
-                            }
-                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+
+                                if !results.is_empty() {
+                                    snippet.push_str(
+                                        "  ┌── Results ──────────────────────────────────────\n",
+                                    );
+                                    for (i, (title, url)) in results.iter().take(5).enumerate() {
+                                        snippet.push_str(&format!("  │ {}. {}\n", i + 1, title));
+                                        if !url.is_empty() {
+                                            snippet.push_str(&format!("  │    URL: {}\n", url));
+                                        }
+                                    }
+                                    if results.len() > 5 {
+                                        snippet.push_str(&format!(
+                                            "  │ ... ({} more results)\n",
+                                            results.len() - 5
+                                        ));
+                                    }
+                                    snippet.push_str("  └───\n");
+                                }
+
+                                let branch = if !success {
+                                    let err_line = output.lines().next().unwrap_or("error").trim();
+                                    let cleaned = err_line
+                                        .strip_prefix(&format!("Error executing {name}: "))
+                                        .unwrap_or(err_line);
+                                    format!("  └ failed: {cleaned}")
+                                } else if results.is_empty() {
+                                    "  └ 0 results found".to_string()
+                                } else if results.len() == 1 {
+                                    "  └ 1 result found".to_string()
+                                } else {
+                                    format!("  └ {} results found", results.len())
+                                };
+
+                                snippet.push_str(&branch);
+                                snippet.push_str("\n\n");
+                                self.transcript.push_str(&snippet);
+                                self.truncate_transcript();
+                            } else if success && matches!(name, "edit_file" | "edit") {
+                                let old_str = args
+                                    .and_then(|a| a.get("old_string"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let new_str = args
+                                    .and_then(|a| a.get("new_string"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let start_line = output
+                                    .split("at line ")
+                                    .nth(1)
+                                    .and_then(|s| s.split_whitespace().next())
+                                    .and_then(|s| s.parse::<usize>().ok())
+                                    .unwrap_or(1);
+                                let diff = crate::tui::diff::compute_diff(old_str, new_str, 0);
+                                let side_by_side = crate::tui::diff::compute_side_by_side_diff(
+                                    old_str, new_str, start_line, 20,
+                                );
+                                let header = if target.is_empty() {
+                                    format!("• Edit (+{} -{})", diff.added, diff.removed)
+                                } else {
+                                    format!("• Edit {target} (+{} -{})", diff.added, diff.removed)
+                                };
+                                let diff_lines_str =
+                                    crate::tui::diff::format_side_by_side_diff(&side_by_side, 40);
+
+                                let mut snippet = String::new();
+                                if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                    snippet.push('\n');
+                                }
+                                if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n")
+                                {
+                                    snippet.push('\n');
+                                }
+                                snippet.push_str(&header);
                                 snippet.push('\n');
+                                if !diff_lines_str.is_empty() {
+                                    snippet.push_str(&diff_lines_str);
+                                }
+                                snippet.push('\n');
+                                self.transcript.push_str(&snippet);
+                                self.truncate_transcript();
+                            } else if success && matches!(name, "patch" | "apply_patch") {
+                                let patch_str = args
+                                    .and_then(|a| a.get("patch"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let mut added = 0usize;
+                                let mut removed = 0usize;
+                                let mut diff_lines = Vec::new();
+                                for l in patch_str.lines() {
+                                    if l.starts_with('+') && !l.starts_with("+++") {
+                                        added += 1;
+                                        diff_lines.push(format!("    + {}", &l[1..]));
+                                    } else if l.starts_with('-') && !l.starts_with("---") {
+                                        removed += 1;
+                                        diff_lines.push(format!("    - {}", &l[1..]));
+                                    } else if l.starts_with(' ') {
+                                        diff_lines.push(format!("    {}", l));
+                                    }
+                                }
+                                let header = if target.is_empty() {
+                                    format!("• Applied patch (+{added} -{removed})")
+                                } else {
+                                    format!("• Applied patch {target} (+{added} -{removed})")
+                                };
+                                let mut snippet = String::new();
+                                if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                    snippet.push('\n');
+                                }
+                                if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n")
+                                {
+                                    snippet.push('\n');
+                                }
+                                snippet.push_str(&header);
+                                snippet.push('\n');
+                                for dl in diff_lines.iter().take(25) {
+                                    snippet.push_str(dl);
+                                    snippet.push('\n');
+                                }
+                                snippet.push('\n');
+                                self.transcript.push_str(&snippet);
+                                self.truncate_transcript();
+                            } else if matches!(name, "write_file" | "write") {
+                                let line_count = args
+                                    .and_then(|a| a.get("content"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|c| c.lines().count())
+                                    .unwrap_or_else(|| output.lines().count());
+                                let header = if line_count > 0 {
+                                    format!("• Write {target} ({line_count} lines)")
+                                } else {
+                                    format!("• Write {target}")
+                                };
+                                let branch = format!("  └ {detail}");
+                                let mut snippet = String::new();
+                                if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                    snippet.push('\n');
+                                }
+                                if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n")
+                                {
+                                    snippet.push('\n');
+                                }
+                                snippet.push_str(&header);
+                                snippet.push('\n');
+                                snippet.push_str(&branch);
+                                snippet.push_str("\n\n");
+                                self.transcript.push_str(&snippet);
+                                self.truncate_transcript();
+                            } else {
+                                let header = if target.is_empty() {
+                                    format!("⬢ {verb}")
+                                } else {
+                                    format!("⬢ {verb} {target}")
+                                };
+                                let branch = format!("  └ {detail}");
+
+                                let mut snippet = String::new();
+                                if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                    snippet.push('\n');
+                                }
+                                if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n")
+                                {
+                                    snippet.push('\n');
+                                }
+                                snippet.push_str(&header);
+                                snippet.push('\n');
+                                snippet.push_str(&branch);
+                                self.transcript.push_str(&snippet);
+                                self.truncate_transcript();
                             }
-                            snippet.push_str(&header);
-                            snippet.push('\n');
-                            snippet.push_str(&branch);
-                            self.transcript.push_str(&snippet);
-                            self.truncate_transcript();
-                        }
                         }
                         self.refresh_active_tool();
                     }
@@ -3457,7 +3541,8 @@ impl App {
                     }
                     self.active_generation_id = None;
                     self.refresh_active_tool();
-                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(status) = payload.get("status").and_then(|v| v.as_str())
                     {
                         self.text_stream_active = false;

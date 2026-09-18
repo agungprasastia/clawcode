@@ -1651,7 +1651,11 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
     app.poll_runtime();
     assert!(app.active_tool().is_none());
 
-    assert!(app.tool_rows().iter().any(|r| r.name == "read_file" && r.state == clawcode::tui::ToolRowState::Completed));
+    assert!(
+        app.tool_rows()
+            .iter()
+            .any(|r| r.name == "read_file" && r.state == clawcode::tui::ToolRowState::Completed)
+    );
     assert!(!app.transcript().contains("⬢ Read src/cli/mod.rs"));
 
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
@@ -1802,7 +1806,11 @@ fn tool_failure_formats_cleanly_with_error_branch() {
     .unwrap();
     app.poll_runtime();
 
-    assert!(app.tool_rows().iter().any(|r| r.name == "read_file" && r.state == clawcode::tui::ToolRowState::Failed));
+    assert!(
+        app.tool_rows()
+            .iter()
+            .any(|r| r.name == "read_file" && r.state == clawcode::tui::ToolRowState::Failed)
+    );
     assert!(!app.transcript().contains("⬢ Read foo.rs"));
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -2226,11 +2234,9 @@ fn test_streaming_reasoning_buffer_and_flush_formatting() {
         &theme,
         ratatui::style::Color::Cyan,
     );
-    let thought_header = lines.iter().find(|l| {
-        l.spans
-            .iter()
-            .any(|s| s.content.contains("Thought"))
-    });
+    let thought_header = lines
+        .iter()
+        .find(|l| l.spans.iter().any(|s| s.content.contains("Thought")));
     assert!(thought_header.is_some());
     let span = thought_header
         .unwrap()
@@ -2723,8 +2729,10 @@ fn test_opencode_bash_command_and_output_block_styling() {
             "id": "bash-call-1",
             "name": "bash",
             "arguments": { "command": "git commit -m 'feat: align'" }
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
     app.poll_runtime();
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
@@ -2732,17 +2740,29 @@ fn test_opencode_bash_command_and_output_block_styling() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let rendered = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(rendered.contains("git commit -m 'feat: align'"));
-    let running_row_y = (0..buffer.area.height).find(|&y| {
-        (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>().contains("git commit")
-    }).expect("running row should be visible");
+    let running_row_y = (0..buffer.area.height)
+        .find(|&y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("git commit")
+        })
+        .expect("running row should be visible");
     assert_eq!(buffer[(5, running_row_y)].bg, theme.bg_element);
 
     // 2. Completed command with 15 lines of output (exceeds max 10 lines)
-    let output = (1..=15).map(|n| format!("output line {n}")).collect::<Vec<_>>().join("\n");
+    let output = (1..=15)
+        .map(|n| format!("output line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id,
         generation_id: Some(1),
@@ -2754,14 +2774,20 @@ fn test_opencode_bash_command_and_output_block_styling() {
             "arguments": { "command": "git commit -m 'feat: align'" },
             "success": true,
             "output": output
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
     app.poll_runtime();
 
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let rendered = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -2776,12 +2802,22 @@ fn test_opencode_bash_command_and_output_block_styling() {
     assert!(rendered.contains("↳ click to expand (5 more lines)"));
 
     // Verify background color on completed command and output row
-    let cmd_y = (0..buffer.area.height).find(|&y| {
-        (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>().contains("$ git commit")
-    }).expect("command row should be visible");
-    let out_y = (0..buffer.area.height).find(|&y| {
-        (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>().contains("output line 1")
-    }).expect("output row should be visible");
+    let cmd_y = (0..buffer.area.height)
+        .find(|&y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("$ git commit")
+        })
+        .expect("command row should be visible");
+    let out_y = (0..buffer.area.height)
+        .find(|&y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("output line 1")
+        })
+        .expect("output row should be visible");
     assert_eq!(buffer[(5, cmd_y)].bg, theme.bg_element);
     assert_eq!(buffer[(5, out_y)].bg, theme.bg_element);
 
@@ -2791,7 +2827,11 @@ fn test_opencode_bash_command_and_output_block_styling() {
     assert!(app.is_tool_expanded("bash-call-1"));
     let buffer = terminal.backend().buffer();
     let expanded = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(expanded.contains("output line 11"));
@@ -2804,7 +2844,11 @@ fn test_opencode_bash_command_and_output_block_styling() {
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
     let collapsed = (0..buffer.area.height)
-        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!collapsed.contains("output line 11"));
@@ -2944,7 +2988,10 @@ fn test_mouse_click_on_autocomplete_popup() {
     // Click on the first item in popup
     let click_x = popup_area.x + 2;
     let click_y = popup_area.y + 1;
-    app.apply(UiEvent::MouseClick { x: click_x, y: click_y });
+    app.apply(UiEvent::MouseClick {
+        x: click_x,
+        y: click_y,
+    });
 
     assert!(app.sessions_dialog().is_some());
     assert!(!app.diagnostic().contains("unknown command"));
@@ -2972,7 +3019,9 @@ fn test_mouse_click_on_autocomplete_popup() {
         app2.apply(UiEvent::Input(Input::Character(ch)));
     }
     terminal.draw(|f| clawcode::tui::render(f, &app2)).unwrap();
-    let popup_area = app2.last_popup_area().expect("popup area should be present");
+    let popup_area = app2
+        .last_popup_area()
+        .expect("popup area should be present");
     app2.apply(UiEvent::Input(Input::Click {
         column: popup_area.x + 2,
         row: popup_area.y + 1,
@@ -3127,16 +3176,31 @@ fn structured_tool_rows_track_concurrent_lifecycle_and_bound_payloads() {
     app.poll_runtime();
 
     assert_eq!(app.tool_rows().len(), 2);
-    assert!(app
-        .tool_rows()
-        .iter()
-        .all(|row| row.state == clawcode::tui::app::ToolRowState::Pending));
+    assert!(
+        app.tool_rows()
+            .iter()
+            .all(|row| row.state == clawcode::tui::app::ToolRowState::Pending)
+    );
     assert!(app.tool_rows()[0].arguments.len() <= 4 * 1024);
     assert!(!app.is_typing());
 
     for (seq, (id, name, args)) in [
-        (4, ("call-a", "read_file", serde_json::json!({ "path": "src/lib.rs" }))),
-        (5, ("call-b", "bash", serde_json::json!({ "command": "echo ok" }))),
+        (
+            4,
+            (
+                "call-a",
+                "read_file",
+                serde_json::json!({ "path": "src/lib.rs" }),
+            ),
+        ),
+        (
+            5,
+            (
+                "call-b",
+                "bash",
+                serde_json::json!({ "command": "echo ok" }),
+            ),
+        ),
     ] {
         tx.send(clawcode::runtime::RuntimeEvent {
             session_id,
@@ -3149,10 +3213,11 @@ fn structured_tool_rows_track_concurrent_lifecycle_and_bound_payloads() {
         .unwrap();
     }
     app.poll_runtime();
-    assert!(app
-        .tool_rows()
-        .iter()
-        .all(|row| row.state == clawcode::tui::app::ToolRowState::Running));
+    assert!(
+        app.tool_rows()
+            .iter()
+            .all(|row| row.state == clawcode::tui::app::ToolRowState::Running)
+    );
 
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id,
@@ -3178,11 +3243,12 @@ fn structured_tool_rows_track_concurrent_lifecycle_and_bound_payloads() {
             .map(|row| row.state),
         Some(clawcode::tui::app::ToolRowState::Failed)
     );
-    assert!(app
-        .tool_rows()
-        .iter()
-        .find(|row| row.call_id == "call-a")
-        .is_some_and(|row| row.output.len() <= 16 * 1024));
+    assert!(
+        app.tool_rows()
+            .iter()
+            .find(|row| row.call_id == "call-a")
+            .is_some_and(|row| row.output.len() <= 16 * 1024)
+    );
     assert!(app.active_tool().is_some());
 }
 
@@ -3210,7 +3276,9 @@ fn tool_only_active_turn_has_no_assistant_caret() {
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
     let buffer = terminal.backend().buffer();
     let text = (0..buffer.area.height)
         .map(|y| {
@@ -3287,31 +3355,66 @@ fn completed_tool_row_renders_once_without_transcript_duplicate() {
     app.submit_user_prompt("run");
     let session_id = app.active_session_id().unwrap();
     for (seq, kind, payload) in [
-        (1, "tool_call_start", serde_json::json!({"id":"call-1","name":"bash"})),
-        (2, "tool_executing", serde_json::json!({"id":"call-1","name":"bash","arguments":{"command":"echo ok"}})),
-        (3, "tool_executed", serde_json::json!({"id":"call-1","name":"bash","arguments":{"command":"echo ok"},"success":true,"output":"ok"})),
+        (
+            1,
+            "tool_call_start",
+            serde_json::json!({"id":"call-1","name":"bash"}),
+        ),
+        (
+            2,
+            "tool_executing",
+            serde_json::json!({"id":"call-1","name":"bash","arguments":{"command":"echo ok"}}),
+        ),
+        (
+            3,
+            "tool_executed",
+            serde_json::json!({"id":"call-1","name":"bash","arguments":{"command":"echo ok"},"success":true,"output":"ok"}),
+        ),
     ] {
-        tx.send(clawcode::runtime::RuntimeEvent { session_id, generation_id: Some(3), seq, kind: kind.into(), payload_json: payload.to_string() }).unwrap();
+        tx.send(clawcode::runtime::RuntimeEvent {
+            session_id,
+            generation_id: Some(3),
+            seq,
+            kind: kind.into(),
+            payload_json: payload.to_string(),
+        })
+        .unwrap();
     }
     app.poll_runtime();
-    assert_eq!(app.tool_rows().iter().filter(|row| row.state == clawcode::tui::app::ToolRowState::Completed).count(), 1);
+    assert_eq!(
+        app.tool_rows()
+            .iter()
+            .filter(|row| row.state == clawcode::tui::app::ToolRowState::Completed)
+            .count(),
+        1
+    );
     assert!(!app.transcript().contains("$ echo ok"));
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
     let buffer = terminal.backend().buffer();
-    let text = (0..30).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+    let text = (0..30)
+        .map(|y| {
+            (0..100)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(text.contains("$ echo ok"));
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let cmd_y = (0..30).find(|&y| {
-        let row: String = (0..100).map(|x| buffer[(x, y)].symbol()).collect();
-        row.contains("$ echo ok")
-    }).expect("cmd line should exist");
+    let cmd_y = (0..30)
+        .find(|&y| {
+            let row: String = (0..100).map(|x| buffer[(x, y)].symbol()).collect();
+            row.contains("$ echo ok")
+        })
+        .expect("cmd line should exist");
     assert_eq!(buffer[(50, cmd_y)].bg, theme.bg_element);
     assert_eq!(buffer[(50, cmd_y - 1)].bg, theme.bg_element);
     assert_eq!(buffer[(50, cmd_y + 1)].bg, theme.bg_element);
     assert_eq!(buffer[(50, cmd_y + 2)].bg, theme.bg_element);
-    assert_eq!(buffer[(50, cmd_y + 3)].bg, theme.bg_element);
 }
 
 #[test]
@@ -3322,15 +3425,45 @@ fn active_tool_rows_stay_bounded_and_completion_uses_call_id() {
     app.submit_user_prompt("many tools");
     let session_id = app.active_session_id().unwrap();
     for seq in 0..70 {
-        tx.send(clawcode::runtime::RuntimeEvent { session_id, generation_id: Some(5), seq, kind: "tool_call_start".into(), payload_json: serde_json::json!({"id":format!("call-{seq}"),"name":"read_file"}).to_string() }).unwrap();
+        tx.send(clawcode::runtime::RuntimeEvent {
+            session_id,
+            generation_id: Some(5),
+            seq,
+            kind: "tool_call_start".into(),
+            payload_json: serde_json::json!({"id":format!("call-{seq}"),"name":"read_file"})
+                .to_string(),
+        })
+        .unwrap();
     }
     app.poll_runtime();
     assert_eq!(app.tool_rows().len(), 64);
     assert!(!app.tool_rows().iter().any(|row| row.call_id == "call-0"));
-    tx.send(clawcode::runtime::RuntimeEvent { session_id, generation_id: Some(5), seq: 71, kind: "tool_executed".into(), payload_json: serde_json::json!({"id":"call-69","name":"read_file","success":true,"output":"done"}).to_string() }).unwrap();
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(5),
+        seq: 71,
+        kind: "tool_executed".into(),
+        payload_json:
+            serde_json::json!({"id":"call-69","name":"read_file","success":true,"output":"done"})
+                .to_string(),
+    })
+    .unwrap();
     app.poll_runtime();
-    assert_eq!(app.tool_rows().iter().find(|row| row.call_id == "call-69").map(|row| row.state), Some(clawcode::tui::app::ToolRowState::Completed));
-    assert!(app.tool_rows().iter().filter(|row| row.state == clawcode::tui::app::ToolRowState::Running || row.state == clawcode::tui::app::ToolRowState::Pending).count() <= 63);
+    assert_eq!(
+        app.tool_rows()
+            .iter()
+            .find(|row| row.call_id == "call-69")
+            .map(|row| row.state),
+        Some(clawcode::tui::app::ToolRowState::Completed)
+    );
+    assert!(
+        app.tool_rows()
+            .iter()
+            .filter(|row| row.state == clawcode::tui::app::ToolRowState::Running
+                || row.state == clawcode::tui::app::ToolRowState::Pending)
+            .count()
+            <= 63
+    );
 }
 
 #[test]
@@ -3342,18 +3475,42 @@ fn ordered_stream_keeps_text_tools_and_followup_text_in_event_order() {
     let session_id = app.active_session_id().unwrap();
     for (seq, kind, payload) in [
         (1, "text_delta", serde_json::json!({"delta":"Before"})),
-        (2, "tool_executing", serde_json::json!({"id":"ordered-tool","name":"bash","arguments":{"command":"echo ok"}})),
-        (3, "tool_executed", serde_json::json!({"id":"ordered-tool","name":"bash","arguments":{"command":"echo ok"},"success":true,"output":"ok"})),
+        (
+            2,
+            "tool_executing",
+            serde_json::json!({"id":"ordered-tool","name":"bash","arguments":{"command":"echo ok"}}),
+        ),
+        (
+            3,
+            "tool_executed",
+            serde_json::json!({"id":"ordered-tool","name":"bash","arguments":{"command":"echo ok"},"success":true,"output":"ok"}),
+        ),
         (4, "text_delta", serde_json::json!({"delta":"After"})),
     ] {
-        tx.send(clawcode::runtime::RuntimeEvent { session_id, generation_id: Some(1), seq, kind: kind.into(), payload_json: payload.to_string() }).unwrap();
+        tx.send(clawcode::runtime::RuntimeEvent {
+            session_id,
+            generation_id: Some(1),
+            seq,
+            kind: kind.into(),
+            payload_json: payload.to_string(),
+        })
+        .unwrap();
     }
     app.poll_runtime();
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
-    let text = (0..30).map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
+    let text = (0..30)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let before = text.find("Before").unwrap();
     let tool = text.find("$ echo ok").unwrap();
     let after = text.find("After").unwrap();
@@ -3367,7 +3524,10 @@ fn long_tool_output_expands_and_collapses_from_rendered_row() {
     app.set_runtime_receiver(rx);
     app.submit_user_prompt("expand");
     let session_id = app.active_session_id().unwrap();
-    let output = (0..12).map(|index| format!("line {index}")).collect::<Vec<_>>().join("\n");
+    let output = (0..12)
+        .map(|index| format!("line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id,
         generation_id: Some(2),
@@ -3379,7 +3539,9 @@ fn long_tool_output_expands_and_collapses_from_rendered_row() {
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
     let buffer = terminal.backend().buffer();
     let row = (0..buffer.area.height)
         .find(|&y| {
@@ -3390,9 +3552,18 @@ fn long_tool_output_expands_and_collapses_from_rendered_row() {
         })
         .expect("tool row should be visible");
     app.apply(UiEvent::MouseClick { x: 4, y: row });
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
     assert!(app.is_tool_expanded("expand-tool"));
-    let expanded = (0..30).map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+    let expanded = (0..30)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(expanded.contains("line 11"));
     app.apply(UiEvent::MouseClick { x: 4, y: row });
     assert!(!app.is_tool_expanded("expand-tool"));
@@ -3406,8 +3577,16 @@ fn task_and_execute_rows_render_nested_work_when_metadata_exists() {
     app.submit_user_prompt("children");
     let session_id = app.active_session_id().unwrap();
     for (seq, name, arguments) in [
-        (1, "task", serde_json::json!({"subagent_type":"scout","description":"inspect parser"})),
-        (2, "execute", serde_json::json!({"toolCalls":[{"tool":"read","status":"running"},{"tool":"grep","status":"completed"}]})),
+        (
+            1,
+            "task",
+            serde_json::json!({"subagent_type":"scout","description":"inspect parser"}),
+        ),
+        (
+            2,
+            "execute",
+            serde_json::json!({"toolCalls":[{"tool":"read","status":"running"},{"tool":"grep","status":"completed"}]}),
+        ),
     ] {
         tx.send(clawcode::runtime::RuntimeEvent {
             session_id,
@@ -3420,8 +3599,17 @@ fn task_and_execute_rows_render_nested_work_when_metadata_exists() {
     app.poll_runtime();
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
-    let text = (0..30).map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
+    let text = (0..30)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(text.contains("↳ scout: inspect parser"));
     assert!(text.contains("⠋ read"));
     assert!(text.contains("✓ grep"));
@@ -3437,13 +3625,18 @@ fn streaming_markdown_keeps_structure_without_raw_link_urls() {
     );
     let text = lines
         .iter()
-        .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("# Heading"));
     assert!(text.contains("• item"));
     assert!(text.contains("docs"));
-    assert!(text.contains("│ let x = 1;"));
+    assert!(text.contains("let x = 1;"));
     assert!(!text.contains("https://example.com"));
 }
 
@@ -3455,9 +3648,21 @@ fn tool_call_end_marks_arguments_complete_without_claiming_result() {
     app.submit_user_prompt("lifecycle");
     let session_id = app.active_session_id().unwrap();
     for (seq, kind, payload) in [
-        (1, "tool_call_start", serde_json::json!({"id":"call-end","name":"bash"})),
-        (2, "tool_call_delta", serde_json::json!({"id":"call-end","arguments":r#"{"command":"echo ok"}"#})),
-        (3, "tool_call_end", serde_json::json!({"id":"call-end","arguments_complete":true})),
+        (
+            1,
+            "tool_call_start",
+            serde_json::json!({"id":"call-end","name":"bash"}),
+        ),
+        (
+            2,
+            "tool_call_delta",
+            serde_json::json!({"id":"call-end","arguments":r#"{"command":"echo ok"}"#}),
+        ),
+        (
+            3,
+            "tool_call_end",
+            serde_json::json!({"id":"call-end","arguments_complete":true}),
+        ),
     ] {
         tx.send(clawcode::runtime::RuntimeEvent {
             session_id,
@@ -3469,7 +3674,11 @@ fn tool_call_end_marks_arguments_complete_without_claiming_result() {
         .unwrap();
     }
     app.poll_runtime();
-    let row = app.tool_rows().iter().find(|row| row.call_id == "call-end").unwrap();
+    let row = app
+        .tool_rows()
+        .iter()
+        .find(|row| row.call_id == "call-end")
+        .unwrap();
     assert!(row.arguments_complete);
     assert_eq!(row.state, clawcode::tui::app::ToolRowState::Pending);
     assert!(row.output.is_empty());
@@ -3489,7 +3698,10 @@ fn tool_call_end_marks_arguments_complete_without_claiming_result() {
     .unwrap();
     app.poll_runtime();
     assert_eq!(
-        app.tool_rows().iter().find(|row| row.call_id == "call-end").map(|row| row.state),
+        app.tool_rows()
+            .iter()
+            .find(|row| row.call_id == "call-end")
+            .map(|row| row.state),
         Some(clawcode::tui::app::ToolRowState::Failed)
     );
 }
@@ -3520,9 +3732,15 @@ fn child_session_row_needs_explicit_metadata() {
     with_metadata.poll_runtime();
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &with_metadata)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &with_metadata))
+        .unwrap();
     let rendered = (0..30)
-        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(rendered.contains("child session child-22"));
@@ -3550,9 +3768,15 @@ fn child_session_row_needs_explicit_metadata() {
     without_metadata.poll_runtime();
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &without_metadata)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &without_metadata))
+        .unwrap();
     let rendered = (0..30)
-        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!rendered.contains("child session"));
@@ -3572,8 +3796,11 @@ fn opencode_visual_streaming_parity_suite() {
         generation_id: Some(10),
         seq: 1,
         kind: "reasoning_delta".into(),
-        payload_json: serde_json::json!({ "delta": "Initial investigation focuses on the README..." }).to_string(),
-    }).unwrap();
+        payload_json:
+            serde_json::json!({ "delta": "Initial investigation focuses on the README..." })
+                .to_string(),
+    })
+    .unwrap();
 
     // 2. Tool call start for read_file
     tx.send(clawcode::runtime::RuntimeEvent {
@@ -3582,7 +3809,8 @@ fn opencode_visual_streaming_parity_suite() {
         seq: 2,
         kind: "tool_call_start".into(),
         payload_json: serde_json::json!({ "id": "call-read-1", "name": "read_file" }).to_string(),
-    }).unwrap();
+    })
+    .unwrap();
 
     // 3. Tool executed for read_file
     tx.send(clawcode::runtime::RuntimeEvent {
@@ -3596,8 +3824,10 @@ fn opencode_visual_streaming_parity_suite() {
             "arguments": { "path": "README.md" },
             "success": true,
             "output": "line 1\nline 2\nline 3\n"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     // 4. Reasoning delta 2 (should combine into the SAME thought block, not duplicate!)
     tx.send(clawcode::runtime::RuntimeEvent {
@@ -3606,7 +3836,8 @@ fn opencode_visual_streaming_parity_suite() {
         seq: 4,
         kind: "reasoning_delta".into(),
         payload_json: serde_json::json!({ "delta": "\nNow checking status..." }).to_string(),
-    }).unwrap();
+    })
+    .unwrap();
 
     // 5. Tool executed for bash (shell command)
     tx.send(clawcode::runtime::RuntimeEvent {
@@ -3620,8 +3851,10 @@ fn opencode_visual_streaming_parity_suite() {
             "arguments": { "command": "git status" },
             "success": true,
             "output": "On branch main\nnothing to commit, working tree clean"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     // 6. Text delta
     tx.send(clawcode::runtime::RuntimeEvent {
@@ -3630,29 +3863,41 @@ fn opencode_visual_streaming_parity_suite() {
         seq: 6,
         kind: "text_delta".into(),
         payload_json: serde_json::json!({ "delta": "Here is the summary." }).to_string(),
-    }).unwrap();
+    })
+    .unwrap();
 
     app.poll_runtime();
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
 
     let rendered = (0..30)
-        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
     // User prompt card has solid border and full width background
     assert!(rendered.contains("▌ check streaming visual parity"));
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let prompt_y = (0..30).find(|&y| {
-        let row: String = (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect();
-        row.contains("▌ check streaming visual parity")
-    }).expect("prompt line should exist");
-    assert_eq!(terminal.backend().buffer()[(50, prompt_y)].bg, theme.bg_element);
-    assert_eq!(terminal.backend().buffer()[(50, prompt_y - 1)].bg, theme.bg_element);
-    assert_eq!(terminal.backend().buffer()[(50, prompt_y + 1)].bg, theme.bg_element);
+    let prompt_y = (0..30)
+        .find(|&y| {
+            let row: String = (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect();
+            row.contains("▌ check streaming visual parity")
+        })
+        .expect("prompt line should exist");
+    assert_eq!(
+        terminal.backend().buffer()[(50, prompt_y)].bg,
+        theme.bg_element
+    );
     // Thought rendered cleanly without emoji or bulky boxes
     assert!(rendered.contains("Thought for "));
     assert!(!rendered.contains("💭"));
@@ -3697,8 +3942,10 @@ fn test_edit_file_shows_real_unified_diff_with_colors_and_card() {
                 "old_string": old_content,
                 "new_string": new_content,
             }
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id,
@@ -3715,17 +3962,25 @@ fn test_edit_file_shows_real_unified_diff_with_colors_and_card() {
             },
             "success": true,
             "output": "Successfully edited src/main.rs"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
 
     let rendered = (0..30)
-        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -3741,10 +3996,12 @@ fn test_edit_file_shows_real_unified_diff_with_colors_and_card() {
     // Verify background spans full card width (columns 0..98) even past text
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
     let buffer = terminal.backend().buffer();
-    let title_y = (0..30).find(|&y| {
-        let row: String = (0..100).map(|x| buffer[(x, y)].symbol()).collect();
-        row.contains("• Edit src/main.rs")
-    }).expect("title line should exist");
+    let title_y = (0..30)
+        .find(|&y| {
+            let row: String = (0..100).map(|x| buffer[(x, y)].symbol()).collect();
+            row.contains("• Edit src/main.rs")
+        })
+        .expect("title line should exist");
     assert_eq!(buffer[(50, title_y)].bg, theme.bg_element);
     assert_eq!(buffer[(0, title_y - 1)].bg, theme.bg_element);
     assert_eq!(buffer[(50, title_y - 1)].bg, theme.bg_element);
@@ -3775,8 +4032,10 @@ fn test_edit_diff_collapse_and_expand_when_lines_over_10() {
                 "old_string": old_lines.join("\n"),
                 "new_string": new_lines.join("\n"),
             }
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id,
@@ -3793,17 +4052,25 @@ fn test_edit_diff_collapse_and_expand_when_lines_over_10() {
             },
             "success": true,
             "output": "ok"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
 
     let rendered = (0..30)
-        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -3812,10 +4079,16 @@ fn test_edit_diff_collapse_and_expand_when_lines_over_10() {
 
     // Toggle expansion
     app.toggle_tool_expanded("edit-large");
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
 
     let rendered_expanded = (0..30)
-        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -3839,8 +4112,10 @@ fn test_tool_executed_missing_id_resolves_without_duplicate_row() {
         payload_json: serde_json::json!({
             "name": "grep",
             "arguments": { "query": "adalah" }
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
 
@@ -3855,8 +4130,10 @@ fn test_tool_executed_missing_id_resolves_without_duplicate_row() {
             "arguments": { "query": "adalah" },
             "success": false,
             "output": "Error executing grep: 'README.md' is not a directory"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
 
@@ -3865,10 +4142,16 @@ fn test_tool_executed_missing_id_resolves_without_duplicate_row() {
 
     let backend = ratatui::backend::TestBackend::new(120, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
 
     let rendered = (0..30)
-        .map(|y| (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..120)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -3898,8 +4181,10 @@ fn test_glob_grep_read_have_no_click_to_expand() {
             "id": "glob-1",
             "name": "glob",
             "arguments": { "pattern": "**/*.md" }
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id,
@@ -3912,17 +4197,25 @@ fn test_glob_grep_read_have_no_click_to_expand() {
             "arguments": { "pattern": "**/*.md" },
             "success": true,
             "output": "README.md\nCONTRIBUTING.md\nDOCS.md\nCHANGELOG.md\nNOTES.md"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
 
     let backend = ratatui::backend::TestBackend::new(120, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
 
     let rendered = (0..30)
-        .map(|y| (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..120)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -3947,8 +4240,10 @@ fn test_thought_expansion_mouse_click_toggle() {
         kind: "reasoning_delta".into(),
         payload_json: serde_json::json!({
             "delta": "Thinking about the rhyming scheme\nChoosing iambic pentameter"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id,
@@ -3957,8 +4252,10 @@ fn test_thought_expansion_mouse_click_toggle() {
         kind: "text_delta".into(),
         payload_json: serde_json::json!({
             "delta": "The woods are lovely, dark and deep"
-        }).to_string(),
-    }).unwrap();
+        })
+        .to_string(),
+    })
+    .unwrap();
 
     app.poll_runtime();
 
@@ -3966,9 +4263,15 @@ fn test_thought_expansion_mouse_click_toggle() {
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
     // 1. Initial render: thought is completed, collapsed by default
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
     let rendered = (0..30)
-        .map(|y| (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..120)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -3979,7 +4282,9 @@ fn test_thought_expansion_mouse_click_toggle() {
     // 2. Find row where "+ Thought for" appears and click it
     let thought_y = (0..30)
         .find(|&y| {
-            let row = (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>();
+            let row = (0..120)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>();
             row.contains("+ Thought for")
         })
         .expect("thought row found");
@@ -3988,9 +4293,15 @@ fn test_thought_expansion_mouse_click_toggle() {
     assert!(app.is_thought_expanded());
 
     // 3. Render after click: thought should be expanded
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
     let rendered_expanded = (0..30)
-        .map(|y| (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..120)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -4001,7 +4312,9 @@ fn test_thought_expansion_mouse_click_toggle() {
     // 4. Click again: thought should collapse
     let expanded_y = (0..30)
         .find(|&y| {
-            let row = (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>();
+            let row = (0..120)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>();
             row.contains("- Thought for")
         })
         .expect("expanded thought row found");
@@ -4009,9 +4322,15 @@ fn test_thought_expansion_mouse_click_toggle() {
     app.handle_mouse_click(5, expanded_y);
     assert!(!app.is_thought_expanded());
 
-    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
     let rendered_collapsed_again = (0..30)
-        .map(|y| (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .map(|y| {
+            (0..120)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
