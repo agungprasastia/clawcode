@@ -24,6 +24,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    app.set_terminal_size(area.width, area.height);
 
     let mode_color = match app.mode() {
         super::ConversationMode::Plan => theme.amber,
@@ -332,30 +333,7 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
             ),
         ]
     } else if is_working {
-        if let Some(tool) = app.active_tool() {
-            let elapsed = tool.started_at.elapsed().as_secs_f64();
-            let action_str = if tool.desc == "preparing arguments..." {
-                format!("Preparing {}...", tool.name)
-            } else if tool.desc.is_empty() {
-                tool.name.clone()
-            } else {
-                format!("{}: {}", tool.name, tool.desc)
-            };
-            vec![
-                Span::styled(
-                    "⬡ ",
-                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    action_str,
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" · {:.1}s", elapsed),
-                    Style::default().fg(theme.dim),
-                ),
-            ]
-        } else if app.is_reasoning() {
+        if app.is_reasoning() {
             let elapsed = app.reasoning_elapsed_seconds().unwrap_or(0.0);
             vec![
                 Span::styled("💭 ", Style::default().fg(theme.amber)),
@@ -379,7 +357,11 @@ pub(crate) fn render_hints_row(frame: &mut Frame<'_>, area: Rect, app: &App, the
             vec![
                 Span::styled("● ", Style::default().fg(mode_color)),
                 Span::styled(
-                    "streaming",
+                    if app.active_tool().is_some() {
+                        "running"
+                    } else {
+                        "streaming"
+                    },
                     Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(elapsed_str, Style::default().fg(theme.dim)),
@@ -529,12 +511,8 @@ pub(crate) fn mode_label(app: &App) -> &'static str {
 }
 
 pub(crate) fn status_label(app: &App) -> String {
-    if let Some(tool) = app.active_tool() {
-        if tool.desc == "preparing arguments..." {
-            format!("PREPARING: {}", tool.name.to_ascii_uppercase())
-        } else {
-            format!("TOOL: {}", tool.name.to_ascii_uppercase())
-        }
+    if app.active_tool().is_some() {
+        "RUNNING".to_string()
     } else if app.is_reasoning() {
         "THINKING".to_string()
     } else if matches!(app.conversation_status(), super::ConversationStatus::Active)
@@ -571,19 +549,23 @@ pub(crate) fn render_command_popup(
 
     let suggestions = app.matching_suggestions();
     if suggestions.is_empty() {
+        app.set_last_popup_area(None);
         return;
     }
     if input_area.width < 10 {
+        app.set_last_popup_area(None);
         return;
     }
 
     let available_space = input_area.y as usize;
     if available_space < 3 {
+        app.set_last_popup_area(None);
         return;
     }
     let max_visible = 6.min(available_space.saturating_sub(2));
     let visible_count = suggestions.len().min(max_visible);
     if visible_count == 0 {
+        app.set_last_popup_area(None);
         return;
     }
     let popup_height = (visible_count as u16) + 2;
@@ -598,6 +580,7 @@ pub(crate) fn render_command_popup(
         width: popup_width,
         height: popup_height,
     };
+    app.set_last_popup_area(Some(popup_area));
 
     frame.render_widget(Clear, popup_area);
 
@@ -665,11 +648,13 @@ fn render_theme_suggestions_popup(
 ) {
     let suggestions = app.matching_theme_suggestions();
     if suggestions.is_empty() || input_area.width < 10 || input_area.y < 3 {
+        app.set_last_popup_area(None);
         return;
     }
     let max_visible = 8.min((input_area.y as usize).saturating_sub(2));
     let visible_count = suggestions.len().min(max_visible);
     if visible_count == 0 {
+        app.set_last_popup_area(None);
         return;
     }
     let popup_height = (visible_count as u16) + 2;
@@ -681,6 +666,7 @@ fn render_theme_suggestions_popup(
         width: popup_width,
         height: popup_height,
     };
+    app.set_last_popup_area(Some(popup_area));
     frame.render_widget(Clear, popup_area);
     let selected_idx = app.selected_suggestion_index();
     let scroll_offset = if selected_idx >= visible_count {

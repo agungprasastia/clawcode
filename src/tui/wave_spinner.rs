@@ -21,7 +21,7 @@ impl WaveSpinner {
 
     const DEFAULT_FRAME_DURATION: Duration = Duration::from_millis(50);
     const OPACITIES: [f32; 5] = [1.0, 0.8, 0.6, 0.4, 0.2];
-    const COMPACT_FRAMES: [&'static str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+    const COMPACT_FRAMES: [&'static str; 10] = ["⠋", "⠉", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"];
 
     pub fn new(base_color: Color) -> Self {
         let frames = Self::generate_frames(base_color);
@@ -56,6 +56,10 @@ impl WaveSpinner {
             self.frame_duration,
             self.frames.len(),
         )
+    }
+
+    pub fn compact_frame(&self) -> &'static str {
+        Self::COMPACT_FRAMES[self.current_frame() % Self::COMPACT_FRAMES.len()]
     }
 
     fn frame_for_elapsed(elapsed: Duration, frame_duration: Duration, frame_count: usize) -> usize {

@@ -147,7 +147,12 @@ pub fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
             width: centered_w,
             height: cards_area.height,
         };
-        render_quick_actions(frame, centered_cards, theme);
+        let cards = render_quick_actions(frame, centered_cards, theme);
+        if cards.len() >= 4 {
+            app.set_last_quick_actions_area(Some([cards[0], cards[1], cards[2], cards[3]]));
+        }
+    } else {
+        app.set_last_quick_actions_area(None);
     }
 
     let centered_input = Rect {
@@ -175,6 +180,7 @@ pub fn render_compact_home(
     theme: &Theme,
     mode_color: Color,
 ) {
+    app.set_last_quick_actions_area(None);
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -314,7 +320,11 @@ pub fn render_hero(
     }
 }
 
-pub fn render_quick_actions(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+pub fn render_quick_actions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+) -> std::rc::Rc<[Rect]> {
     let cards = Layout::default()
         .direction(Direction::Horizontal)
         .spacing(1)
@@ -359,6 +369,102 @@ pub fn render_quick_actions(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         ];
 
         frame.render_widget(Paragraph::new(content).block(block), cards[i]);
+    }
+    cards
+}
+
+pub fn compute_quick_actions_area_for_size(width: u16, height: u16) -> Option<[Rect; 4]> {
+    let workspace_area = Rect {
+        x: 0,
+        y: 0,
+        width,
+        height: height.saturating_sub(1),
+    };
+    if workspace_area.width < 70 || workspace_area.height < 18 {
+        return None;
+    }
+    let input_height = 5.min(workspace_area.height.saturating_sub(6));
+    let hints_height = 1;
+    let home_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(input_height),
+            Constraint::Length(hints_height),
+            Constraint::Length(1),
+        ])
+        .split(workspace_area);
+
+    let top_canvas = home_chunks[0];
+    let show_big_logo = top_canvas.height >= 11 && workspace_area.width >= 70;
+    let show_cards = top_canvas.height >= 15 && workspace_area.width >= 70;
+    if !show_cards {
+        return None;
+    }
+
+    let hero_height = if show_big_logo { 10 } else { 3 };
+    let cards_height = 4;
+    let gap_height = 1;
+    let content_height = hero_height + gap_height + cards_height;
+
+    let v_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(content_height),
+            Constraint::Min(0),
+        ])
+        .split(top_canvas);
+
+    let hero_cards_canvas = v_chunks[1];
+    let inner_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(hero_height),
+            Constraint::Length(gap_height),
+            Constraint::Length(cards_height),
+        ])
+        .split(hero_cards_canvas);
+
+    let cards_area = inner_chunks[2];
+
+    let content_width = if workspace_area.width >= 106 {
+        100
+    } else {
+        workspace_area.width.saturating_sub(4)
+    };
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(content_width),
+            Constraint::Min(0),
+        ])
+        .split(workspace_area);
+    let centered_x = h_chunks[1].x;
+    let centered_w = h_chunks[1].width;
+
+    let centered_cards = Rect {
+        x: centered_x,
+        y: cards_area.y,
+        width: centered_w,
+        height: cards_area.height,
+    };
+    let cards = Layout::default()
+        .direction(Direction::Horizontal)
+        .spacing(1)
+        .constraints([
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+        ])
+        .split(centered_cards);
+
+    if cards.len() >= 4 {
+        Some([cards[0], cards[1], cards[2], cards[3]])
+    } else {
+        None
     }
 }
 

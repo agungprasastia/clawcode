@@ -1,4 +1,6 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 
 use super::{Input, UiEvent};
 
@@ -12,6 +14,12 @@ pub fn translate(event: Event) -> Option<UiEvent> {
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollUp => Some(UiEvent::Input(Input::ScrollUp)),
             MouseEventKind::ScrollDown => Some(UiEvent::Input(Input::ScrollDown)),
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
+                Some(UiEvent::MouseClick {
+                    x: mouse.column,
+                    y: mouse.row,
+                })
+            }
             _ => None,
         },
         _ => None,
@@ -155,6 +163,32 @@ mod tests {
         assert_eq!(
             translate(event),
             Some(UiEvent::Paste("clipboard text".to_string()))
+        );
+    }
+
+    #[test]
+    fn mouse_click_translates_to_mouse_click_event() {
+        use crossterm::event::MouseEvent;
+        let down_event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            translate(down_event),
+            Some(UiEvent::MouseClick { x: 15, y: 20 })
+        );
+
+        let up_event = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 15,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            translate(up_event),
+            Some(UiEvent::MouseClick { x: 15, y: 20 })
         );
     }
 }

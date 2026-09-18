@@ -100,19 +100,23 @@ pub fn render_model_suggestions_popup(
 ) {
     let suggestions = app.matching_model_suggestions();
     if suggestions.is_empty() {
+        app.set_last_popup_area(None);
         return;
     }
 
     if input_area.width < 10 {
+        app.set_last_popup_area(None);
         return;
     }
     let available_space = input_area.y as usize;
     if available_space < 3 {
+        app.set_last_popup_area(None);
         return;
     }
     let max_visible = 8.min(available_space.saturating_sub(2));
     let visible_count = suggestions.len().min(max_visible);
     if visible_count == 0 {
+        app.set_last_popup_area(None);
         return;
     }
     let popup_height = (visible_count as u16) + 2;
@@ -127,6 +131,7 @@ pub fn render_model_suggestions_popup(
         width: popup_width,
         height: popup_height,
     };
+    app.set_last_popup_area(Some(popup_area));
 
     frame.render_widget(Clear, popup_area);
 

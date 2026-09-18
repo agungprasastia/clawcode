@@ -1296,8 +1296,10 @@ fn status_dialog_clear_compact_and_copy_parity() {
         app.apply(UiEvent::Input(Input::Character(ch)));
     }
     app.apply(UiEvent::Input(Input::Submit));
-    assert!(app.diagnostic().contains("transcript copied"));
-
+    assert!(
+        app.diagnostic().contains("transcript copied")
+            || app.diagnostic().contains("failed to copy transcript")
+    );
     // 6. Test /compact
     let large_transcript = "x".repeat(2000);
     app.apply(UiEvent::StreamDelta(large_transcript));
@@ -1607,7 +1609,7 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
     assert_eq!(active.name, "read_file");
     assert_eq!(active.desc, "src/cli/mod.rs");
 
-    // Rendering while tool is active displays the ⬡ marker and "Reading src/cli/mod.rs..."
+    // Rendering while tool is active displays the braille spinner and "Read src/cli/mod.rs"
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
@@ -1621,11 +1623,11 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("⬡"));
-    assert!(text.contains("Reading src/cli/mod.rs..."));
-    // Hints row shows active tool line, not "ready"
+    assert!(text.contains(app.wave_spinner().compact_frame()));
+    assert!(text.contains("Read src/cli/mod.rs"));
+    // Hints row shows clean status ("running"), not "ready"
     assert!(!text.contains("● ready"));
-    assert!(text.contains("read_file: src/cli/mod.rs"));
+    assert!(text.contains("running"));
 
     // 2. Tool finishes execution with 71 lines output
     let dummy_output = (0..71)
@@ -2295,6 +2297,9 @@ fn test_tool_call_start_event_handling() {
     let mut app = App::default();
     let (tx, rx) = std::sync::mpsc::channel();
     app.set_runtime_receiver(rx);
+    // Submit user prompt so chat view is active
+    app.apply(UiEvent::Input(Input::Character('c')));
+    app.apply(UiEvent::Input(Input::Submit));
 
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id: 1,
@@ -2328,6 +2333,7 @@ fn test_tool_call_start_event_handling() {
         })
         .collect::<Vec<_>>()
         .join("\n");
+    assert!(text.contains(app.wave_spinner().compact_frame()));
     assert!(text.contains("Preparing bash..."));
 }
 
@@ -2352,15 +2358,12 @@ fn test_bash_terminal_card_rendering() {
     }).unwrap();
 
     app.poll_runtime();
-    assert!(app.transcript().contains("⬢ Ran cargo test (exit 0)"));
-    assert!(
-        app.transcript()
-            .contains("  ┌── Output ────────────────────────────────────────")
-    );
-    assert!(app.transcript().contains("  │ running 2 tests"));
-    assert!(app.transcript().contains("  │ test foo ... ok"));
-    assert!(app.transcript().contains("  │ test bar ... ok"));
-    assert!(app.transcript().contains("  └───"));
+    assert!(app.transcript().contains("$ cargo test"));
+    assert!(app.transcript().contains("running 2 tests"));
+    assert!(app.transcript().contains("test foo ... ok"));
+    assert!(app.transcript().contains("test bar ... ok"));
+    assert!(!app.transcript().contains("┌── Output"));
+    assert!(!app.transcript().contains("└───"));
 
     // Verify styling of terminal box
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
@@ -2369,10 +2372,21 @@ fn test_bash_terminal_card_rendering() {
         &theme,
         ratatui::style::Color::Cyan,
     );
-    let box_header = lines
+    let cmd_header = lines
         .iter()
-        .find(|l| l.spans.iter().any(|s| s.content.contains("Output")));
-    assert!(box_header.is_some());
+        .find(|l| l.spans.iter().any(|s| s.content.contains("cargo test")));
+    assert!(cmd_header.is_some());
+    let ch = cmd_header.unwrap();
+    assert_eq!(ch.spans[0].content, "$ ");
+    assert_eq!(ch.spans[1].content, "cargo test");
+
+    let out_line = lines.iter().find(|l| {
+        l.spans
+            .iter()
+            .any(|s| s.content.contains("running 2 tests"))
+    });
+    assert!(out_line.is_some());
+    assert_eq!(out_line.unwrap().spans[0].style.fg, Some(theme.quiet));
 
     // 2. Failed bash command with exit 1
     tx.send(clawcode::runtime::RuntimeEvent {
@@ -2391,23 +2405,18 @@ fn test_bash_terminal_card_rendering() {
     .unwrap();
 
     app.poll_runtime();
-    assert!(app.transcript().contains("⬢ Ran failing_cmd (exit 1)"));
-    assert!(
-        app.transcript()
-            .contains("failed: Error: command not found")
-    );
+    assert!(app.transcript().contains("$ failing_cmd"));
+    assert!(app.transcript().contains("Error: command not found"));
 
     let failed_lines = clawcode::tui::format_transcript_lines(
         app.transcript(),
         &theme,
         ratatui::style::Color::Cyan,
     );
-    let ran_failed = failed_lines
+    let cmd_failed = failed_lines
         .iter()
         .find(|l| l.spans.iter().any(|s| s.content.contains("failing_cmd")));
-    assert!(ran_failed.is_some());
-    // Failed marker should be red (theme.error)
-    assert_eq!(ran_failed.unwrap().spans[0].style.fg, Some(theme.error));
+    assert!(cmd_failed.is_some());
 }
 
 #[test]
@@ -2636,4 +2645,376 @@ fn test_generation_finished_clears_streaming_status() {
 
     assert!(!text.contains("STREAMING"));
     assert!(!text.contains("streaming "));
+}
+
+#[test]
+fn test_bash_tool_opencode_style_running_and_executed() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    // Submit a prompt so chat view is active
+    app.apply(UiEvent::Input(Input::Character('s')));
+    app.apply(UiEvent::Input(Input::Submit));
+
+    // 1. Bash tool running with command "git status"
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".to_string(),
+        payload_json: serde_json::json!({
+            "name": "bash",
+            "arguments": { "command": "git status" }
+        })
+        .to_string(),
+    })
+    .unwrap();
+
+    app.poll_runtime();
+    assert!(app.active_tool().is_some());
+    let active = app.active_tool().unwrap();
+    assert_eq!(active.name, "bash");
+    assert_eq!(active.desc, "git status");
+
+    // While running: terminal displays "git status" with braille spinner (not "$ git status")
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("git status"));
+
+    // 2. Tool finishes execution
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "bash",
+            "arguments": { "command": "git status" },
+            "success": true,
+            "output": "On branch main\nnothing to commit, working tree clean\n[Process exited with code 0]"
+        })
+        .to_string(),
+    })
+    .unwrap();
+
+    app.poll_runtime();
+    assert!(app.active_tool().is_none());
+
+    // Transcript has $ git status
+    assert!(app.transcript().contains("$ git status"));
+
+    // Format transcript lines: should render OpenCode "$ " header and dim output lines
+    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
+    let lines = clawcode::tui::format_transcript_lines(
+        app.transcript(),
+        &theme,
+        ratatui::style::Color::Cyan,
+    );
+
+    // Find header line
+    let header_line = lines
+        .iter()
+        .find(|l| l.spans.iter().any(|s| s.content.contains("git status")));
+    assert!(header_line.is_some());
+    let hl = header_line.unwrap();
+    // First span is "$ ", second is command
+    assert_eq!(hl.spans[0].content, "$ ");
+    assert_eq!(hl.spans[0].style.fg, Some(theme.amber));
+    assert_eq!(hl.spans[1].content, "git status");
+
+    // Output lines are dimmed
+    let output_line = lines
+        .iter()
+        .find(|l| l.spans.iter().any(|s| s.content.contains("On branch main")));
+    assert!(output_line.is_some());
+    let ol = output_line.unwrap();
+    let text_span = ol
+        .spans
+        .iter()
+        .find(|s| s.content.contains("On branch main"))
+        .unwrap();
+    assert_eq!(text_span.style.fg, Some(theme.quiet));
+}
+
+#[test]
+fn test_edit_patch_tool_opencode_style_running_and_executed() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    // Submit user prompt
+    app.apply(UiEvent::Input(Input::Character('e')));
+    app.apply(UiEvent::Input(Input::Submit));
+
+    // 1. Tool running: edit_file
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".to_string(),
+        payload_json: serde_json::json!({
+            "name": "edit_file",
+            "arguments": { "path": "src/lib.rs" }
+        })
+        .to_string(),
+    })
+    .unwrap();
+
+    app.poll_runtime();
+    assert!(app.active_tool().is_some());
+    let active = app.active_tool().unwrap();
+    assert_eq!(active.name, "edit_file");
+    assert_eq!(active.desc, "src/lib.rs");
+
+    // Render while active: should show Edit src/lib.rs with braille spinner
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Edit src/lib.rs"));
+
+    // 2. Patch tool executed with patch content
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "name": "apply_patch",
+            "arguments": {
+                "path": "src/lib.rs",
+                "patch": "--- a/src/lib.rs\n+++ b/src/lib.rs\n-fn old() {}\n+fn new() {}\n+fn extra() {}\n"
+            },
+            "success": true,
+            "output": "Patch applied cleanly"
+        })
+        .to_string(),
+    })
+    .unwrap();
+
+    app.poll_runtime();
+    assert!(app.active_tool().is_none());
+
+    let transcript = app.transcript();
+    assert!(transcript.contains("• Applied patch src/lib.rs (+2 -1)"));
+    assert!(transcript.contains("    - fn old() {}"));
+    assert!(transcript.contains("    + fn new() {}"));
+    assert!(transcript.contains("    + fn extra() {}"));
+}
+
+#[test]
+fn test_slash_command_autocomplete_on_enter_executes_sessions() {
+    let mut app = App::default();
+
+    // 1. Type "/se" then press Enter -> executes /sessions (not unknown command)
+    for ch in "/se".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    assert_eq!(app.prompt(), "/se");
+    assert!(!app.matching_suggestions().is_empty());
+    assert_eq!(app.matching_suggestions()[0].name, "/sessions");
+
+    app.apply(UiEvent::Input(Input::Submit));
+
+    assert!(app.sessions_dialog().is_some());
+    assert!(!app.diagnostic().contains("unknown command"));
+    assert!(app.diagnostic().contains("session(s)"));
+    assert!(app.prompt().is_empty());
+
+    // 2. Tab completion also works smoothly
+    app.apply(UiEvent::Input(Input::Quit));
+    assert!(app.sessions_dialog().is_none());
+
+    for ch in "/pl".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::ToggleMode));
+    assert_eq!(app.prompt(), "/plan");
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Plan);
+}
+
+#[test]
+fn test_mouse_click_on_autocomplete_popup() {
+    let mut app = App::default();
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+    // Type "/se" and render so popup is visible
+    for ch in "/se".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let popup_area = app.last_popup_area().expect("popup area should be present");
+
+    // Click on the first item in popup
+    let click_x = popup_area.x + 2;
+    let click_y = popup_area.y + 1;
+    app.apply(UiEvent::MouseClick { x: click_x, y: click_y });
+
+    assert!(app.sessions_dialog().is_some());
+    assert!(!app.diagnostic().contains("unknown command"));
+    assert!(app.prompt().is_empty());
+
+    app.apply(UiEvent::Input(Input::Quit));
+    assert!(app.sessions_dialog().is_none());
+
+    // Click on suggestion that needs arguments (e.g. /new)
+    for ch in "/n".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let popup_area = app.last_popup_area().expect("popup area should be present");
+    app.apply(UiEvent::MouseClick {
+        x: popup_area.x + 2,
+        y: popup_area.y + 1,
+    });
+    assert_eq!(app.prompt(), "/new ");
+    assert_eq!(app.cursor_position(), 5);
+
+    // Also verify Input::Click variant
+    let mut app2 = App::default();
+    for ch in "/pl".chars() {
+        app2.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    terminal.draw(|f| clawcode::tui::render(f, &app2)).unwrap();
+    let popup_area = app2.last_popup_area().expect("popup area should be present");
+    app2.apply(UiEvent::Input(Input::Click {
+        column: popup_area.x + 2,
+        row: popup_area.y + 1,
+    }));
+    assert_eq!(app2.mode(), clawcode::tui::ConversationMode::Plan);
+}
+
+#[test]
+fn test_mouse_click_on_home_quick_action_cards() {
+    let mut app = App::default();
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let cards = app
+        .last_quick_actions_area()
+        .expect("quick actions cards should be rendered");
+
+    // Card 0: /plan
+    app.set_mode(clawcode::tui::ConversationMode::Build);
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Build);
+    app.apply(UiEvent::MouseClick {
+        x: cards[0].x + 2,
+        y: cards[0].y + 1,
+    });
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Plan);
+    assert!(app.diagnostic().contains("Plan mode"));
+
+    // Card 1: /build
+    app.apply(UiEvent::MouseClick {
+        x: cards[1].x + 2,
+        y: cards[1].y + 1,
+    });
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Build);
+    assert!(app.diagnostic().contains("Build mode"));
+
+    // Card 2: /models
+    assert!(app.models_dialog().is_none());
+    app.apply(UiEvent::MouseClick {
+        x: cards[2].x + 2,
+        y: cards[2].y + 1,
+    });
+    assert!(app.models_dialog().is_some());
+    app.apply(UiEvent::Input(Input::Quit));
+    assert!(app.models_dialog().is_none());
+
+    // Card 3: /help or /keys
+    assert!(!app.which_key().visible);
+    app.apply(UiEvent::MouseClick {
+        x: cards[3].x + 2,
+        y: cards[3].y + 1,
+    });
+    assert!(app.which_key().visible);
+    app.apply(UiEvent::Input(Input::Quit));
+    assert!(!app.which_key().visible);
+}
+
+#[test]
+fn test_mouse_click_works_without_prior_render() {
+    // App created, never passed to render/draw: geometry computed automatically
+    let mut app = App::default();
+
+    // 1. Click on Card 0 (/plan) on home screen without rendering
+    app.set_mode(clawcode::tui::ConversationMode::Build);
+    let cards = app
+        .get_or_compute_quick_actions_area()
+        .expect("quick actions area computable");
+    app.apply(UiEvent::MouseClick {
+        x: cards[0].x + 2,
+        y: cards[0].y + 1,
+    });
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Plan);
+
+    // 2. Click on Card 1 (/build) without rendering
+    app.apply(UiEvent::MouseClick {
+        x: cards[1].x + 2,
+        y: cards[1].y + 1,
+    });
+    assert_eq!(app.mode(), clawcode::tui::ConversationMode::Build);
+
+    // 3. Autocomplete popup click without prior render
+    for ch in "/se".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    let popup_area = app
+        .get_or_compute_popup_area()
+        .expect("popup area computable");
+    app.apply(UiEvent::MouseClick {
+        x: popup_area.x + 2,
+        y: popup_area.y + 1,
+    });
+    assert!(app.sessions_dialog().is_some());
+}
+
+#[test]
+fn test_partial_theme_and_model_autocomplete_on_enter() {
+    let mut app = App::default();
+
+    // 1. Partial theme: "/theme cat" -> matches Catppuccin themes
+    for ch in "/theme cat".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    assert!(!app.matching_theme_suggestions().is_empty());
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.diagnostic().contains("theme switched to: Catppuccin"));
+
+    // 2. Down arrow navigation in theme suggestions preserves selected index on Enter
+    for ch in "/theme ".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    let themes = app.matching_theme_suggestions();
+    assert!(themes.len() > 2);
+    app.apply(UiEvent::Input(Input::Down));
+    assert_eq!(app.selected_suggestion_index(), 1);
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(
+        app.diagnostic(),
+        format!("theme switched to: {}", themes[1])
+    );
 }

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use ratatui::layout::Rect;
 
 use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
 use crate::conversation::ConversationEvent;
@@ -54,6 +55,7 @@ pub enum Input {
     Home,
     End,
     WhichKey,
+    Click { column: u16, row: u16 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +187,7 @@ pub enum UiEvent {
     Resize { width: u16, height: u16 },
     StreamDelta(String),
     Paste(String),
+    MouseClick { x: u16, y: u16 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,14 +201,26 @@ pub fn tool_target_and_verbs(
     name: &str,
     args: Option<&serde_json::Value>,
 ) -> (&'static str, &'static str, String) {
-    let desc = match (name, args) {
-        ("read_file" | "write_file" | "edit_file", Some(a)) => a
+    let parsed_args_holder: Option<serde_json::Value> = match args {
+        Some(serde_json::Value::String(s)) => serde_json::from_str(s).ok(),
+        _ => None,
+    };
+    let effective_args = parsed_args_holder.as_ref().or(args);
+    let desc = match (name, effective_args) {
+        (
+            "read_file" | "read" | "write_file" | "write" | "edit_file" | "edit" | "patch"
+            | "apply_patch",
+            Some(a),
+        ) => a
             .get("path")
+            .or_else(|| a.get("file_path"))
+            .or_else(|| a.get("filePath"))
             .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_string(),
-        ("bash", Some(a)) => a
+        ("bash" | "sh", Some(a)) => a
             .get("command")
+            .or_else(|| a.get("cmd"))
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .to_string(),
@@ -275,13 +290,14 @@ pub fn tool_target_and_verbs(
     };
 
     match name {
-        "read_file" => ("Read", "Reading", desc),
-        "write_file" => ("Write", "Writing", desc),
-        "edit_file" => ("Edit", "Editing", desc),
+        "read_file" | "read" => ("Read", "Reading", desc),
+        "write_file" | "write" => ("Write", "Writing", desc),
+        "edit_file" | "edit" => ("Edit", "Editing", desc),
+        "patch" | "apply_patch" => ("Applied patch", "Applying patch", desc),
         "list_dir" => ("List", "Listing", desc),
         "glob_search" => ("Glob", "Running glob_search", desc),
         "grep_search" => ("Grep", "Running grep_search", desc),
-        "bash" => ("Ran", "Running", desc),
+        "bash" | "sh" => ("Ran", "Running", desc),
         "question" => ("Ask", "Asking", desc),
         "update_plan" => ("Updated Plan", "Updating Plan", desc),
         "webfetch" => ("Fetched", "Fetching", desc),
@@ -320,7 +336,7 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
                 format!("{count} entries")
             }
         }
-        "write_file" => {
+        "write_file" | "write" => {
             let trimmed = output.trim();
             if trimmed.starts_with("Successfully wrote") {
                 trimmed.to_string()
@@ -337,8 +353,8 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
                 }
             }
         }
-        "edit_file" => "succeeded".to_string(),
-        "bash" => {
+        "edit_file" | "edit" | "patch" | "apply_patch" => "succeeded".to_string(),
+        "bash" | "sh" => {
             let count = output.lines().count();
             if output.trim().is_empty() {
                 "succeeded".to_string()
@@ -517,6 +533,9 @@ pub struct App {
     reasoning_start: Option<std::time::Instant>,
     /// Snapshot of latest task plan: list of (step, status).
     pub current_plan: Vec<(String, String)>,
+    last_popup_area: std::cell::Cell<Option<Rect>>,
+    last_quick_actions_area: std::cell::Cell<Option<[Rect; 4]>>,
+    terminal_size: std::cell::Cell<(u16, u16)>,
 }
 
 /// View state isolated per session: switching sessions must not reset the
@@ -591,6 +610,9 @@ impl App {
             reasoning_buffer: String::new(),
             reasoning_start: None,
             current_plan: Vec::new(),
+            last_popup_area: std::cell::Cell::new(None),
+            last_quick_actions_area: std::cell::Cell::new(None),
+            terminal_size: std::cell::Cell::new((100, 30)),
         }
     }
 
@@ -1007,6 +1029,16 @@ impl App {
             return;
         }
 
+        if let UiEvent::MouseClick { x, y }
+            | UiEvent::Input(Input::Click {
+                column: x,
+                row: y,
+            }) = event
+        {
+            self.handle_mouse_click(x, y);
+            return;
+        }
+
         match event {
             UiEvent::Input(Input::Quit) => {
                 if self.session_listings.is_empty() {
@@ -1116,7 +1148,13 @@ impl App {
                     self.toggle_mode();
                 }
             }
-            UiEvent::Resize { .. } => {}
+            UiEvent::Resize { width, height } => {
+                self.terminal_size.set((width, height));
+                self.last_popup_area.set(None);
+                self.last_quick_actions_area.set(None);
+            }
+            UiEvent::MouseClick { .. } => {}
+            UiEvent::Input(Input::Click { .. }) => {}
             UiEvent::StreamDelta(delta) => {
                 self.transcript.push_str(&delta);
                 self.truncate_transcript();
@@ -1551,6 +1589,200 @@ impl App {
         }
     }
 
+    pub fn set_terminal_size(&self, width: u16, height: u16) {
+        self.terminal_size.set((width, height));
+    }
+
+    pub fn last_popup_area(&self) -> Option<Rect> {
+        self.last_popup_area.get()
+    }
+
+    pub fn set_last_popup_area(&self, area: Option<Rect>) {
+        self.last_popup_area.set(area);
+    }
+
+    pub fn last_quick_actions_area(&self) -> Option<[Rect; 4]> {
+        self.last_quick_actions_area.get()
+    }
+
+    pub fn set_last_quick_actions_area(&self, areas: Option<[Rect; 4]>) {
+        self.last_quick_actions_area.set(areas);
+    }
+
+    pub fn get_or_compute_popup_area(&self) -> Option<Rect> {
+        if let Some(area) = self.last_popup_area.get() {
+            return Some(area);
+        }
+        let count = self.suggestion_count();
+        if count == 0 {
+            return None;
+        }
+        let (width, height) = self.terminal_size.get();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let workspace_height = height.saturating_sub(1);
+        let (input_x, input_y, input_w) = if self.transcript.is_empty() {
+            let input_height = 5.min(workspace_height.saturating_sub(6));
+            let input_y = workspace_height.saturating_sub(input_height + 2);
+            let content_width = if width >= 106 {
+                100
+            } else {
+                width.saturating_sub(4)
+            };
+            let input_x = width.saturating_sub(content_width) / 2;
+            (input_x, input_y, content_width)
+        } else {
+            let input_y = workspace_height.saturating_sub(6);
+            (0, input_y, width)
+        };
+
+        let available_space = input_y as usize;
+        if available_space < 3 {
+            return None;
+        }
+        let max_visible =
+            if self.prompt.starts_with("/theme ") || self.prompt.starts_with("/model ") {
+                8.min(available_space.saturating_sub(2))
+            } else {
+                6.min(available_space.saturating_sub(2))
+            };
+        let visible_count = count.min(max_visible);
+        if visible_count == 0 {
+            return None;
+        }
+        let popup_height = (visible_count as u16) + 2;
+        let popup_y = input_y.saturating_sub(popup_height);
+        let popup_width = if self.prompt.starts_with("/model ") {
+            input_w.min(70)
+        } else if self.prompt.starts_with("/theme ") {
+            input_w.min(50)
+        } else {
+            input_w.min(64)
+        };
+
+        Some(Rect {
+            x: input_x,
+            y: popup_y,
+            width: popup_width,
+            height: popup_height,
+        })
+    }
+
+    pub fn get_or_compute_quick_actions_area(&self) -> Option<[Rect; 4]> {
+        if let Some(cards) = self.last_quick_actions_area.get() {
+            return Some(cards);
+        }
+        let (width, height) = self.terminal_size.get();
+        crate::tui::home::compute_quick_actions_area_for_size(width, height)
+    }
+
+    pub fn handle_mouse_click(&mut self, x: u16, y: u16) {
+        let has_command_suggestions = !self.matching_suggestions().is_empty();
+        let has_model_suggestions = self.prompt.starts_with("/model ")
+            && !self.matching_model_suggestions().is_empty();
+        let has_theme_suggestions = self.prompt.starts_with("/theme ")
+            && !self.matching_theme_suggestions().is_empty();
+
+        if (has_command_suggestions || has_model_suggestions || has_theme_suggestions)
+            && let Some(popup_area) = self.get_or_compute_popup_area()
+            && x >= popup_area.x
+            && x < popup_area.x + popup_area.width
+            && y >= popup_area.y
+            && y < popup_area.y + popup_area.height
+        {
+            let visible_count = (popup_area.height.saturating_sub(2)) as usize;
+            if visible_count == 0 {
+                return;
+            }
+            let rel_row = if y <= popup_area.y + 1 {
+                0
+            } else {
+                ((y.saturating_sub(popup_area.y + 1)) as usize)
+                    .min(visible_count.saturating_sub(1))
+            };
+            let selected_idx = self.selected_suggestion_index();
+            let scroll_offset = if selected_idx >= visible_count {
+                (selected_idx + 1).saturating_sub(visible_count)
+            } else {
+                0
+            };
+            let item_idx = scroll_offset + rel_row;
+
+            if has_model_suggestions {
+                let model_suggestions = self.matching_model_suggestions();
+                if let Some(model_id) = model_suggestions.get(item_idx) {
+                    self.prompt = format!("/model {model_id}");
+                    self.submit_prompt();
+                    return;
+                }
+            } else if has_theme_suggestions {
+                let theme_suggestions = self.matching_theme_suggestions();
+                if let Some(theme_name) = theme_suggestions.get(item_idx) {
+                    self.prompt = format!("/theme {theme_name}");
+                    self.submit_prompt();
+                    return;
+                }
+            } else {
+                let suggestions = self.matching_suggestions();
+                if let Some(suggestion) = suggestions.get(item_idx) {
+                    if suggestion.template.ends_with(' ') {
+                        self.prompt = suggestion.template.to_string();
+                        self.cursor_position = self.prompt.chars().count();
+                        self.selected_suggestion = 0;
+                    } else {
+                        self.prompt = suggestion.template.to_string();
+                        self.submit_prompt();
+                    }
+                    return;
+                }
+            }
+            return;
+        }
+
+        if self.transcript.is_empty()
+            && let Some(cards) = self.get_or_compute_quick_actions_area()
+        {
+                for (idx, card) in cards.iter().enumerate() {
+                    if x >= card.x
+                        && x < card.x + card.width
+                        && y >= card.y
+                        && y < card.y + card.height
+                    {
+                        self.prompt.clear();
+                        self.cursor_position = 0;
+                        match idx {
+                            0 => {
+                                self.set_mode(ConversationMode::Plan);
+                                self.diagnostic =
+                                    "Switched to Plan mode (read-only)".to_string();
+                            }
+                            1 => {
+                                self.set_mode(ConversationMode::Build);
+                                self.diagnostic =
+                                    "Switched to Build mode (edits enabled)".to_string();
+                            }
+                            2 => {
+                                let command = cli::parse_command("/models")
+                                    .expect("valid command");
+                                if let Ok(output) = self.command_service.execute(command) {
+                                    self.apply_command_output(output);
+                                }
+                            }
+                            3 => {
+                                self.which_key.show();
+                                self.diagnostic =
+                                    "Shortcuts cheatsheet (Ctrl+X or Esc to dismiss)"
+                                         .to_string();
+                            }
+                            _ => {}
+                        }
+                        return;
+                    }
+                }
+            }
+    }
+
     pub fn permission_dialog(&self) -> Option<&PermissionDialogState> {
         self.permission_dialog.as_ref()
     }
@@ -1843,7 +2075,8 @@ impl App {
     pub fn autocomplete_selected_command(&mut self) -> bool {
         if self.prompt.starts_with("/model ") {
             let model_suggestions = self.matching_model_suggestions();
-            if let Some(first) = model_suggestions.get(self.selected_suggestion) {
+            let idx = self.selected_suggestion_index();
+            if let Some(first) = model_suggestions.get(idx).or_else(|| model_suggestions.first()) {
                 self.prompt = format!("/model {first}");
                 self.cursor_position = self.prompt.chars().count();
                 self.selected_suggestion = 0;
@@ -1852,7 +2085,8 @@ impl App {
         }
         if self.prompt.starts_with("/theme ") {
             let theme_suggestions = self.matching_theme_suggestions();
-            if let Some(first) = theme_suggestions.get(self.selected_suggestion) {
+            let idx = self.selected_suggestion_index();
+            if let Some(first) = theme_suggestions.get(idx).or_else(|| theme_suggestions.first()) {
                 self.prompt = format!("/theme {first}");
                 self.cursor_position = self.prompt.chars().count();
                 self.selected_suggestion = 0;
@@ -1860,7 +2094,8 @@ impl App {
             }
         }
         let suggestions = self.matching_suggestions();
-        if let Some(suggestion) = suggestions.get(self.selected_suggestion) {
+        let idx = self.selected_suggestion_index();
+        if let Some(suggestion) = suggestions.get(idx).copied().or_else(|| suggestions.first().copied()) {
             self.prompt = suggestion.template.to_string();
             self.cursor_position = self.prompt.chars().count();
             self.selected_suggestion = 0;
@@ -1872,19 +2107,57 @@ impl App {
 
     fn submit_prompt(&mut self) {
         let suggestions = self.matching_suggestions();
-        let selected_suggestion = if !suggestions.is_empty() {
-            suggestions.get(self.selected_suggestion).copied()
+        let model_suggestions = self.matching_model_suggestions();
+        let theme_suggestions = self.matching_theme_suggestions();
+        let selected_idx = self.selected_suggestion_index();
+        let target_suggestion = if !suggestions.is_empty() {
+            suggestions
+                .get(selected_idx)
+                .copied()
+                .or_else(|| suggestions.first().copied())
         } else {
             None
         };
-        let was_suggestion_focused = self.selected_suggestion > 0;
         self.selected_suggestion = 0;
         self.cursor_position = 0;
-        let input = std::mem::take(&mut self.prompt);
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
+        let mut input = std::mem::take(&mut self.prompt);
+        let trimmed_start = input.trim_start();
+        if trimmed_start.is_empty() {
             return;
         }
+        let is_slash = trimmed_start.starts_with('/');
+        let mut trimmed = if is_slash {
+            if trimmed_start.starts_with("/theme ") || trimmed_start.starts_with("/model ") {
+                trimmed_start
+            } else {
+                trimmed_start.trim_end()
+            }
+        } else {
+            input.trim()
+        };
+
+        if trimmed.starts_with('/') {
+            // ponytail: click and autocomplete bounds use layout calculation; add dynamic drag-selection when full mouse text selection needed.
+            if let Some(suggestion) = target_suggestion {
+                if suggestion.template.ends_with(' ') {
+                    if !trimmed.starts_with(suggestion.template) {
+                        self.prompt = suggestion.template.to_string();
+                        self.cursor_position = self.prompt.chars().count();
+                        let usage_arg = if suggestion.name == "/theme" {
+                            "<name>"
+                        } else {
+                            "<title>"
+                        };
+                        self.diagnostic = format!("usage: {}{usage_arg}", suggestion.template);
+                        return;
+                    }
+                } else if trimmed != suggestion.template {
+                    input = suggestion.template.to_string();
+                    trimmed = &input;
+                }
+            }
+        }
+
         self.chat_scroll = 0;
         if self.prompt_history.last().map(|s| s.as_str()) != Some(trimmed) {
             self.prompt_history.push(trimmed.to_string());
@@ -1913,11 +2186,24 @@ impl App {
             }
             if let Some(stripped) = trimmed.strip_prefix("/theme ") {
                 let name = stripped.trim();
-                if let Some(kind) = crate::tui::ThemeKind::from_name(name) {
-                    self.theme = kind;
-                    self.diagnostic = format!("theme switched to: {}", kind.name());
+                let chosen_name = if let Some(&suggestion) = theme_suggestions.get(selected_idx) {
+                    Some(suggestion)
+                } else if !name.is_empty()
+                    && let Some(kind) = crate::tui::ThemeKind::from_name(name)
+                {
+                    Some(kind.name())
                 } else {
-                    self.diagnostic = format!("unknown theme: {name} (run /themes to list)");
+                    theme_suggestions.first().copied()
+                };
+                if let Some(name) = chosen_name {
+                    if let Some(kind) = crate::tui::ThemeKind::from_name(name) {
+                        self.theme = kind;
+                        self.diagnostic = format!("theme switched to: {}", kind.name());
+                    } else {
+                        self.diagnostic = format!("unknown theme: {name} (run /themes to list)");
+                    }
+                } else {
+                    self.diagnostic = "unknown theme (run /themes to list)".to_string();
                 }
                 return;
             }
@@ -1979,42 +2265,29 @@ impl App {
             }
             if let Some(stripped) = trimmed.strip_prefix("/model ") {
                 let arg = stripped.trim();
-                if arg.is_empty() {
-                    let model_suggestions = self.matching_model_suggestions();
-                    if let Some(first) = model_suggestions.get(self.selected_suggestion)
-                        && was_suggestion_focused
-                    {
-                        let chosen = first.clone();
-                        if let Some((provider, model)) = split_provider_model(&chosen) {
-                            self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
-                            self.model = bounded(model.to_string(), MAX_IDENTITY_BYTES);
-                        } else {
-                            self.model = bounded(chosen.clone(), MAX_IDENTITY_BYTES);
-                        }
-                        self.diagnostic = format!("model switched to: {chosen}");
-                        return;
+                let chosen = if let Some(suggestion) = model_suggestions.get(selected_idx) {
+                    Some(suggestion.clone())
+                } else if !arg.is_empty() && self.available_models.iter().any(|m| m.id == arg) {
+                    Some(arg.to_string())
+                } else {
+                    model_suggestions.first().cloned()
+                };
+                if let Some(chosen) = chosen {
+                    if let Some((provider, model)) = split_provider_model(&chosen) {
+                        self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
+                        self.model = bounded(model.to_string(), MAX_IDENTITY_BYTES);
+                    } else {
+                        self.model = bounded(chosen.clone(), MAX_IDENTITY_BYTES);
                     }
+                    self.diagnostic = format!("model switched to: {chosen}");
+                    return;
                 }
             }
             let command = match cli::parse_command(trimmed) {
                 Ok(command) => command,
                 Err(error) => {
-                    if let Some(suggestion) = selected_suggestion
-                        && (trimmed.len() > 1 || was_suggestion_focused)
-                    {
-                        if suggestion.template.ends_with(' ') {
-                            self.prompt = suggestion.template.to_string();
-                            self.cursor_position = self.prompt.chars().count();
-                            self.diagnostic = format!("usage: {}<title>", suggestion.template);
-                            return;
-                        } else {
-                            self.diagnostic = error;
-                            return;
-                        }
-                    } else {
-                        self.diagnostic = error;
-                        return;
-                    }
+                    self.diagnostic = error;
+                    return;
                 }
             };
             match self.command_service.execute(command) {
@@ -2177,7 +2450,17 @@ impl App {
                             .and_then(|v| v.as_str())
                             .unwrap_or("tool");
                         let args = payload.get("arguments");
-                        let (_verb, _active_verb, desc) = tool_target_and_verbs(name, args);
+                        let (_verb, _active_verb, mut desc) = tool_target_and_verbs(name, args);
+                        if desc.is_empty()
+                            && let Some(prev) = &self.active_tool
+                            && prev.name == name
+                            && !prev.desc.is_empty()
+                        {
+                            desc = prev.desc.clone();
+                        }
+                        if desc.is_empty() {
+                            desc = "preparing arguments...".to_string();
+                        }
                         self.active_tool = Some(ActiveToolInfo {
                             name: name.to_string(),
                             desc,
@@ -2346,24 +2629,7 @@ impl App {
                             snippet.push_str("\n\n");
                             self.transcript.push_str(&snippet);
                             self.truncate_transcript();
-                        } else if name == "bash" {
-                            let exit_code: i32 =
-                                if let Some(idx) = output.rfind("[Process exited with code ") {
-                                    let after = &output[idx + "[Process exited with code ".len()..];
-                                    after
-                                        .split(']')
-                                        .next()
-                                        .and_then(|s| s.trim().parse::<i32>().ok())
-                                        .unwrap_or(if success { 0 } else { 1 })
-                                } else if success {
-                                    0
-                                } else {
-                                    1
-                                };
-
-                            let header = format!("⬢ Ran {target} (exit {exit_code})");
-                            let branch = format!("  └ {detail}");
-
+                        } else if name == "bash" || name == "sh" {
                             let mut cleaned_lines: Vec<&str> = Vec::new();
                             for l in output.lines() {
                                 let t = l.trim();
@@ -2376,6 +2642,9 @@ impl App {
                                 cleaned_lines.push(l);
                             }
 
+                            let clean_cmd = target.strip_prefix("$ ").unwrap_or(&target);
+                            let header = format!("$ {clean_cmd}");
+
                             let mut snippet = String::new();
                             if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
                                 snippet.push('\n');
@@ -2386,28 +2655,26 @@ impl App {
                             snippet.push_str(&header);
                             snippet.push('\n');
 
-                            if !cleaned_lines.is_empty() {
-                                snippet.push_str(
-                                    "  ┌── Output ────────────────────────────────────────\n",
-                                );
-                                let max_lines = 25;
-                                if cleaned_lines.len() <= max_lines {
-                                    for l in &cleaned_lines {
-                                        snippet.push_str(&format!("  │ {l}\n"));
-                                    }
-                                } else {
-                                    for l in &cleaned_lines[..max_lines] {
-                                        snippet.push_str(&format!("  │ {l}\n"));
-                                    }
-                                    snippet.push_str(&format!(
-                                        "  │ ... ({} more lines)\n",
-                                        cleaned_lines.len() - max_lines
-                                    ));
+                            let max_lines = 25;
+                            if cleaned_lines.len() <= max_lines {
+                                for l in &cleaned_lines {
+                                    snippet.push_str(l);
+                                    snippet.push('\n');
                                 }
-                                snippet.push_str("  └───\n");
+                            } else {
+                                for l in &cleaned_lines[..max_lines] {
+                                    snippet.push_str(l);
+                                    snippet.push('\n');
+                                }
+                                snippet.push_str(&format!(
+                                    "... ({} more lines)\n",
+                                    cleaned_lines.len() - max_lines
+                                ));
                             }
-                            snippet.push_str(&branch);
-                            snippet.push_str("\n\n");
+                            if !success && cleaned_lines.is_empty() {
+                                snippet.push_str(&format!("failed: {detail}\n"));
+                            }
+                            snippet.push('\n');
                             self.transcript.push_str(&snippet);
                             self.truncate_transcript();
                         } else if name == "websearch" {
@@ -2485,7 +2752,7 @@ impl App {
                             snippet.push_str("\n\n");
                             self.transcript.push_str(&snippet);
                             self.truncate_transcript();
-                        } else if success && name == "edit_file" {
+                        } else if success && matches!(name, "edit_file" | "edit") {
                             let old_str = args
                                 .and_then(|a| a.get("old_string"))
                                 .and_then(|v| v.as_str())
@@ -2527,7 +2794,47 @@ impl App {
                             snippet.push('\n');
                             self.transcript.push_str(&snippet);
                             self.truncate_transcript();
-                        } else if name == "write_file" {
+                        } else if success && matches!(name, "patch" | "apply_patch") {
+                            let patch_str = args
+                                .and_then(|a| a.get("patch"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let mut added = 0usize;
+                            let mut removed = 0usize;
+                            let mut diff_lines = Vec::new();
+                            for l in patch_str.lines() {
+                                if l.starts_with('+') && !l.starts_with("+++") {
+                                    added += 1;
+                                    diff_lines.push(format!("    + {}", &l[1..]));
+                                } else if l.starts_with('-') && !l.starts_with("---") {
+                                    removed += 1;
+                                    diff_lines.push(format!("    - {}", &l[1..]));
+                                } else if l.starts_with(' ') {
+                                    diff_lines.push(format!("    {}", l));
+                                }
+                            }
+                            let header = if target.is_empty() {
+                                format!("• Applied patch (+{added} -{removed})")
+                            } else {
+                                format!("• Applied patch {target} (+{added} -{removed})")
+                            };
+                            let mut snippet = String::new();
+                            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                                snippet.push('\n');
+                            }
+                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                                snippet.push('\n');
+                            }
+                            snippet.push_str(&header);
+                            snippet.push('\n');
+                            for dl in diff_lines.iter().take(25) {
+                                snippet.push_str(dl);
+                                snippet.push('\n');
+                            }
+                            snippet.push('\n');
+                            self.transcript.push_str(&snippet);
+                            self.truncate_transcript();
+                        } else if matches!(name, "write_file" | "write") {
                             let line_count = args
                                 .and_then(|a| a.get("content"))
                                 .and_then(|v| v.as_str())

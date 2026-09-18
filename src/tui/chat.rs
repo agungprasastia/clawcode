@@ -12,9 +12,9 @@ use super::render::{
     status_label,
 };
 use super::theme::Theme;
-use super::wave_spinner::WaveSpinner;
 
 pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, mode_color: Color) {
+    app.set_last_quick_actions_area(None);
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -105,46 +105,83 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
     }
 
     if let Some(active_tool) = app.active_tool() {
-        let active_verb = match active_tool.name.as_str() {
-            "read_file" => "Reading",
-            "write_file" => "Writing",
-            "edit_file" => "Editing",
-            "list_dir" => "Listing",
-            "glob_search" => "Running glob_search",
-            "grep_search" => "Running grep_search",
-            "bash" => "Running",
-            "update_plan" => "Updating Plan",
-            "webfetch" => "Fetching",
-            "websearch" => "Searching",
-            "skill" => "Loading skill",
-            _ => "Running",
-        };
-        let action_text = if active_tool.desc == "preparing arguments..." {
-            format!("Preparing {}...", active_tool.name)
-        } else if active_tool.desc.is_empty() {
-            format!("Running {}...", active_tool.name)
-        } else if active_tool.name == "grep_search" || active_tool.name == "glob_search" {
-            format!("Running {} {}...", active_tool.name, active_tool.desc)
+        let spinner = app.wave_spinner().compact_frame();
+        let (marker_str, action_text) = if matches!(active_tool.name.as_str(), "bash" | "sh") {
+            if active_tool.desc == "preparing arguments..." {
+                (
+                    format!("{spinner} "),
+                    format!("Preparing {}...", active_tool.name),
+                )
+            } else if active_tool.desc.is_empty() {
+                (format!("{spinner} "), active_tool.name.clone())
+            } else {
+                let clean_cmd = active_tool
+                    .desc
+                    .strip_prefix("$ ")
+                    .unwrap_or(&active_tool.desc);
+                (format!("{spinner} "), clean_cmd.to_string())
+            }
+        } else if matches!(active_tool.name.as_str(), "edit_file" | "edit") {
+            if active_tool.desc == "preparing arguments..." {
+                (
+                    format!("{spinner} "),
+                    format!("Preparing {}...", active_tool.name),
+                )
+            } else if active_tool.desc.is_empty() {
+                (format!("{spinner} "), "Edit".to_string())
+            } else {
+                (format!("{spinner} "), format!("Edit {}", active_tool.desc))
+            }
+        } else if matches!(active_tool.name.as_str(), "write_file" | "write") {
+            if active_tool.desc == "preparing arguments..." {
+                (
+                    format!("{spinner} "),
+                    format!("Preparing {}...", active_tool.name),
+                )
+            } else if active_tool.desc.is_empty() {
+                (format!("{spinner} "), "Write".to_string())
+            } else {
+                (format!("{spinner} "), format!("Write {}", active_tool.desc))
+            }
+        } else if matches!(active_tool.name.as_str(), "patch" | "apply_patch") {
+            if active_tool.desc == "preparing arguments..." {
+                (
+                    format!("{spinner} "),
+                    format!("Preparing {}...", active_tool.name),
+                )
+            } else if active_tool.desc.is_empty() {
+                (format!("{spinner} "), "Patch".to_string())
+            } else {
+                (format!("{spinner} "), format!("Patch {}", active_tool.desc))
+            }
         } else {
-            format!("{} {}...", active_verb, active_tool.desc)
+            let active_verb = match active_tool.name.as_str() {
+                "read_file" | "read" => "Read",
+                "list_dir" => "List",
+                "glob_search" => "Glob",
+                "grep_search" => "Grep",
+                "update_plan" => "Update plan",
+                "webfetch" => "Fetch",
+                "websearch" => "Search",
+                "skill" => "Load skill",
+                _ => "Run",
+            };
+            let text = if active_tool.desc == "preparing arguments..." {
+                format!("Preparing {}...", active_tool.name)
+            } else if active_tool.desc.is_empty() {
+                active_verb.to_string()
+            } else {
+                format!("{} {}", active_verb, active_tool.desc)
+            };
+            (format!("{spinner} "), text)
         };
-        let mut active_spans = vec![
+        let active_spans = vec![
             Span::styled(
-                "⬡ ",
-                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                action_text,
+                marker_str,
                 Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
             ),
+            Span::styled(action_text, Style::default().fg(theme.ink)),
         ];
-        let elapsed = active_tool.started_at.elapsed().as_secs_f64();
-        if elapsed >= 0.5 {
-            active_spans.push(Span::styled(
-                format!("  {:.1}s", elapsed),
-                Style::default().fg(theme.dim),
-            ));
-        }
         if !lines.is_empty() && !lines.last().map(|l| l.spans.is_empty()).unwrap_or(false) {
             lines.push(Line::from(String::new()));
         }
@@ -199,180 +236,7 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         lines.push(Line::from(meta_spans));
     }
 
-    let (transcript_area, status_bar_area) = if is_working && chunks[1].height >= 3 {
-        let sub = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
-            .split(chunks[1]);
-        (sub[0], Some(sub[1]))
-    } else {
-        (chunks[1], None)
-    };
-
-    if status_bar_area.is_none() && is_working {
-        let mut status_spans = vec![Span::styled(
-            format!("[{}] ", mode_label(app)),
-            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-        )];
-        let spinner_width = if transcript_area.width < 30 {
-            1
-        } else {
-            WaveSpinner::WIDTH
-        };
-        status_spans.extend(app.wave_spinner().spans_for_width(spinner_width));
-        if app.is_reasoning() {
-            let elapsed = app.reasoning_elapsed_seconds().unwrap_or(0.0);
-            status_spans.push(Span::raw(" "));
-            status_spans.push(Span::styled(
-                format!("💭 Thinking ({:.1}s)", elapsed),
-                Style::default()
-                    .fg(theme.amber)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else if let Some(tool) = app.active_tool() {
-            let elapsed = tool.started_at.elapsed().as_secs_f64();
-            status_spans.push(Span::raw(" "));
-            let label = if tool.desc == "preparing arguments..." {
-                format!("Preparing {}...", tool.name)
-            } else {
-                format!("{}: {}", tool.name, tool.desc)
-            };
-            status_spans.push(Span::styled(
-                format!("⬡ {} ({:.1}s)", label, elapsed),
-                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-            ));
-        } else if let Some(tps) = app.tokens_per_second() {
-            status_spans.push(Span::raw(" "));
-            status_spans.push(Span::styled(
-                format!("{:.0}t/s", tps),
-                Style::default().fg(theme.dim),
-            ));
-        }
-        if let Some(elapsed) = app.streaming_elapsed_seconds() {
-            status_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
-            status_spans.push(Span::styled(
-                format!("{:.1}s", elapsed),
-                Style::default().fg(theme.dim),
-            ));
-        }
-        status_spans.push(Span::raw("  "));
-        status_spans.push(Span::styled(
-            "esc to cancel",
-            Style::default().fg(theme.dim),
-        ));
-
-        lines.push(Line::from(String::new()));
-        lines.push(Line::from(status_spans));
-    }
-
-    if let Some(status_area) = status_bar_area {
-        let mut status_spans = Vec::new();
-
-        // Mode tag: [{MODE}]
-        status_spans.push(Span::styled(
-            format!("[{}] ", mode_label(app)),
-            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-        ));
-
-        // Model identity: {model}
-        let model_name = if !app.selected_model().is_empty() {
-            app.selected_model()
-        } else {
-            "default"
-        };
-        status_spans.push(Span::styled(
-            model_name.to_string(),
-            Style::default().fg(theme.ink),
-        ));
-        status_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
-
-        // Animated WaveSpinner
-        let spinner_width = if status_area.width < 50 {
-            1
-        } else {
-            WaveSpinner::WIDTH
-        };
-        status_spans.extend(app.wave_spinner().spans_for_width(spinner_width));
-        status_spans.push(Span::raw(" "));
-
-        // Action state
-        if app.is_reasoning() {
-            let elapsed = app.reasoning_elapsed_seconds().unwrap_or(0.0);
-            status_spans.push(Span::styled("💭 ", Style::default().fg(theme.amber)));
-            status_spans.push(Span::styled(
-                format!("Thinking ({:.1}s)", elapsed),
-                Style::default()
-                    .fg(theme.amber)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else if let Some(tool) = app.active_tool() {
-            let elapsed = tool.started_at.elapsed().as_secs_f64();
-            status_spans.push(Span::styled(
-                "⬡ ",
-                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-            ));
-            let action_label = if tool.desc == "preparing arguments..." {
-                format!("Preparing {}...", tool.name)
-            } else {
-                let active_verb = match tool.name.as_str() {
-                    "read_file" => "Reading",
-                    "write_file" => "Writing",
-                    "edit_file" => "Editing",
-                    "list_dir" => "Listing",
-                    "glob_search" => "Globbing",
-                    "grep_search" => "Grepping",
-                    "bash" => "Ran",
-                    "update_plan" => "Updating Plan",
-                    "webfetch" => "Fetching",
-                    "websearch" => "Searching",
-                    "skill" => "Loading skill",
-                    _ => "Running",
-                };
-                if tool.desc.is_empty() {
-                    format!("{} {}", active_verb, tool.name)
-                } else {
-                    format!("{} {}", active_verb, tool.desc)
-                }
-            };
-            let max_desc_len = (status_area.width as usize).saturating_sub(45).max(10);
-            let display_desc = if action_label.chars().count() > max_desc_len {
-                let take_count = max_desc_len.saturating_sub(1);
-                let s: String = action_label.chars().take(take_count).collect();
-                format!("{s}…")
-            } else {
-                action_label
-            };
-            status_spans.push(Span::styled(
-                format!("{} ({:.1}s)", display_desc, elapsed),
-                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-            ));
-        } else if let Some(tps) = app.tokens_per_second() {
-            let elapsed_str = if let Some(elapsed) = app.streaming_elapsed_seconds() {
-                format!(" · {:.1}s", elapsed)
-            } else {
-                String::new()
-            };
-            status_spans.push(Span::styled(
-                format!("{:.0}t/s{}", tps, elapsed_str),
-                Style::default().fg(theme.dim),
-            ));
-        } else if let Some(elapsed) = app.streaming_elapsed_seconds() {
-            status_spans.push(Span::styled(
-                format!("{:.1}s", elapsed),
-                Style::default().fg(theme.dim),
-            ));
-        }
-
-        status_spans.push(Span::raw("  "));
-        status_spans.push(Span::styled(
-            "esc to cancel",
-            Style::default().fg(theme.dim),
-        ));
-
-        let status_widget =
-            Paragraph::new(Line::from(status_spans)).style(Style::default().bg(theme.panel));
-        frame.render_widget(status_widget, status_area);
-    }
+    let transcript_area = chunks[1];
 
     let content_width = transcript_area.width;
     let total_visual_lines = visual_line_count(&lines, content_width) as u16;
@@ -661,6 +525,8 @@ pub fn format_transcript_lines(
     let mut in_code_block = false;
     let mut in_thought = false;
     let mut in_box = false;
+    let mut is_output_box = false;
+    let mut in_shell_output = false;
     for (i, line) in raw_lines.iter().enumerate() {
         if line.trim_start().starts_with("```") {
             if in_code_block {
@@ -706,6 +572,7 @@ pub fn format_transcript_lines(
         }
         if line.trim().is_empty() {
             in_thought = false;
+            in_shell_output = false;
         }
         if let Some(prompt) = line.strip_prefix("> ") {
             in_thought = false;
@@ -742,6 +609,7 @@ pub fn format_transcript_lines(
                 Style::default().fg(theme.dim),
             )];
             if let Some((title, border_tail)) = after_prefix.split_once(' ') {
+                is_output_box = title == "Output";
                 spans.push(Span::styled(
                     title.to_string(),
                     Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
@@ -751,6 +619,7 @@ pub fn format_transcript_lines(
                     Style::default().fg(theme.dim),
                 ));
             } else {
+                is_output_box = after_prefix == "Output";
                 spans.push(Span::styled(
                     after_prefix.to_string(),
                     Style::default().fg(theme.dim),
@@ -759,15 +628,65 @@ pub fn format_transcript_lines(
             lines.push(Line::from(spans));
         } else if line.trim_start().starts_with("└───") {
             in_box = false;
+            is_output_box = false;
             let trimmed = line.trim_start();
             let indent = &line[..line.len() - trimmed.len()];
             lines.push(Line::from(vec![Span::styled(
                 format!("{indent}{trimmed}"),
                 Style::default().fg(theme.dim),
             )]));
+        } else if let Some(cmd_line) = line.strip_prefix("$ ") {
+            in_thought = false;
+            in_box = false;
+            in_shell_output = true;
+            let clean_cmd = if let Some((cmd, _)) = cmd_line.rsplit_once(" (exit ") {
+                cmd
+            } else {
+                cmd_line
+            };
+            let spans = vec![
+                Span::styled(
+                    "$ ",
+                    Style::default()
+                        .fg(theme.amber)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    clean_cmd.to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
+            ];
+            lines.push(Line::from(spans));
+        } else if let Some(rest) = line
+            .strip_prefix("⬢ Ran ")
+            .or_else(|| line.strip_prefix("• Ran "))
+        {
+            in_thought = false;
+            in_box = false;
+            in_shell_output = true;
+            let clean_cmd = if let Some((cmd, _)) = rest.rsplit_once(" (exit ") {
+                cmd.strip_prefix("$ ").unwrap_or(cmd)
+            } else {
+                rest.strip_prefix("$ ").unwrap_or(rest)
+            };
+            let spans = vec![
+                Span::styled(
+                    "$ ",
+                    Style::default()
+                        .fg(theme.amber)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    clean_cmd.to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
+            ];
+            lines.push(Line::from(spans));
         } else if line.starts_with("⬢ ")
             || line.starts_with("• Edit")
             || line.starts_with("• Write")
+            || line.starts_with("• Patch")
+            || line.starts_with("• Applied patch")
             || (line.starts_with("• ")
                 && parse_diff_badge(line.strip_prefix("• ").unwrap_or("")).is_some())
         {
@@ -815,7 +734,17 @@ pub fn format_transcript_lines(
             )];
             let rest_trimmed = rest.trim();
             if let Some((before, add_part, rem_part)) = parse_diff_badge(rest_trimmed) {
-                if let Some((verb, target)) = before.split_once(' ') {
+                if let Some(target) = before.strip_prefix("Applied patch ") {
+                    spans.push(Span::styled(
+                        "Applied patch".to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        target.to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    ));
+                } else if let Some((verb, target)) = before.split_once(' ') {
                     spans.push(Span::styled(
                         verb.to_string(),
                         Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
@@ -861,49 +790,67 @@ pub fn format_transcript_lines(
                     ));
                 }
             } else if let Some((verb, target)) = rest_trimmed.split_once(' ') {
-                spans.push(Span::styled(
-                    verb.to_string(),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::raw(" "));
-                if let Some((cmd, exit_part)) = target.rsplit_once(" (exit ") {
-                    let code_str = exit_part.strip_suffix(')').unwrap_or(exit_part);
+                if verb == "Ran" {
                     spans.push(Span::styled(
-                        cmd.to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                        "$ ",
+                        Style::default()
+                            .fg(if is_failed { theme.error } else { theme.amber })
+                            .add_modifier(Modifier::BOLD),
                     ));
-                    spans.push(Span::raw(" "));
-                    spans.push(Span::styled("(", Style::default().fg(theme.dim)));
-                    let exit_color = if code_str == "0" {
-                        theme.success
+                    let clean_cmd = if let Some((cmd, _)) = target.rsplit_once(" (exit ") {
+                        cmd.strip_prefix("$ ").unwrap_or(cmd)
                     } else {
-                        theme.error
+                        target.strip_prefix("$ ").unwrap_or(target)
                     };
                     spans.push(Span::styled(
-                        format!("exit {code_str}"),
-                        Style::default().fg(exit_color).add_modifier(Modifier::BOLD),
+                        clean_cmd.to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
                     ));
-                    spans.push(Span::styled(")", Style::default().fg(theme.dim)));
-                } else if let Some((file, lines_part)) = target.rsplit_once(" (")
-                    && lines_part.ends_with(" lines)")
-                {
+                } else {
                     spans.push(Span::styled(
-                        file.to_string(),
+                        verb.to_string(),
                         Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
                     ));
                     spans.push(Span::raw(" "));
-                    spans.push(Span::styled("(", Style::default().fg(theme.dim)));
-                    let count_str = lines_part.strip_suffix(')').unwrap_or(lines_part);
-                    spans.push(Span::styled(
-                        count_str.to_string(),
-                        Style::default().fg(theme.dim),
-                    ));
-                    spans.push(Span::styled(")", Style::default().fg(theme.dim)));
-                } else {
-                    spans.push(Span::styled(
-                        target.to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                    ));
+                    if let Some((cmd, exit_part)) = target.rsplit_once(" (exit ") {
+                        let code_str = exit_part.strip_suffix(')').unwrap_or(exit_part);
+                        spans.push(Span::styled(
+                            cmd.to_string(),
+                            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::raw(" "));
+                        spans.push(Span::styled("(", Style::default().fg(theme.dim)));
+                        let exit_color = if code_str == "0" {
+                            theme.success
+                        } else {
+                            theme.error
+                        };
+                        spans.push(Span::styled(
+                            format!("exit {code_str}"),
+                            Style::default().fg(exit_color).add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::styled(")", Style::default().fg(theme.dim)));
+                    } else if let Some((file, lines_part)) = target.rsplit_once(" (")
+                        && lines_part.ends_with(" lines)")
+                    {
+                        spans.push(Span::styled(
+                            file.to_string(),
+                            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::raw(" "));
+                        spans.push(Span::styled("(", Style::default().fg(theme.dim)));
+                        let count_str = lines_part.strip_suffix(')').unwrap_or(lines_part);
+                        spans.push(Span::styled(
+                            count_str.to_string(),
+                            Style::default().fg(theme.dim),
+                        ));
+                        spans.push(Span::styled(")", Style::default().fg(theme.dim)));
+                    } else {
+                        spans.push(Span::styled(
+                            target.to_string(),
+                            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                        ));
+                    }
                 }
             } else {
                 spans.push(Span::styled(
@@ -912,6 +859,26 @@ pub fn format_transcript_lines(
                 ));
             }
             lines.push(Line::from(spans));
+        } else if in_shell_output {
+            let cleaned = if let Some(stripped) = line.trim_start().strip_prefix("│ ") {
+                stripped
+            } else if line.trim_start() == "│" {
+                ""
+            } else {
+                line
+            };
+            let text_style =
+                if cleaned.trim_start().starts_with("... (") && cleaned.trim_end().ends_with(')') {
+                    Style::default()
+                        .fg(theme.dim)
+                        .add_modifier(Modifier::ITALIC)
+                } else {
+                    Style::default().fg(theme.quiet)
+                };
+            lines.push(Line::from(vec![Span::styled(
+                cleaned.to_string(),
+                text_style,
+            )]));
         } else if let Some(rest) = line.trim_start().strip_prefix("└ ") {
             let mut spans = vec![Span::styled("  └ ", Style::default().fg(theme.dim))];
             let rest_trimmed = rest.trim();
@@ -975,6 +942,15 @@ pub fn format_transcript_lines(
                         title_str.to_string(),
                         Style::default().fg(theme.ink),
                     ));
+                } else if is_output_box {
+                    let text_style = if rest.starts_with("... (") && rest.ends_with(')') {
+                        Style::default()
+                            .fg(theme.dim)
+                            .add_modifier(Modifier::ITALIC)
+                    } else {
+                        Style::default().fg(theme.quiet)
+                    };
+                    spans.push(Span::styled(rest.to_string(), text_style));
                 } else {
                     spans.push(Span::styled(
                         rest.to_string(),
