@@ -15,11 +15,11 @@
 [![Runtime](https://img.shields.io/badge/runtime-sync%20worker%20(zero--async)-success.svg?style=flat-square)]()
 [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue.svg?style=flat-square)](LICENSE)
 
-**Clawcode** adalah asisten *AI coding* terminal berperforma tinggi berbasis bahasa pemrograman Rust. Didesain untuk pengembang dengan filosofi *keyboard-first*, *zero-async runtime overhead*, mitigasi mutasi berkas transaksional yang aman, pemantauan *side-by-side visual diff*, serta persistensi sesi menggunakan SQLite (WAL mode).
+**Clawcode** is a high-performance terminal AI coding assistant built in Rust. Designed for developers with a keyboard-first philosophy, zero-async runtime overhead, safe transactional file mutations, side-by-side visual diff inspection, and session persistence powered by SQLite (WAL mode).
 
 ---
 
-## Pratinjau Tampilan Terminal (TUI)
+## Terminal UI Preview
 
 ```text
 ┌───────────────────────────────────────────────────────────────────────────┐
@@ -27,9 +27,9 @@
 ├─────────────────────────────────────────────┬─────────────────────────────┤
 │ TRANSCRIPT                                  │ TASK PLAN                   │
 │                                             │                             │
-│ User: Update autentikasi middleware         │ [x] Periksa src/auth.rs     │
-│                                             │ [>] Validasi token expiry   │
-│ Assistant: Menambahkan pengecekan token...  │ [ ] Verifikasi tes unit     │
+│ User: Update authentication middleware      │ [x] Inspect src/auth.rs     │
+│                                             │ [>] Validate token expiry   │
+│ Assistant: Adding token verification...     │ [ ] Verify unit tests       │
 │                                             │                             │
 │ • Edit src/auth.rs (+2 -1)                  │                             │
 │      12   fn verify_token(t: &str) -> bool {│                             │
@@ -38,41 +38,42 @@
 │      14 +     exp > Utc::now().timestamp()  │                             │
 │      15   }                                 │                             │
 ├─────────────────────────────────────────────┴─────────────────────────────┤
-│ [BUILD] > Ketik prompt atau /command (Ctrl+X: WhichKey)       Tokens: 4.2k│
+│ [BUILD] > Enter prompt or /command (Ctrl+X: WhichKey)       Tokens: 4.2k│
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Daftar Isi
+## Table of Contents
 
-- [Arsitektur Sistem](#arsitektur-sistem)
-- [Fitur Unggulan](#fitur-unggulan)
-- [Persyaratan Sistem](#persyaratan-sistem)
-- [Instalasi & Panduan Cepat](#instalasi--panduan-cepat)
-  - [Kompilasi dari Sumber](#kompilasi-dari-sumber)
-  - [Konfigurasi Kunci Kredensial (API Key)](#konfigurasi-kunci-kredensial-api-key)
-  - [Menjalankan Aplikasi](#menjalankan-aplikasi)
-- [Konfigurasi Sistem (`clawcode.jsonc`)](#konfigurasi-sistem-clawcodejsonc)
-- [Navigasi & Perintah TUI](#navigasi--perintah-tui)
-  - [Perintah Teks (Slash Commands)](#perintah-teks-slash-commands)
-  - [Pintasan Keyboard (Keybindings)](#pintasan-keyboard-keybindings)
-  - [Menu Cepat WhichKey (`Ctrl+X`)](#menu-cepat-whichkey-ctrlx)
-  - [Profil Agen Bawaan](#profil-agen-bawaan)
-  - [Daftar Tema Tampilan](#daftar-tema-tampilan)
-- [Spesifikasi 12 Tool Agen AI](#spesifikasi-12-tool-agen-ai)
-- [Alur Transaksional Mode BUILD](#alur-transaksional-mode-build)
+- [Terminal UI Preview](#terminal-ui-preview)
+- [System Architecture](#system-architecture)
+- [Key Features](#key-features)
+- [System Requirements](#system-requirements)
+- [Installation & Quick Start](#installation--quick-start)
+  - [Building from Source](#building-from-source)
+  - [API Key Configuration](#api-key-configuration)
+  - [Running the Application](#running-the-application)
+- [System Configuration (`clawcode.jsonc`)](#system-configuration-clawcodejsonc)
+- [Navigation & TUI Commands](#navigation--tui-commands)
+  - [Slash Commands](#slash-commands)
+  - [Keyboard Shortcuts](#keyboard-shortcuts)
+  - [WhichKey Quick Menu (`Ctrl+X`)](#whichkey-quick-menu-ctrlx)
+  - [Built-in Agent Profiles](#built-in-agent-profiles)
+  - [Built-in Themes](#built-in-themes)
+- [12 Built-in AI Agent Tools Specification](#12-built-in-ai-agent-tools-specification)
+- [BUILD Mode Transactional Workflow](#build-mode-transactional-workflow)
   - [Side-by-Side Visual Diff](#side-by-side-visual-diff)
-- [Pengujian Mutu & Benchmark](#pengujian-mutu--benchmark)
-- [Packaging & Distribusi Rilis](#packaging--distribusi-rilis)
-- [Batasan Arsitektur & Non-Goals](#batasan-arsitektur--non-goals)
-- [Lisensi](#lisensi)
+- [Quality Assurance & Benchmarks](#quality-assurance--benchmarks)
+- [Packaging & Release Distribution](#packaging--release-distribution)
+- [Architecture Scope & Non-Goals](#architecture-scope--non-goals)
+- [License](#license)
 
 ---
 
-## Arsitektur Sistem
+## System Architecture
 
-Clawcode dioptimasi tanpa ketergantungan pada runtime async eksternal (zero `tokio` atau `async-std`). Seluruh koordinasi sistem berjalan di atas *worker thread* sinkron menggunakan saluran komunikasi baku Rust (`std::sync::mpsc`) dan *event bus* thread-safe.
+Clawcode is optimized with zero external async runtime dependencies (zero `tokio` or `async-std`). All system coordination runs on a synchronous worker thread using standard Rust communication channels (`std::sync::mpsc`) and a thread-safe event bus.
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -97,59 +98,59 @@ Clawcode dioptimasi tanpa ketergantungan pada runtime async eksternal (zero `tok
       └─────────────────┘     └─────────────────┘     └───────────────────────┘
 ```
 
-Prinsip Inti Arsitektur:
-- **Zero-Async Overhead**: Meniadakan beban runtime coroutine/async untuk latensi minimal dan jejak memori hemat.
-- **Atomic File Transactions**: Operasi modifikasi berkas menggunakan berkas perantara temporer (*sibling tempfile*) dengan penggantian berkas atomik dan pemulihan instan saat terjadi interupsi.
-- **Strict Bounded Resources**: Membatasi alokasi memori transcript (256 KiB) dan buffer stream (64 KiB), dengan pemotongan karakter strictly valid pada batas UTF-8 (*char boundary*).
+Core Architectural Principles:
+- **Zero-Async Overhead**: Eliminates coroutine/async runtime overhead for minimal latency and a compact memory footprint.
+- **Atomic File Transactions**: File modifications use sibling temporary files with atomic replacement and instant rollback on interruption.
+- **Strict Bounded Resources**: Enforces bounds on transcript memory (256 KiB) and stream buffers (64 KiB), strictly truncating on valid UTF-8 character boundaries.
 
 ---
 
-## Fitur Unggulan
+## Key Features
 
-- **Inisialisasi Cepat & Offline-First**: Startup TUI instan (target ≤100 ms) tanpa memblokir koneksi jaringan. Cache metadata model lokal persisten dengan mekanisme *stale-while-revalidate* serta penanganan *backoff* eksponensial.
+- **Fast Initialization & Offline-First**: Instant TUI startup (≤100 ms target) without blocking network calls. Persistent local model metadata cache with stale-while-revalidate strategy and exponential backoff handling.
 - **Dual Execution Modes**:
-  - `PLAN`: Mode investigasi dan perencanaan *read-only*. Aman tanpa risiko perubahan kode atau eksekusi perintah shell berbahaya.
-  - `BUILD`: Pipeline mutasi transaksional aktif (`validate` → `snapshot` → `diff` → `policy` → `apply`) dengan dukungan *checkpoint rollback* dan validasi hash SHA-256.
-- **Visual Side-by-Side Diff**: Penyajian perubahan berkas berdampingan dua kolom (*split view*) di dalam transcript untuk operasi modifikasi kode (`edit_file`), lengkap dengan penomoran baris asli dan penanda warna kontras.
+  - `PLAN`: Read-only investigation and planning mode. Safe exploration with no risk of accidental code changes or dangerous shell command execution.
+  - `BUILD`: Active transactional mutation pipeline (`validate` → `snapshot` → `diff` → `policy` → `apply`) with checkpoint rollback support and SHA-256 hash validation.
+- **Visual Side-by-Side Diff**: Two-column split-view diff presentation directly in the transcript for code edits (`edit_file`), complete with original line numbering and contrasting color markers.
 - **Provider Agnostic**:
-  - Adapter native Anthropic Messages API (`/v1/messages`).
-  - Provider OpenAI & penyedia kompatibel OpenAI (`/chat/completions`: OpenRouter, DeepSeek, vLLM, Groq, Mistral).
-  - Eksekusi model lokal tanpa internet via Ollama (`/api/chat`).
-- **Quiet Editorial TUI**: Antarmuka berbasis Ratatui dengan fokus pada kenyamanan membaca kode, penanganan perubahan ukuran layar (*resize-aware*), dan dialog WhichKey (`Ctrl+X`).
-- **12 Tool Agen AI Bawaan**: Rangkaian perkakas otonom untuk inspeksi hierarki berkas, penyuntingan teks bedah (*surgical replacement*), pencarian web real-time, eksekusi shell terkendali, dan pelacakan target multi-tahap.
-- **Keamanan Workspace Terproteksi**: Sandboxing berbasis penelusuran path kanonikal untuk mencegah *directory traversal attack* dan *symlink breakout*.
-- **Persistensi Sesi SQLite**: Pool koneksi SQLite terkelola dalam mode WAL (*Write-Ahead Logging*) untuk menyimpan rekaman percakapan, metrik konsumsi token, dan snapshot pemulihan.
+  - Native Anthropic Messages API adapter (`/v1/messages`).
+  - OpenAI & OpenAI-compatible providers (`/chat/completions`: OpenRouter, DeepSeek, vLLM, Groq, Mistral).
+  - Local offline model execution via Ollama (`/api/chat`).
+- **Quiet Editorial TUI**: Ratatui-based interface focused on code readability, resize-aware rendering, and WhichKey modal navigation (`Ctrl+X`).
+- **12 Built-in AI Agent Tools**: Autonomous tool suite for file hierarchy inspection, surgical text replacement, real-time web search, sandboxed shell execution, and multi-step plan tracking.
+- **Protected Workspace Sandboxing**: Canonical path resolution sandboxing prevents directory traversal attacks and symlink breakouts.
+- **SQLite Session Persistence**: Managed SQLite connection pool in WAL (Write-Ahead Logging) mode persists conversation transcripts, token usage metrics, and recovery snapshots.
 
 ---
 
-## Persyaratan Sistem
+## System Requirements
 
-- **Rust**: Versi `1.98.0` atau lebih baru (terkunci via `rust-toolchain.toml`).
-- **Sistem Operasi**: Windows 10/11, Linux (distro utama berbasis glibc atau musl), atau macOS (Apple Silicon / Intel).
+- **Rust**: Version `1.98.0` or newer (pinned via `rust-toolchain.toml`).
+- **Operating System**: Windows 10/11, Linux (major distributions with glibc or musl), or macOS (Apple Silicon / Intel).
 
 ---
 
-## Instalasi & Panduan Cepat
+## Installation & Quick Start
 
-### Kompilasi dari Sumber
+### Building from Source
 
 ```bash
-# 1. Clone repositori
+# 1. Clone the repository
 git clone https://github.com/owner/clawcode.git
 cd clawcode
 
-# 2. Bangun biner release teroptimasi
+# 2. Build optimized release binary
 cargo build --release --locked
 ```
 
-Biner terkompilasi akan berada di `target/release/clawcode` (atau `target\release\clawcode.exe` di lingkungan Windows).
+The compiled binary will be located at `target/release/clawcode` (or `target\release\clawcode.exe` on Windows).
 
-### Konfigurasi Kunci Kredensial (API Key)
+### API Key Configuration
 
-Konfigurasikan variabel lingkungan sesuai penyedia LLM yang digunakan:
+Configure environment variables for your chosen LLM provider:
 
 ```bash
-# OpenAI atau endpoint kompatibel OpenAI
+# OpenAI or OpenAI-compatible endpoint
 export OPENAI_API_KEY="sk-..."
 
 # Anthropic Claude
@@ -158,38 +159,38 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 # OpenRouter
 export OPENROUTER_API_KEY="sk-or-..."
 
-# Ollama Endpoint (opsional, default: http://localhost:11434)
+# Ollama Endpoint (optional, default: http://localhost:11434)
 export OLLAMA_HOST="http://localhost:11434"
 ```
 
-### Menjalankan Aplikasi
+### Running the Application
 
 ```bash
-# Menjalankan antarmuka interaktif TUI
+# Launch interactive TUI
 cargo run
 
-# Memeriksa versi rilis aplikasi
+# Check application release version
 cargo run -- --version
 
-# Menjalankan perintah non-interaktif langsung (CLI mode)
+# Run non-interactive commands directly (CLI mode)
 cargo run -- /models
 cargo run -- /models refresh
 cargo run -- /plan
 cargo run -- /build
 cargo run -- /connect anthropic
-cargo run -- /new "Refaktorisasi Middleware"
+cargo run -- /new "Refactor Middleware"
 ```
 
 ---
 
-## Konfigurasi Sistem (`clawcode.jsonc`)
+## System Configuration (`clawcode.jsonc`)
 
-Clawcode mendukung konfigurasi bertingkat dalam format JSONC (JSON dengan komentar dan *trailing commas*):
+Clawcode supports layered configuration in JSONC format (JSON with comments and trailing commas):
 
-1. **Konfigurasi Global**: `~/.config/clawcode/clawcode.json` (preferensi bawaan pengguna di level sistem).
-2. **Konfigurasi Proyek**: `.clawcode/clawcode.json` (diletakkan di root workspace, menimpa preferensi global).
+1. **Global Configuration**: `~/.config/clawcode/clawcode.json` (system-wide user defaults).
+2. **Project Configuration**: `.clawcode/clawcode.json` (workspace root, overrides global preferences).
 
-### Contoh `clawcode.jsonc`
+### Example `clawcode.jsonc`
 
 ```jsonc
 {
@@ -198,14 +199,14 @@ Clawcode mendukung konfigurasi bertingkat dalam format JSONC (JSON dengan koment
   "model": "claude-3-7-sonnet-20250219",
   "endpoint": "https://api.anthropic.com/v1",
 
-  // Penulisan kunci API plaintext ditolak validator konfigurasi.
-  // Gunakan prefix 'env:NAMA_VAR' atau 'credential:ID_KEYRING'
+  // Plaintext API keys are rejected by the config validator.
+  // Use 'env:VAR_NAME' or 'credential:KEYRING_ID' prefix
   "api_key": "env:ANTHROPIC_API_KEY",
 
-  // Skema warna antarmuka TUI aktif
+  // Active TUI color scheme
   "theme": "clawcode-dark",
 
-  // Konfigurasi endpoint penyedia LLM kustom
+  // Custom LLM provider endpoint configuration
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -221,128 +222,128 @@ Clawcode mendukung konfigurasi bertingkat dalam format JSONC (JSON dengan koment
 }
 ```
 
-> **Diagnostik Presisi**: Kesalahan sintaks pada berkas konfigurasi menyajikan koordinasi baris dan kolom 1-based secara akurat untuk mempermudah identifikasi masalah.
+> **Precise Diagnostics**: Syntax errors in configuration files report 1-based line and column coordinates for quick troubleshooting.
 
 ---
 
-## Navigasi & Perintah TUI
+## Navigation & TUI Commands
 
-### Perintah Teks (Slash Commands)
+### Slash Commands
 
-| Perintah | Deskripsi |
+| Command | Description |
 | :--- | :--- |
-| `/plan` | Berpindah ke mode kerja **PLAN** (read-only, eksplorasi aman tanpa risiko mutasi). |
-| `/build` | Berpindah ke mode kerja **BUILD** (eksekusi mutasi transaksional aktif). |
-| `/connect [provider]` | Sambungkan ke provider default atau penyedia tertentu (`openai`, `anthropic`, `ollama`). |
-| `/model <id>` | Ganti model aktif (atau buka dialog pemilih model bila tanpa parameter). |
-| `/models` | Buka dialog modal penelusuran daftar model yang tersedia. |
-| `/models refresh` | Paksa discovery ulang model dari server penyedia. |
-| `/agents` | Buka dialog modal pemilih profil agen (`plan`, `build`, `review`, `compact`). |
-| `/themes` | Buka dialog modal pemilih tema antarmuka visual. |
-| `/theme <nama>` | Ganti skema tema tampilan langsung (contoh: `/theme catppuccin`). |
-| `/new <judul>` | Buat sesi percakapan baru dengan judul yang ditentukan. |
-| `/sessions` | Buka dialog modal penelusuran riwayat sesi percakapan. |
-| `/clear` / `/home` | Bersihkan tampilan transcript aktif pada layar. |
-| `/compact` | Ringkas transcript riwayat percakapan untuk menghemat pemakaian token konteks. |
-| `/copy` | Salin seluruh transcript percakapan sesi aktif ke clipboard sistem. |
-| `/status` | Tampilkan metrik runtime, diagnostik koneksi, dan rincian penggunaan token. |
-| `/keys` | Buka cheatsheet pintasan keyboard (`WhichKey`). |
-| `/help` | Tampilkan panduan ringkas seluruh perintah yang didukung. |
-| `/exit` | Simpan sesi aktif ke database SQLite dan tutup aplikasi. |
+| `/plan` | Switch to **PLAN** mode (read-only, safe exploration without mutations). |
+| `/build` | Switch to **BUILD** mode (active transactional mutation execution). |
+| `/connect [provider]` | Connect to default provider or a specific provider (`openai`, `anthropic`, `ollama`). |
+| `/model <id>` | Change active model (or open model picker dialog if no parameter is provided). |
+| `/models` | Open model selection dialog. |
+| `/models refresh` | Force model rediscovery from provider servers. |
+| `/agents` | Open agent profile selection dialog (`plan`, `build`, `review`, `compact`). |
+| `/themes` | Open theme picker dialog. |
+| `/theme <name>` | Switch theme directly (e.g. `/theme catppuccin`). |
+| `/new <title>` | Create a new session with the specified title. |
+| `/sessions` | Open session history dialog. |
+| `/clear` / `/home` | Clear active transcript display on screen. |
+| `/compact` | Compact conversation history transcript to conserve context tokens. |
+| `/copy` | Copy full transcript of active session to system clipboard. |
+| `/status` | Show runtime metrics, connection diagnostics, and token usage details. |
+| `/keys` | Open keyboard shortcuts cheatsheet (`WhichKey`). |
+| `/help` | Display quick reference guide for all supported commands. |
+| `/exit` | Save active session to SQLite database and quit application. |
 
-### Pintasan Keyboard (Keybindings)
+### Keyboard Shortcuts
 
-| Kombinasi Tombol | Tindakan |
+| Key Combination | Action |
 | :--- | :--- |
-| `Tab` / `Shift+Tab` | Beralih instan antara mode **PLAN** dan **BUILD**. |
-| `Ctrl+C` | Hentikan proses streaming model aktif atau batalkan proses tool yang sedang berjalan. |
-| `Ctrl+L` | Bersihkan tampilan transcript di layar. |
-| `Ctrl+X` | Tampilkan menu pintasan cepat (**WhichKey**). |
-| `Ctrl+V` | Tempel teks dari clipboard ke baris prompt. |
-| `Esc` / `q` | Tutup dialog modal aktif / batalkan tindakan yang sedang berjalan. |
-| `PageUp` / `PageDown` | Gulir transcript satu layar penuh ke atas / ke bawah. |
-| `Shift+Up` / `Shift+Down` | Gulir transcript baris demi baris. |
-| `Up` / `Down` | Navigasi riwayat prompt sebelumnya atau item pilihan dalam dialog modal. |
-| `Enter` | Kirim instruksi prompt / konfirmasi pilihan item dialog. |
+| `Tab` / `Shift+Tab` | Instant toggle between **PLAN** and **BUILD** modes. |
+| `Ctrl+C` | Interrupt active model streaming or cancel running tool process. |
+| `Ctrl+L` | Clear transcript display on screen. |
+| `Ctrl+X` | Open quick shortcut menu (**WhichKey**). |
+| `Ctrl+V` | Paste text from clipboard into prompt input. |
+| `Esc` / `q` | Close active modal dialog / cancel current action. |
+| `PageUp` / `PageDown` | Scroll transcript one full page up / down. |
+| `Shift+Up` / `Shift+Down` | Scroll transcript line by line. |
+| `Up` / `Down` | Navigate prompt history or selection items in modal dialogs. |
+| `Enter` | Submit prompt instruction / confirm dialog selection. |
 
-### Menu Cepat WhichKey (`Ctrl+X`)
+### WhichKey Quick Menu (`Ctrl+X`)
 
-Menekan tombol kombinasi `Ctrl+X` membuka menu tindakan cepat:
+Pressing `Ctrl+X` opens the quick action menu:
 
-| Tombol Akses | Aksi / Dialog |
+| Key | Action / Dialog |
 | :---: | :--- |
-| `a` | Buka dialog modal **Agents** |
-| `m` | Buka dialog modal **Models** |
-| `t` | Buka dialog modal **Themes** |
-| `s` | Buka dialog ringkasan **Status** runtime |
-| `p` | Ubah mode kerja ke **PLAN** |
-| `b` | Ubah mode kerja ke **BUILD** |
-| `c` | Bersihkan transcript chat di layar |
+| `a` | Open **Agents** dialog |
+| `m` | Open **Models** dialog |
+| `t` | Open **Themes** dialog |
+| `s` | Open runtime **Status** summary dialog |
+| `p` | Switch mode to **PLAN** |
+| `b` | Switch mode to **BUILD** |
+| `c` | Clear chat transcript on screen |
 
-### Profil Agen Bawaan
+### Built-in Agent Profiles
 
-| Profil Agen | Mode Default | Deskripsi & Fokus Kerja |
+| Agent Profile | Default Mode | Description & Focus |
 | :--- | :---: | :--- |
-| **Plan Agent** | `PLAN` | Penjelajahan repositori aman, pembedahan arsitektur, dan perancangan langkah kerja. |
-| **Build Agent** | `BUILD` | Penyuntingan kode otonom, pemanggilan tool, dan mutasi terverifikasi. |
-| **Review Agent** | `PLAN` | Audit kualitas kode sumber, verifikasi keamanan, dan evaluasi PR. |
-| **Compact Agent** | `BUILD` | Eksekusi berfokus pada efisiensi token dengan respon ringkas dan latensi rendah. |
+| **Plan Agent** | `PLAN` | Safe repository exploration, architectural analysis, and task planning. |
+| **Build Agent** | `BUILD` | Autonomous code editing, tool execution, and verified mutations. |
+| **Review Agent** | `PLAN` | Source code quality audits, security review, and PR evaluations. |
+| **Compact Agent** | `BUILD` | Token-efficient execution with terse responses and low latency. |
 
-### Daftar Tema Tampilan
+### Built-in Themes
 
-Clawcode menyediakan 8 skema palet warna bawaan:
+Clawcode provides 8 built-in color schemes:
 
-| ID Tema | Nama Tema | Karakteristik Visual |
+| Theme ID | Theme Name | Visual Characteristics |
 | :--- | :--- | :--- |
-| `clawcode-dark` | **Clawcode Dark** *(Default)* | Aksen amber & teal kontras pada latar belakang arang pekat. |
-| `crabcode-orange` | **Crabcode Orange** | Gradasi hangat jingga membara dan terumbu karang. |
-| `catppuccin` | **Catppuccin Mocha** | Palet pastel lembut bernuansa mauve, biru laut, dan mocha. |
-| `dracula` | **Dracula** | Kontras tajam ungu nokturnal, aksen merah muda, dan cyan. |
-| `nord` | **Nord** | Palet dingin biru es Arktik, teal, dan malam kutub. |
-| `gruvbox` | **Gruvbox Dark** | Nuansa retro hangat kayu gelap, krem, dan aksen oranye. |
-| `tokyo-night` | **Tokyo Night** | Nuansa malam metropolitan bernada indigo dan biru neon. |
-| `monokai` | **Monokai** | Palet legendaris abu-abu arang dengan aksen hijau, kuning, dan magenta. |
+| `clawcode-dark` | **Clawcode Dark** *(Default)* | High-contrast amber & teal accents over deep charcoal background. |
+| `crabcode-orange` | **Crabcode Orange** | Warm orange ember and coral reef gradients. |
+| `catppuccin` | **Catppuccin Mocha** | Soothing pastel palette of mauve, sapphire, and mocha. |
+| `dracula` | **Dracula** | High-contrast nocturnal purple, pink, and cyan accents. |
+| `nord` | **Nord** | Cool Arctic blue, teal, and polar night palette. |
+| `gruvbox` | **Gruvbox Dark** | Retro warm dark wood, cream, and orange accents. |
+| `tokyo-night` | **Tokyo Night** | Metropolitan night vibes with indigo and neon blue tones. |
+| `monokai` | **Monokai** | Legendary charcoal gray palette with green, yellow, and magenta accents. |
 
 ---
 
-## Spesifikasi 12 Tool Agen AI
+## 12 Built-in AI Agent Tools Specification
 
-Sistem otonom Clawcode menggunakan 12 core tools dengan pembagian hak akses mode yang terisolasi:
+Clawcode's autonomous system provides 12 core tools with isolated access permissions per mode:
 
-| Nama Tool | Mode Akses | Cakupan & Fungsi |
+| Tool Name | Allowed Modes | Scope & Function |
 | :--- | :---: | :--- |
-| `read_file` | PLAN / BUILD | Membaca isi berkas dengan selektor baris presisi (`offset`, `limit`, format inline `path:10-50`). |
-| `list_dir` | PLAN / BUILD | Mendaftar struktur berkas dan sub-direktori dalam workspace. |
-| `glob_search` | PLAN / BUILD | Mencari berkas berdasarkan pola glob (contoh: `**/*.rs`, `src/**/*.json`). |
-| `grep_search` | PLAN / BUILD | Pencarian pola teks cepat (case-insensitive) di seluruh berkas proyek. |
-| `write_file` | BUILD | Membuat berkas baru atau menimpa seluruh isi berkas dari awal. |
-| `edit_file` | BUILD | Modifikasi berkas bedah (*surgical replacement*) melalui pencocokan literal string eksak. |
-| `bash` | BUILD | Mengeksekusi perintah shell pada direktori root workspace dalam batas sandbox. |
-| `websearch` | PLAN / BUILD | Pencarian web real-time melalui DuckDuckGo Instant Answers. |
-| `webfetch` | PLAN / BUILD | Mengambil konten URL web HTTP/HTTPS dan membersihkan tag markup menjadi teks rapi. |
-| `skill` | PLAN / BUILD | Memuat modul panduan domain spesifik dari direktori `skills/`. |
-| `question` | PLAN / BUILD | Mengajukan pertanyaan klarifikasi terstruktur kepada pengguna dengan opsi jawaban. |
-| `update_plan` | PLAN / BUILD | Memperbarui checklist rencana kerja multi-langkah (*pending*, *in_progress*, *completed*). |
+| `read_file` | PLAN / BUILD | Read file contents with precise line selectors (`offset`, `limit`, inline `path:10-50`). |
+| `list_dir` | PLAN / BUILD | List directory and file structure within workspace. |
+| `glob_search` | PLAN / BUILD | Search files matching glob patterns (e.g. `**/*.rs`, `src/**/*.json`). |
+| `grep_search` | PLAN / BUILD | Fast case-insensitive text pattern search across project files. |
+| `write_file` | BUILD | Create new file or overwrite entire file content from scratch. |
+| `edit_file` | BUILD | Surgical file modification via exact literal string replacement. |
+| `bash` | BUILD | Execute shell commands in workspace root within sandbox bounds. |
+| `websearch` | PLAN / BUILD | Real-time web search via DuckDuckGo Instant Answers. |
+| `webfetch` | PLAN / BUILD | Fetch web content over HTTP/HTTPS and strip markup tags to clean text. |
+| `skill` | PLAN / BUILD | Load domain-specific instruction module from `skills/` directory. |
+| `question` | PLAN / BUILD | Prompt user with structured clarifying questions and predefined options. |
+| `update_plan` | PLAN / BUILD | Update multi-step execution plan checklist (*pending*, *in_progress*, *completed*). |
 
 ---
 
-## Alur Transaksional Mode BUILD
+## BUILD Mode Transactional Workflow
 
-Setiap operasi mutasi pada mode **BUILD** diproses melalui urutan verifikasi berkas atomik:
+Every mutation in **BUILD** mode passes through an atomic verification pipeline:
 
 ```text
-Permintaan Mutasi ──► Validate ──► Snapshot ──► Diff Review ──► Policy Check ──► Apply / Revert
+Mutation Request ──► Validate ──► Snapshot ──► Diff Review ──► Policy Check ──► Apply / Revert
 ```
 
-1. **Validate**: Memverifikasi jalur kanonikal target berkas guna mencegah celah *directory traversal* dan tautan simbolik (*symlink*) di luar direktori kerja.
-2. **Snapshot**: Mengambil cadangan kondisi berkas saat ini ke dalam basis data SQLite bersama hash checksum SHA-256 untuk mendukung pemulihan (*undo/redo*).
-3. **Diff Review**: Menghitung selisih modifikasi baris demi baris sebelum perubahan diterapkan.
-4. **Policy Check**: Memeriksa batasan kebijakan keamanan. Operasi destruktif atau mutasi di luar direktori kerja mewajibkan konfirmasi eksplisit dari pengguna.
-5. **Apply / Revert**: Menulis perubahan menggunakan berkas penampung sementara (*sibling temp file*) yang dipindahkan secara atomik. Jika terjadi kesalahan, pemulihan otomatis langsung dieksekusi.
+1. **Validate**: Verifies canonical target file path to prevent directory traversal and symlink escapes outside the workspace.
+2. **Snapshot**: Saves current file state into SQLite database alongside SHA-256 checksum hash to support undo/redo rollbacks.
+3. **Diff Review**: Computes line-by-line modification delta before applying changes.
+4. **Policy Check**: Evaluates security policies. Destructive operations or mutations outside the workspace require explicit user confirmation.
+5. **Apply / Revert**: Writes modifications using a sibling temporary file and replaces atomically. If an error occurs, automatic rollback triggers immediately.
 
 ### Side-by-Side Visual Diff
 
-Saat tool `edit_file` dieksekusi, transcript menampilkan visualisasi diff berdampingan dua kolom:
+When `edit_file` runs, the transcript displays a two-column split-view diff:
 
 ```text
 • Edit src/main.rs (+1 -1)
@@ -353,30 +354,30 @@ Saat tool `edit_file` dieksekusi, transcript menampilkan visualisasi diff berdam
 
 ---
 
-## Pengujian Mutu & Benchmark
+## Quality Assurance & Benchmarks
 
-Seluruh repositori diverifikasi dengan standardisasi kualitas yang ketat:
+The entire repository is validated against strict quality standards:
 
 ```bash
-# 1. Pengecekan pemformatan kode baku
+# 1. Check standard code formatting
 cargo fmt --all -- --check
 
-# 2. Linter statis (strict mode, zero warnings allowed)
+# 2. Static linting (strict mode, zero warnings allowed)
 cargo clippy --all-targets --all-features --locked -- -D warnings
 
-# 3. Eksekusi seluruh rangkaian unit & integration tests
+# 3. Run full unit and integration test suite
 cargo test --all-targets --all-features --locked
 
-# 4. Tolok ukur benchmark performa (render latency & first-frame throughput)
+# 4. Run performance benchmarks (render latency & first-frame throughput)
 cargo bench --bench performance
 cargo bench --bench first_frame
 ```
 
 ---
 
-## Packaging & Distribusi Rilis
+## Packaging & Release Distribution
 
-Skrip build otomatis menyusun artefak biner rilis dan menghasilkan berkas checksum SHA-256:
+Automated build scripts compile release binary artifacts and generate SHA-256 checksum files:
 
 - **Windows (PowerShell)**:
   ```powershell
@@ -387,20 +388,20 @@ Skrip build otomatis menyusun artefak biner rilis dan menghasilkan berkas checks
   sh scripts/package.sh
   ```
 
-Dokumentasi lengkap mengenai prosedur pembangunan yang dapat direproduksi dijelaskan pada [`docs/reproducible-builds.md`](docs/reproducible-builds.md).
+Complete documentation on reproducible build procedures is available in [`docs/reproducible-builds.md`](docs/reproducible-builds.md).
 
 ---
 
-## Batasan Arsitektur & Non-Goals
+## Architecture Scope & Non-Goals
 
-Clawcode didesain secara spesifik sebagai biner terminal mandiri, portabel, dan instan. Hal-hal berikut sengaja berada di luar cakupan (*non-goals*):
-- Daemon background process terpisah.
-- Sistem plugin runtime pihak ketiga.
-- Antarmuka web client atau pembungkus desktop GUI.
-- Driver adapter khusus untuk endpoint yang sudah memenuhi spesifikasi protokol OpenAI.
+Clawcode is intentionally designed as a standalone, portable, instant terminal binary. The following are deliberate non-goals:
+- Separate background daemon processes.
+- Third-party runtime plugin systems.
+- Web client interfaces or desktop GUI wrappers.
+- Custom adapter drivers for endpoints already compliant with the OpenAI protocol specification.
 
 ---
 
-## Lisensi
+## License
 
-Didistribusikan di bawah ketentuan lisensi ganda [MIT](LICENSE) atau Apache-2.0. Rincian selengkapnya dapat ditemukan pada berkas `LICENSE`.
+Distributed under dual [MIT](LICENSE) or Apache-2.0 license terms. See `LICENSE` for details.

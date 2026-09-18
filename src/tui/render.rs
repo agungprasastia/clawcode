@@ -39,7 +39,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     let workspace_area = main_chunks[0];
     let status_bar_area = main_chunks[1];
 
-    if app.transcript().is_empty() {
+    if app.transcript().is_empty() && app.stream_parts().is_empty() && app.tool_rows().is_empty() {
         render_home(frame, workspace_area, app, &theme, mode_color);
     } else {
         render_chat(frame, workspace_area, app, &theme, mode_color);

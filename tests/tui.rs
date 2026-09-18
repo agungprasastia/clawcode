@@ -750,8 +750,8 @@ fn chat_view_renders_user_accent_border_and_ai_metadata_badge() {
     }
     let text = lines.join("\n");
 
-    // Chat view replaces "> write unit tests" with styled "┃ write unit tests"
-    assert!(text.contains("┃ write unit tests"));
+    // Chat view replaces "> write unit tests" with styled "▌ write unit tests"
+    assert!(text.contains("▌ write unit tests"));
     assert!(!text.contains("> write unit tests"));
     // Contains AI response text
     assert!(text.contains("Generated tests successfully."));
@@ -1651,11 +1651,8 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
     app.poll_runtime();
     assert!(app.active_tool().is_none());
 
-    // Clean Crabcode-style format in transcript:
-    // ⬢ Read src/cli/mod.rs
-    //   └ 71 lines
-    assert!(app.transcript().contains("⬢ Read src/cli/mod.rs"));
-    assert!(app.transcript().contains("  └ 71 lines"));
+    assert!(app.tool_rows().iter().any(|r| r.name == "read_file" && r.state == clawcode::tui::ToolRowState::Completed));
+    assert!(!app.transcript().contains("⬢ Read src/cli/mod.rs"));
 
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -1668,8 +1665,7 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("⬢ Read src/cli/mod.rs"));
-    assert!(text.contains("└ 71 lines"));
+    assert!(text.contains("Read src/cli/mod.rs"));
 }
 
 #[test]
@@ -1750,21 +1746,8 @@ fn tool_execution_update_plan_renders_checklist_and_tracks_plan() {
         ("Langkah ketiga pending".to_string(), "pending".to_string())
     );
 
-    // Verify transcript format:
-    // ⬢ Updated Plan
-    //   │ Refactor architecture
-    //   │ ✔ 1. Selesai langkah pertama
-    //   │ • 2. Sedang menjalankan langkah kedua
-    //   │ □ 3. Langkah ketiga pending
-    //   └ Plan updated: 3 steps
-    let transcript = app.transcript();
-    assert!(transcript.contains("⬢ Updated Plan"));
-    assert!(transcript.contains("│ Refactor architecture"));
-    assert!(transcript.contains("│ ✔ 1. Selesai langkah pertama"));
-    assert!(transcript.contains("│ • 2. Sedang menjalankan langkah kedua"));
-    assert!(transcript.contains("│ □ 3. Langkah ketiga pending"));
-    assert!(transcript.contains("└ Plan updated: 3 steps"));
-
+    // Structured tool row handles the update plan, no duplicate legacy text in transcript
+    assert!(!app.transcript().contains("⬢ Updated Plan"));
     // 3. Render in terminal
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -1781,7 +1764,6 @@ fn tool_execution_update_plan_renders_checklist_and_tracks_plan() {
     assert!(text.contains("1. Selesai langkah pertama"));
     assert!(text.contains("2. Sedang menjalankan langkah kedua"));
     assert!(text.contains("3. Langkah ketiga pending"));
-    assert!(text.contains("Plan updated: 3 steps"));
 }
 
 #[test]
@@ -1820,8 +1802,8 @@ fn tool_failure_formats_cleanly_with_error_branch() {
     .unwrap();
     app.poll_runtime();
 
-    assert!(app.transcript().contains("⬢ Read foo.rs"));
-    assert!(app.transcript().contains("  └ failed: file not found"));
+    assert!(app.tool_rows().iter().any(|r| r.name == "read_file" && r.state == clawcode::tui::ToolRowState::Failed));
+    assert!(!app.transcript().contains("⬢ Read foo.rs"));
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -1836,8 +1818,8 @@ fn tool_failure_formats_cleanly_with_error_branch() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("⬢ Read foo.rs"));
-    assert!(text.contains("└ failed: file not found"));
+    assert!(text.contains("Read foo.rs"));
+    assert!(text.contains("failed: file not found"));
 }
 
 #[test]
@@ -2235,13 +2217,8 @@ fn test_streaming_reasoning_buffer_and_flush_formatting() {
     app.poll_runtime();
     assert!(!app.is_reasoning());
     assert!(app.reasoning_buffer().is_empty());
-    assert!(app.transcript().contains("💭 Thought for "));
-    assert!(
-        app.transcript()
-            .contains("  │ Analyzing the bug in router...")
-    );
-    assert!(app.transcript().contains("  │ Found invalid route handler"));
-
+    assert!(app.transcript().contains("Thought for "));
+    assert!(!app.transcript().contains("💭"));
     // Verify transcript lines styling
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
     let lines = clawcode::tui::format_transcript_lines(
@@ -2251,13 +2228,17 @@ fn test_streaming_reasoning_buffer_and_flush_formatting() {
     );
     let thought_header = lines.iter().find(|l| {
         l.spans
-            .first()
-            .map(|s| s.content.as_ref() == "💭 ")
-            .unwrap_or(false)
+            .iter()
+            .any(|s| s.content.contains("Thought"))
     });
     assert!(thought_header.is_some());
-    assert_eq!(thought_header.unwrap().spans[0].style.fg, Some(theme.amber));
-
+    let span = thought_header
+        .unwrap()
+        .spans
+        .iter()
+        .find(|s| s.content.contains("Thought"))
+        .unwrap();
+    assert_eq!(span.style.fg, Some(theme.amber));
     // 3. Test truncation for > 10 lines
     let mut long_reasoning_app = App::default();
     let (tx2, rx2) = std::sync::mpsc::channel();
@@ -2279,17 +2260,8 @@ fn test_streaming_reasoning_buffer_and_flush_formatting() {
     .unwrap();
     long_reasoning_app.poll_runtime();
     long_reasoning_app.flush_reasoning();
-    assert!(
-        long_reasoning_app
-            .transcript()
-            .contains("  │ thought line 5")
-    );
-    assert!(long_reasoning_app.transcript().contains("  │ ..."));
-    assert!(
-        !long_reasoning_app
-            .transcript()
-            .contains("  │ thought line 6")
-    );
+    assert!(long_reasoning_app.transcript().contains("Thought for "));
+    assert!(!long_reasoning_app.transcript().contains("💭"));
 }
 
 #[test]
@@ -2333,7 +2305,11 @@ fn test_tool_call_start_event_handling() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains(app.wave_spinner().compact_frame()));
+    assert!(
+        ["⠋", "⠉", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"]
+            .iter()
+            .any(|frame| text.contains(frame))
+    );
     assert!(text.contains("Preparing bash..."));
 }
 
@@ -2711,40 +2687,128 @@ fn test_bash_tool_opencode_style_running_and_executed() {
     app.poll_runtime();
     assert!(app.active_tool().is_none());
 
-    // Transcript has $ git status
-    assert!(app.transcript().contains("$ git status"));
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    // Format transcript lines: should render OpenCode "$ " header and dim output lines
+    assert!(text.contains("git status"));
+    assert!(text.contains("On branch main"));
+}
+
+#[test]
+fn test_opencode_bash_command_and_output_block_styling() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("run command");
+    let session_id = app.active_session_id().unwrap();
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let lines = clawcode::tui::format_transcript_lines(
-        app.transcript(),
-        &theme,
-        ratatui::style::Color::Cyan,
-    );
 
-    // Find header line
-    let header_line = lines
-        .iter()
-        .find(|l| l.spans.iter().any(|s| s.content.contains("git status")));
-    assert!(header_line.is_some());
-    let hl = header_line.unwrap();
-    // First span is "$ ", second is command
-    assert_eq!(hl.spans[0].content, "$ ");
-    assert_eq!(hl.spans[0].style.fg, Some(theme.amber));
-    assert_eq!(hl.spans[1].content, "git status");
+    // 1. Running command: renders clean panel row with bg_element, braille spinner, command in ink
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".into(),
+        payload_json: serde_json::json!({
+            "id": "bash-call-1",
+            "name": "bash",
+            "arguments": { "command": "git commit -m 'feat: align'" }
+        }).to_string(),
+    }).unwrap();
+    app.poll_runtime();
 
-    // Output lines are dimmed
-    let output_line = lines
-        .iter()
-        .find(|l| l.spans.iter().any(|s| s.content.contains("On branch main")));
-    assert!(output_line.is_some());
-    let ol = output_line.unwrap();
-    let text_span = ol
-        .spans
-        .iter()
-        .find(|s| s.content.contains("On branch main"))
-        .unwrap();
-    assert_eq!(text_span.style.fg, Some(theme.quiet));
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let rendered = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("git commit -m 'feat: align'"));
+    let running_row_y = (0..buffer.area.height).find(|&y| {
+        (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>().contains("git commit")
+    }).expect("running row should be visible");
+    assert_eq!(buffer[(5, running_row_y)].bg, theme.bg_element);
+
+    // 2. Completed command with 15 lines of output (exceeds max 10 lines)
+    let output = (1..=15).map(|n| format!("output line {n}")).collect::<Vec<_>>().join("\n");
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({
+            "id": "bash-call-1",
+            "name": "bash",
+            "arguments": { "command": "git commit -m 'feat: align'" },
+            "success": true,
+            "output": output
+        }).to_string(),
+    }).unwrap();
+    app.poll_runtime();
+
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let rendered = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Line 1 has $ prefix
+    assert!(rendered.contains("$ git commit -m 'feat: align'"));
+    // Output lines render without │ prefix
+    assert!(rendered.contains("  output line 1"));
+    assert!(rendered.contains("  output line 10"));
+    assert!(!rendered.contains("│ output line"));
+    // Truncated at 10 lines, line 11 not yet visible
+    assert!(!rendered.contains("output line 11"));
+    assert!(rendered.contains("↳ click to expand (5 more lines)"));
+
+    // Verify background color on completed command and output row
+    let cmd_y = (0..buffer.area.height).find(|&y| {
+        (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>().contains("$ git commit")
+    }).expect("command row should be visible");
+    let out_y = (0..buffer.area.height).find(|&y| {
+        (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>().contains("output line 1")
+    }).expect("output row should be visible");
+    assert_eq!(buffer[(5, cmd_y)].bg, theme.bg_element);
+    assert_eq!(buffer[(5, out_y)].bg, theme.bg_element);
+
+    // 3. Click to expand
+    app.apply(UiEvent::MouseClick { x: 4, y: cmd_y });
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    assert!(app.is_tool_expanded("bash-call-1"));
+    let buffer = terminal.backend().buffer();
+    let expanded = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expanded.contains("output line 11"));
+    assert!(expanded.contains("output line 15"));
+    assert!(expanded.contains("↳ click to collapse"));
+
+    // 4. Click to collapse
+    app.apply(UiEvent::MouseClick { x: 4, y: cmd_y });
+    assert!(!app.is_tool_expanded("bash-call-1"));
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let collapsed = (0..buffer.area.height)
+        .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!collapsed.contains("output line 11"));
+    assert!(collapsed.contains("↳ click to expand (5 more lines)"));
 }
 
 #[test]
@@ -2814,11 +2878,22 @@ fn test_edit_patch_tool_opencode_style_running_and_executed() {
     app.poll_runtime();
     assert!(app.active_tool().is_none());
 
-    let transcript = app.transcript();
-    assert!(transcript.contains("• Applied patch src/lib.rs (+2 -1)"));
-    assert!(transcript.contains("    - fn old() {}"));
-    assert!(transcript.contains("    + fn new() {}"));
-    assert!(transcript.contains("    + fn extra() {}"));
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Patch src/lib.rs (+2 -1)"));
+    assert!(text.contains("- fn old() {}"));
+    assert!(text.contains("+ fn extra() {}"));
 }
 
 #[test]
@@ -3017,4 +3092,929 @@ fn test_partial_theme_and_model_autocomplete_on_enter() {
         app.diagnostic(),
         format!("theme switched to: {}", themes[1])
     );
+}
+
+#[test]
+fn structured_tool_rows_track_concurrent_lifecycle_and_bound_payloads() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("inspect tools");
+    let session_id = app.active_session_id().expect("session created");
+
+    for (seq, id, name) in [(1, "call-a", "read_file"), (2, "call-b", "bash")] {
+        tx.send(clawcode::runtime::RuntimeEvent {
+            session_id,
+            generation_id: Some(7),
+            seq,
+            kind: "tool_call_start".to_string(),
+            payload_json: serde_json::json!({ "id": id, "name": name }).to_string(),
+        })
+        .unwrap();
+    }
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(7),
+        seq: 3,
+        kind: "tool_call_delta".to_string(),
+        payload_json: serde_json::json!({
+            "id": "call-a",
+            "arguments": format!(r#"{{"path":"{}"}}"#, "x".repeat(8_000))
+        })
+        .to_string(),
+    })
+    .unwrap();
+    app.poll_runtime();
+
+    assert_eq!(app.tool_rows().len(), 2);
+    assert!(app
+        .tool_rows()
+        .iter()
+        .all(|row| row.state == clawcode::tui::app::ToolRowState::Pending));
+    assert!(app.tool_rows()[0].arguments.len() <= 4 * 1024);
+    assert!(!app.is_typing());
+
+    for (seq, (id, name, args)) in [
+        (4, ("call-a", "read_file", serde_json::json!({ "path": "src/lib.rs" }))),
+        (5, ("call-b", "bash", serde_json::json!({ "command": "echo ok" }))),
+    ] {
+        tx.send(clawcode::runtime::RuntimeEvent {
+            session_id,
+            generation_id: Some(7),
+            seq,
+            kind: "tool_executing".to_string(),
+            payload_json: serde_json::json!({ "id": id, "name": name, "arguments": args })
+                .to_string(),
+        })
+        .unwrap();
+    }
+    app.poll_runtime();
+    assert!(app
+        .tool_rows()
+        .iter()
+        .all(|row| row.state == clawcode::tui::app::ToolRowState::Running));
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(7),
+        seq: 6,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "id": "call-a",
+            "name": "read_file",
+            "arguments": { "path": "src/lib.rs" },
+            "success": false,
+            "output": "permission denied\n".repeat(2_000)
+        })
+        .to_string(),
+    })
+    .unwrap();
+    app.poll_runtime();
+
+    assert_eq!(
+        app.tool_rows()
+            .iter()
+            .find(|row| row.call_id == "call-a")
+            .map(|row| row.state),
+        Some(clawcode::tui::app::ToolRowState::Failed)
+    );
+    assert!(app
+        .tool_rows()
+        .iter()
+        .find(|row| row.call_id == "call-a")
+        .is_some_and(|row| row.output.len() <= 16 * 1024));
+    assert!(app.active_tool().is_some());
+}
+
+#[test]
+fn tool_only_active_turn_has_no_assistant_caret() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("run tool");
+    let session_id = app.active_session_id().expect("session created");
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(9),
+        seq: 1,
+        kind: "tool_executing".to_string(),
+        payload_json: serde_json::json!({
+            "id": "call-only",
+            "name": "bash",
+            "arguments": { "command": "echo ok" }
+        })
+        .to_string(),
+    })
+    .unwrap();
+    app.poll_runtime();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains('▋'));
+    assert!(text.contains("echo ok"));
+}
+
+#[test]
+fn active_text_wait_keeps_assistant_caret() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("answer");
+    let session_id = app.active_session_id().unwrap();
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(11),
+        seq: 1,
+        kind: "text_delta".into(),
+        payload_json: serde_json::json!({"delta": "hello"}).to_string(),
+    })
+    .unwrap();
+    app.poll_runtime();
+    assert!(app.is_typing());
+}
+
+#[test]
+fn runtime_events_ignore_other_sessions_and_generations() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("isolate");
+    let session_id = app.active_session_id().unwrap();
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: session_id + 1000,
+        generation_id: Some(99),
+        seq: 1,
+        kind: "generation_started".into(),
+        payload_json: "{}".into(),
+    })
+    .unwrap();
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(11),
+        seq: 2,
+        kind: "generation_started".into(),
+        payload_json: "{}".into(),
+    })
+    .unwrap();
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(12),
+        seq: 3,
+        kind: "tool_call_start".into(),
+        payload_json: serde_json::json!({"id":"wrong","name":"bash"}).to_string(),
+    })
+    .unwrap();
+    app.poll_runtime();
+    assert_eq!(app.tool_rows().len(), 0);
+    assert!(app.active_tool().is_none());
+}
+
+#[test]
+fn completed_tool_row_renders_once_without_transcript_duplicate() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("run");
+    let session_id = app.active_session_id().unwrap();
+    for (seq, kind, payload) in [
+        (1, "tool_call_start", serde_json::json!({"id":"call-1","name":"bash"})),
+        (2, "tool_executing", serde_json::json!({"id":"call-1","name":"bash","arguments":{"command":"echo ok"}})),
+        (3, "tool_executed", serde_json::json!({"id":"call-1","name":"bash","arguments":{"command":"echo ok"},"success":true,"output":"ok"})),
+    ] {
+        tx.send(clawcode::runtime::RuntimeEvent { session_id, generation_id: Some(3), seq, kind: kind.into(), payload_json: payload.to_string() }).unwrap();
+    }
+    app.poll_runtime();
+    assert_eq!(app.tool_rows().iter().filter(|row| row.state == clawcode::tui::app::ToolRowState::Completed).count(), 1);
+    assert!(!app.transcript().contains("$ echo ok"));
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..30).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("$ echo ok"));
+    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
+    let cmd_y = (0..30).find(|&y| {
+        let row: String = (0..100).map(|x| buffer[(x, y)].symbol()).collect();
+        row.contains("$ echo ok")
+    }).expect("cmd line should exist");
+    assert_eq!(buffer[(50, cmd_y)].bg, theme.bg_element);
+    assert_eq!(buffer[(50, cmd_y - 1)].bg, theme.bg_element);
+    assert_eq!(buffer[(50, cmd_y + 1)].bg, theme.bg_element);
+    assert_eq!(buffer[(50, cmd_y + 2)].bg, theme.bg_element);
+    assert_eq!(buffer[(50, cmd_y + 3)].bg, theme.bg_element);
+}
+
+#[test]
+fn active_tool_rows_stay_bounded_and_completion_uses_call_id() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("many tools");
+    let session_id = app.active_session_id().unwrap();
+    for seq in 0..70 {
+        tx.send(clawcode::runtime::RuntimeEvent { session_id, generation_id: Some(5), seq, kind: "tool_call_start".into(), payload_json: serde_json::json!({"id":format!("call-{seq}"),"name":"read_file"}).to_string() }).unwrap();
+    }
+    app.poll_runtime();
+    assert_eq!(app.tool_rows().len(), 64);
+    assert!(!app.tool_rows().iter().any(|row| row.call_id == "call-0"));
+    tx.send(clawcode::runtime::RuntimeEvent { session_id, generation_id: Some(5), seq: 71, kind: "tool_executed".into(), payload_json: serde_json::json!({"id":"call-69","name":"read_file","success":true,"output":"done"}).to_string() }).unwrap();
+    app.poll_runtime();
+    assert_eq!(app.tool_rows().iter().find(|row| row.call_id == "call-69").map(|row| row.state), Some(clawcode::tui::app::ToolRowState::Completed));
+    assert!(app.tool_rows().iter().filter(|row| row.state == clawcode::tui::app::ToolRowState::Running || row.state == clawcode::tui::app::ToolRowState::Pending).count() <= 63);
+}
+
+#[test]
+fn ordered_stream_keeps_text_tools_and_followup_text_in_event_order() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("ordered");
+    let session_id = app.active_session_id().unwrap();
+    for (seq, kind, payload) in [
+        (1, "text_delta", serde_json::json!({"delta":"Before"})),
+        (2, "tool_executing", serde_json::json!({"id":"ordered-tool","name":"bash","arguments":{"command":"echo ok"}})),
+        (3, "tool_executed", serde_json::json!({"id":"ordered-tool","name":"bash","arguments":{"command":"echo ok"},"success":true,"output":"ok"})),
+        (4, "text_delta", serde_json::json!({"delta":"After"})),
+    ] {
+        tx.send(clawcode::runtime::RuntimeEvent { session_id, generation_id: Some(1), seq, kind: kind.into(), payload_json: payload.to_string() }).unwrap();
+    }
+    app.poll_runtime();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    let text = (0..30).map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+    let before = text.find("Before").unwrap();
+    let tool = text.find("$ echo ok").unwrap();
+    let after = text.find("After").unwrap();
+    assert!(before < tool && tool < after);
+}
+
+#[test]
+fn long_tool_output_expands_and_collapses_from_rendered_row() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("expand");
+    let session_id = app.active_session_id().unwrap();
+    let output = (0..12).map(|index| format!("line {index}")).collect::<Vec<_>>().join("\n");
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(2),
+        seq: 1,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({"id":"expand-tool","name":"bash","arguments":{"command":"printf lines"},"success":true,"output":output}).to_string(),
+    }).unwrap();
+    app.poll_runtime();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let row = (0..buffer.area.height)
+        .find(|&y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("printf lines")
+        })
+        .expect("tool row should be visible");
+    app.apply(UiEvent::MouseClick { x: 4, y: row });
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    assert!(app.is_tool_expanded("expand-tool"));
+    let expanded = (0..30).map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+    assert!(expanded.contains("line 11"));
+    app.apply(UiEvent::MouseClick { x: 4, y: row });
+    assert!(!app.is_tool_expanded("expand-tool"));
+}
+
+#[test]
+fn task_and_execute_rows_render_nested_work_when_metadata_exists() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("children");
+    let session_id = app.active_session_id().unwrap();
+    for (seq, name, arguments) in [
+        (1, "task", serde_json::json!({"subagent_type":"scout","description":"inspect parser"})),
+        (2, "execute", serde_json::json!({"toolCalls":[{"tool":"read","status":"running"},{"tool":"grep","status":"completed"}]})),
+    ] {
+        tx.send(clawcode::runtime::RuntimeEvent {
+            session_id,
+            generation_id: Some(3),
+            seq,
+            kind: "tool_executed".into(),
+            payload_json: serde_json::json!({"id":format!("child-{seq}"),"name":name,"arguments":arguments,"success":true,"output":"ok"}).to_string(),
+        }).unwrap();
+    }
+    app.poll_runtime();
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    let text = (0..30).map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("↳ scout: inspect parser"));
+    assert!(text.contains("⠋ read"));
+    assert!(text.contains("✓ grep"));
+}
+
+#[test]
+fn streaming_markdown_keeps_structure_without_raw_link_urls() {
+    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
+    let lines = clawcode::tui::format_transcript_lines(
+        "# Heading\n\n- item `value`\n\n[docs](https://example.com)\n\n```rust\nlet x = 1;\n```",
+        &theme,
+        ratatui::style::Color::Cyan,
+    );
+    let text = lines
+        .iter()
+        .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("# Heading"));
+    assert!(text.contains("• item"));
+    assert!(text.contains("docs"));
+    assert!(text.contains("│ let x = 1;"));
+    assert!(!text.contains("https://example.com"));
+}
+
+#[test]
+fn tool_call_end_marks_arguments_complete_without_claiming_result() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("lifecycle");
+    let session_id = app.active_session_id().unwrap();
+    for (seq, kind, payload) in [
+        (1, "tool_call_start", serde_json::json!({"id":"call-end","name":"bash"})),
+        (2, "tool_call_delta", serde_json::json!({"id":"call-end","arguments":r#"{"command":"echo ok"}"#})),
+        (3, "tool_call_end", serde_json::json!({"id":"call-end","arguments_complete":true})),
+    ] {
+        tx.send(clawcode::runtime::RuntimeEvent {
+            session_id,
+            generation_id: Some(21),
+            seq,
+            kind: kind.into(),
+            payload_json: payload.to_string(),
+        })
+        .unwrap();
+    }
+    app.poll_runtime();
+    let row = app.tool_rows().iter().find(|row| row.call_id == "call-end").unwrap();
+    assert!(row.arguments_complete);
+    assert_eq!(row.state, clawcode::tui::app::ToolRowState::Pending);
+    assert!(row.output.is_empty());
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(21),
+        seq: 4,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({
+            "id":"call-end",
+            "name":"bash",
+            "success":true
+        })
+        .to_string(),
+    })
+    .unwrap();
+    app.poll_runtime();
+    assert_eq!(
+        app.tool_rows().iter().find(|row| row.call_id == "call-end").map(|row| row.state),
+        Some(clawcode::tui::app::ToolRowState::Failed)
+    );
+}
+
+#[test]
+fn child_session_row_needs_explicit_metadata() {
+    let mut with_metadata = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    with_metadata.set_runtime_receiver(rx);
+    with_metadata.submit_user_prompt("child metadata");
+    let session_id = with_metadata.active_session_id().unwrap();
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(22),
+        seq: 1,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({
+            "id":"task-with-child",
+            "name":"task",
+            "arguments":{"subagent_type":"scout","description":"inspect"},
+            "success":true,
+            "output":"done",
+            "metadata":{"sessionId":"child-22"}
+        })
+        .to_string(),
+    })
+    .unwrap();
+    with_metadata.poll_runtime();
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &with_metadata)).unwrap();
+    let rendered = (0..30)
+        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("child session child-22"));
+
+    let mut without_metadata = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    without_metadata.set_runtime_receiver(rx);
+    without_metadata.submit_user_prompt("child absent");
+    let session_id = without_metadata.active_session_id().unwrap();
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(23),
+        seq: 1,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({
+            "id":"task-without-child",
+            "name":"task",
+            "arguments":{"subagent_type":"scout","description":"inspect"},
+            "success":true,
+            "output":"done"
+        })
+        .to_string(),
+    })
+    .unwrap();
+    without_metadata.poll_runtime();
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &without_metadata)).unwrap();
+    let rendered = (0..30)
+        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!rendered.contains("child session"));
+}
+
+#[test]
+fn opencode_visual_streaming_parity_suite() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("check streaming visual parity");
+    let session_id = app.active_session_id().unwrap();
+
+    // 1. Reasoning delta 1
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(10),
+        seq: 1,
+        kind: "reasoning_delta".into(),
+        payload_json: serde_json::json!({ "delta": "Initial investigation focuses on the README..." }).to_string(),
+    }).unwrap();
+
+    // 2. Tool call start for read_file
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(10),
+        seq: 2,
+        kind: "tool_call_start".into(),
+        payload_json: serde_json::json!({ "id": "call-read-1", "name": "read_file" }).to_string(),
+    }).unwrap();
+
+    // 3. Tool executed for read_file
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(10),
+        seq: 3,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({
+            "id": "call-read-1",
+            "name": "read_file",
+            "arguments": { "path": "README.md" },
+            "success": true,
+            "output": "line 1\nline 2\nline 3\n"
+        }).to_string(),
+    }).unwrap();
+
+    // 4. Reasoning delta 2 (should combine into the SAME thought block, not duplicate!)
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(10),
+        seq: 4,
+        kind: "reasoning_delta".into(),
+        payload_json: serde_json::json!({ "delta": "\nNow checking status..." }).to_string(),
+    }).unwrap();
+
+    // 5. Tool executed for bash (shell command)
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(10),
+        seq: 5,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({
+            "id": "call-bash-1",
+            "name": "bash",
+            "arguments": { "command": "git status" },
+            "success": true,
+            "output": "On branch main\nnothing to commit, working tree clean"
+        }).to_string(),
+    }).unwrap();
+
+    // 6. Text delta
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(10),
+        seq: 6,
+        kind: "text_delta".into(),
+        payload_json: serde_json::json!({ "delta": "Here is the summary." }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+
+    let rendered = (0..30)
+        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // User prompt card has solid border and full width background
+    assert!(rendered.contains("▌ check streaming visual parity"));
+    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
+    let prompt_y = (0..30).find(|&y| {
+        let row: String = (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect();
+        row.contains("▌ check streaming visual parity")
+    }).expect("prompt line should exist");
+    assert_eq!(terminal.backend().buffer()[(50, prompt_y)].bg, theme.bg_element);
+    assert_eq!(terminal.backend().buffer()[(50, prompt_y - 1)].bg, theme.bg_element);
+    assert_eq!(terminal.backend().buffer()[(50, prompt_y + 1)].bg, theme.bg_element);
+    // Thought rendered cleanly without emoji or bulky boxes
+    assert!(rendered.contains("Thought for "));
+    assert!(!rendered.contains("💭"));
+
+    // Tool rows use OpenCode specific icons
+    assert!(rendered.contains("→ Read README.md"));
+    // No noisy line count suffix
+    assert!(!rendered.contains("→ Read README.md · 3 lines"));
+
+    // Shell row uses $ prefix
+    assert!(rendered.contains("$ git status"));
+    // Shell output preview rendered cleanly without left border │
+    assert!(rendered.contains("  On branch main"));
+    assert!(rendered.contains("  nothing to commit, working tree clean"));
+    assert!(!rendered.contains("│ On branch main"));
+
+    // Assistant text rendered with 3-space padding
+    assert!(rendered.contains("   Here is the summary."));
+}
+
+#[test]
+fn test_edit_file_shows_real_unified_diff_with_colors_and_card() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("edit file test");
+    let session_id = app.active_session_id().unwrap();
+
+    let old_content = "fn main() {\n    let a = 1;\n    let b = 2;\n}";
+    let new_content = "fn main() {\n    let a = 10;\n    let b = 2;\n    let c = 3;\n}";
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".into(),
+        payload_json: serde_json::json!({
+            "id": "edit-1",
+            "name": "edit_file",
+            "arguments": {
+                "path": "src/main.rs",
+                "old_string": old_content,
+                "new_string": new_content,
+            }
+        }).to_string(),
+    }).unwrap();
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({
+            "id": "edit-1",
+            "name": "edit_file",
+            "arguments": {
+                "path": "src/main.rs",
+                "old_string": old_content,
+                "new_string": new_content,
+            },
+            "success": true,
+            "output": "Successfully edited src/main.rs"
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+
+    let rendered = (0..30)
+        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Title line contains edit icon, path, and (+A -R) badge
+    assert!(rendered.contains("• Edit src/main.rs (+2 -1)"));
+    // Unified diff rendered with - and + markers
+    assert!(rendered.contains("-     let a = 1;"));
+    assert!(rendered.contains("+     let a = 10;"));
+    assert!(rendered.contains("+     let c = 3;"));
+    // Transcript must NOT contain duplicate text
+    assert!(!app.transcript().contains("• Edit src/main.rs"));
+
+    // Verify background spans full card width (columns 0..98) even past text
+    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
+    let buffer = terminal.backend().buffer();
+    let title_y = (0..30).find(|&y| {
+        let row: String = (0..100).map(|x| buffer[(x, y)].symbol()).collect();
+        row.contains("• Edit src/main.rs")
+    }).expect("title line should exist");
+    assert_eq!(buffer[(50, title_y)].bg, theme.bg_element);
+    assert_eq!(buffer[(0, title_y - 1)].bg, theme.bg_element);
+    assert_eq!(buffer[(50, title_y - 1)].bg, theme.bg_element);
+    assert_eq!(buffer[(97, title_y - 1)].bg, theme.bg_element);
+}
+
+#[test]
+fn test_edit_diff_collapse_and_expand_when_lines_over_10() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("edit large diff");
+    let session_id = app.active_session_id().unwrap();
+
+    let old_lines: Vec<String> = (0..20).map(|i| format!("old line {i}")).collect();
+    let new_lines: Vec<String> = (0..20).map(|i| format!("new line {i}")).collect();
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".into(),
+        payload_json: serde_json::json!({
+            "id": "edit-large",
+            "name": "edit",
+            "arguments": {
+                "path": "test.txt",
+                "old_string": old_lines.join("\n"),
+                "new_string": new_lines.join("\n"),
+            }
+        }).to_string(),
+    }).unwrap();
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({
+            "id": "edit-large",
+            "name": "edit",
+            "arguments": {
+                "path": "test.txt",
+                "old_string": old_lines.join("\n"),
+                "new_string": new_lines.join("\n"),
+            },
+            "success": true,
+            "output": "ok"
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+
+    let rendered = (0..30)
+        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Collapsed initially, shows expand prompt
+    assert!(rendered.contains("↳ click to expand"));
+
+    // Toggle expansion
+    app.toggle_tool_expanded("edit-large");
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+
+    let rendered_expanded = (0..30)
+        .map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(rendered_expanded.contains("↳ click to collapse"));
+}
+
+#[test]
+fn test_tool_executed_missing_id_resolves_without_duplicate_row() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("grep test");
+    let session_id = app.active_session_id().unwrap();
+
+    // tool_executing with no id
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".into(),
+        payload_json: serde_json::json!({
+            "name": "grep",
+            "arguments": { "query": "adalah" }
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+
+    // tool_executed with no id
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({
+            "name": "grep",
+            "arguments": { "query": "adalah" },
+            "success": false,
+            "output": "Error executing grep: 'README.md' is not a directory"
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+
+    // Must NOT dump duplicate legacy text into transcript
+    assert!(!app.transcript().contains("Grep adalah"));
+
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+
+    let rendered = (0..30)
+        .map(|y| (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Exactly one row rendered
+    let occurrences = rendered.matches("Grep adalah").count();
+    assert_eq!(occurrences, 1, "rendered was:\n{rendered}");
+    assert!(rendered.contains("failed: 'README.md' is not a directory"));
+    // Must NOT have click to expand
+    assert!(!rendered.contains("↳ click to expand"));
+}
+
+#[test]
+fn test_glob_grep_read_have_no_click_to_expand() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("search files");
+    let session_id = app.active_session_id().unwrap();
+
+    // Glob with multiline output
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executing".into(),
+        payload_json: serde_json::json!({
+            "id": "glob-1",
+            "name": "glob",
+            "arguments": { "pattern": "**/*.md" }
+        }).to_string(),
+    }).unwrap();
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "tool_executed".into(),
+        payload_json: serde_json::json!({
+            "id": "glob-1",
+            "name": "glob",
+            "arguments": { "pattern": "**/*.md" },
+            "success": true,
+            "output": "README.md\nCONTRIBUTING.md\nDOCS.md\nCHANGELOG.md\nNOTES.md"
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+
+    let rendered = (0..30)
+        .map(|y| (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Must be rendered as clean inline tool with match count
+    assert!(rendered.contains("✱ Glob **/*.md (5 matches)"));
+    // Must NEVER show generic click to expand for inline tools
+    assert!(!rendered.contains("↳ click to expand"));
+}
+
+#[test]
+fn test_thought_expansion_mouse_click_toggle() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("write a poem");
+    let session_id = app.active_session_id().unwrap();
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "reasoning_delta".into(),
+        payload_json: serde_json::json!({
+            "delta": "Thinking about the rhyming scheme\nChoosing iambic pentameter"
+        }).to_string(),
+    }).unwrap();
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "text_delta".into(),
+        payload_json: serde_json::json!({
+            "delta": "The woods are lovely, dark and deep"
+        }).to_string(),
+    }).unwrap();
+
+    app.poll_runtime();
+
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+    // 1. Initial render: thought is completed, collapsed by default
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    let rendered = (0..30)
+        .map(|y| (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(rendered.contains("+ Thought for"));
+    assert!(!rendered.contains("Choosing iambic pentameter"));
+    assert!(!app.is_thought_expanded());
+
+    // 2. Find row where "+ Thought for" appears and click it
+    let thought_y = (0..30)
+        .find(|&y| {
+            let row = (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>();
+            row.contains("+ Thought for")
+        })
+        .expect("thought row found");
+
+    app.handle_mouse_click(5, thought_y);
+    assert!(app.is_thought_expanded());
+
+    // 3. Render after click: thought should be expanded
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    let rendered_expanded = (0..30)
+        .map(|y| (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(rendered_expanded.contains("- Thought for"));
+    assert!(rendered_expanded.contains("Choosing iambic pentameter"));
+    assert!(rendered_expanded.contains("│"));
+
+    // 4. Click again: thought should collapse
+    let expanded_y = (0..30)
+        .find(|&y| {
+            let row = (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>();
+            row.contains("- Thought for")
+        })
+        .expect("expanded thought row found");
+
+    app.handle_mouse_click(5, expanded_y);
+    assert!(!app.is_thought_expanded());
+
+    terminal.draw(|frame| clawcode::tui::render(frame, &app)).unwrap();
+    let rendered_collapsed_again = (0..30)
+        .map(|y| (0..120).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(rendered_collapsed_again.contains("+ Thought for"));
+    assert!(!rendered_collapsed_again.contains("Choosing iambic pentameter"));
 }

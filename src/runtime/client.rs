@@ -518,7 +518,22 @@ fn run_generation(
                     );
                 }
                 StreamEvent::ToolCallEnd { id } => {
-                    ctx.emit("tool_call_end", &serde_json::json!({ "id": id }));
+                    let mut payload = serde_json::json!({
+                        "id": &id,
+                        "arguments_complete": true,
+                    });
+                    if let Some((_, name, _)) =
+                        turn_tool_calls.iter().find(|(call_id, _, _)| call_id == &id)
+                    {
+                        payload["name"] = serde_json::Value::String(name.clone());
+                    }
+                    ctx.emit("tool_call_end", &payload);
+                }
+                StreamEvent::ToolResult { id, result } => {
+                    ctx.emit(
+                        "tool_result",
+                        &serde_json::json!({ "id": id, "result": result }),
+                    );
                 }
                 StreamEvent::Usage(value) => {
                     total_usage.input_tokens += value.input_tokens;
@@ -546,7 +561,6 @@ fn run_generation(
                     ctx.emit_error(&message);
                     failed = true;
                 }
-                _ => {}
             }
         }
 
@@ -657,7 +671,6 @@ fn run_generation(
                 Ok(out) => (true, out),
                 Err(err) => (false, format!("Error executing {tool_name}: {err}")),
             };
-
             ctx.emit(
                 "tool_executed",
                 &serde_json::json!({

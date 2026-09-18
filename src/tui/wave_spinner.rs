@@ -19,9 +19,9 @@ impl Default for WaveSpinner {
 impl WaveSpinner {
     pub const WIDTH: u16 = 8;
 
-    const DEFAULT_FRAME_DURATION: Duration = Duration::from_millis(50);
+    const DEFAULT_FRAME_DURATION: Duration = Duration::from_millis(80);
     const OPACITIES: [f32; 5] = [1.0, 0.8, 0.6, 0.4, 0.2];
-    const COMPACT_FRAMES: [&'static str; 10] = ["⠋", "⠉", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"];
+    const COMPACT_FRAMES: [&'static str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
     pub fn new(base_color: Color) -> Self {
         let frames = Self::generate_frames(base_color);

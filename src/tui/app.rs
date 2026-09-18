@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::cell::RefCell;
+use std::collections::{HashSet, VecDeque};
 use ratatui::layout::Rect;
 
 use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
@@ -16,6 +17,9 @@ use super::dialogs::{
 use super::home::HomeState;
 const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 const MAX_IDENTITY_BYTES: usize = 256;
+const MAX_TOOL_ROWS: usize = 64;
+const MAX_TOOL_ARGUMENT_BYTES: usize = 4 * 1024;
+const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ConversationMode {
@@ -190,11 +194,54 @@ pub enum UiEvent {
     MouseClick { x: u16, y: u16 },
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ToolRowState {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamPart {
+    Text(String),
+    Reasoning(String),
+    Tool(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRow {
+    pub call_id: String,
+    pub name: String,
+    pub desc: String,
+    pub arguments: String,
+    pub output: String,
+    pub state: ToolRowState,
+    pub arguments_complete: bool,
+    pub metadata: Option<serde_json::Value>,
+    pub started_at: std::time::Instant,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveToolInfo {
     pub name: String,
     pub desc: String,
     pub started_at: std::time::Instant,
+}
+
+pub(crate) fn tool_names_match(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    matches!(
+        (a, b),
+        ("grep_search" | "grep", "grep_search" | "grep")
+            | ("glob_search" | "glob", "glob_search" | "glob")
+            | ("read_file" | "read", "read_file" | "read")
+            | ("write_file" | "write", "write_file" | "write")
+            | ("edit_file" | "edit" | "patch" | "apply_patch", "edit_file" | "edit" | "patch" | "apply_patch")
+            | ("bash" | "sh", "bash" | "sh")
+    )
 }
 
 pub fn tool_target_and_verbs(
@@ -243,14 +290,16 @@ pub fn tool_target_and_verbs(
                 String::new()
             }
         }
-        ("glob_search", Some(a)) => a
+        ("glob_search" | "glob", Some(a)) => a
             .get("pattern")
+            .or_else(|| a.get("query"))
             .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_string(),
-        ("grep_search", Some(a)) => a
+        ("grep_search" | "grep", Some(a)) => a
             .get("query")
-            .and_then(|q| q.as_str())
+            .or_else(|| a.get("pattern"))
+            .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_string(),
         ("list_dir", Some(a)) => a
@@ -272,6 +321,29 @@ pub fn tool_target_and_verbs(
             .get("name")
             .and_then(|p| p.as_str())
             .unwrap_or("")
+            .to_string(),
+        ("task", Some(a)) => {
+            let agent = a
+                .get("subagent_type")
+                .or_else(|| a.get("agent"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("subagent");
+            let description = a
+                .get("description")
+                .or_else(|| a.get("prompt"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if description.is_empty() {
+                agent.to_string()
+            } else {
+                format!("{agent}: {description}")
+            }
+        }
+        ("execute", Some(a)) => a
+            .get("command")
+            .or_else(|| a.get("tool"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("execute")
             .to_string(),
         (_, Some(a)) => {
             if let Some(s) = a
@@ -295,11 +367,13 @@ pub fn tool_target_and_verbs(
         "edit_file" | "edit" => ("Edit", "Editing", desc),
         "patch" | "apply_patch" => ("Applied patch", "Applying patch", desc),
         "list_dir" => ("List", "Listing", desc),
-        "glob_search" => ("Glob", "Running glob_search", desc),
-        "grep_search" => ("Grep", "Running grep_search", desc),
+        "glob_search" | "glob" => ("Glob", "Running glob_search", desc),
+        "grep_search" | "grep" => ("Grep", "Running grep_search", desc),
         "bash" | "sh" => ("Ran", "Running", desc),
         "question" => ("Ask", "Asking", desc),
         "update_plan" => ("Updated Plan", "Updating Plan", desc),
+        "task" => ("Task", "Delegating", desc),
+        "execute" => ("Execute", "Executing", desc),
         "webfetch" => ("Fetched", "Fetching", desc),
         "websearch" => ("Searched", "Searching", desc),
         "skill" => ("Loaded skill", "Loading skill", desc),
@@ -309,7 +383,7 @@ pub fn tool_target_and_verbs(
 
 pub fn format_tool_success_detail(name: &str, output: &str) -> String {
     match name {
-        "read_file" => {
+        "read_file" | "read" => {
             let lines = output.lines().count();
             if lines == 1 {
                 "1 line".to_string()
@@ -317,7 +391,7 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
                 format!("{lines} lines")
             }
         }
-        "grep_search" => {
+        "grep_search" | "grep" => {
             let lines = output.lines().count();
             if lines == 0 || output.trim().is_empty() {
                 "0 matches".to_string()
@@ -327,7 +401,7 @@ pub fn format_tool_success_detail(name: &str, output: &str) -> String {
                 format!("{lines} lines")
             }
         }
-        "glob_search" => "succeeded".to_string(),
+        "glob_search" | "glob" => "succeeded".to_string(),
         "list_dir" => {
             let count = output.lines().count();
             if count == 1 {
@@ -529,9 +603,18 @@ pub struct App {
     /// Saved draft when user was typing and started navigating history with Up arrow.
     draft_prompt: String,
     active_tool: Option<ActiveToolInfo>,
+    tool_rows: Vec<ToolRow>,
+    active_generation_id: Option<i64>,
+    text_stream_active: bool,
     reasoning_buffer: String,
     reasoning_start: Option<std::time::Instant>,
-    /// Snapshot of latest task plan: list of (step, status).
+    reasoning_duration: Option<std::time::Duration>,
+    reasoning_active: bool,
+    stream_parts: Vec<StreamPart>,
+    stream_base_len: Option<usize>,
+    expanded_tool_rows: HashSet<String>,
+    thought_expanded: bool,
+    last_tool_row_clicks: RefCell<Vec<(String, Rect)>>,
     pub current_plan: Vec<(String, String)>,
     last_popup_area: std::cell::Cell<Option<Rect>>,
     last_quick_actions_area: std::cell::Cell<Option<[Rect; 4]>>,
@@ -548,8 +631,13 @@ pub struct ClientSessionState {
     pub loaded_until_seq: i64,
     pub status: ConversationStatus,
     pub active_generation_id: Option<i64>,
+    pub text_stream_active: bool,
     pub loading: bool,
     pub current_plan: Vec<(String, String)>,
+    pub tool_rows: Vec<ToolRow>,
+    pub stream_parts: Vec<StreamPart>,
+    pub stream_base_len: Option<usize>,
+    pub expanded_tool_rows: HashSet<String>,
 }
 
 impl Default for App {
@@ -607,8 +695,18 @@ impl App {
             history_index: None,
             draft_prompt: String::new(),
             active_tool: None,
+            tool_rows: Vec::new(),
+            active_generation_id: None,
             reasoning_buffer: String::new(),
             reasoning_start: None,
+            reasoning_duration: None,
+            reasoning_active: false,
+            stream_parts: Vec::new(),
+            stream_base_len: None,
+            expanded_tool_rows: HashSet::new(),
+            thought_expanded: false,
+            last_tool_row_clicks: RefCell::new(Vec::new()),
+            text_stream_active: false,
             current_plan: Vec::new(),
             last_popup_area: std::cell::Cell::new(None),
             last_quick_actions_area: std::cell::Cell::new(None),
@@ -854,7 +952,7 @@ impl App {
                     if let Some(dialog) = &self.themes_dialog
                         && let Some(chosen) = dialog.selected_theme()
                     {
-                        self.theme = chosen;
+                        self.set_theme(chosen);
                         self.diagnostic = format!("theme switched to: {}", chosen.name());
                     }
                     self.themes_dialog = None;
@@ -1050,6 +1148,8 @@ impl App {
             UiEvent::Input(Input::Cancel) => {
                 self.cancellation_pending = true;
                 self.active_tool = None;
+                self.tool_rows.clear();
+                self.active_generation_id = None;
                 if let Some(runtime) = self.runtime.as_ref()
                     && let Some(session_id) = self.active_session_id
                 {
@@ -1061,6 +1161,8 @@ impl App {
                 self.chat_scroll = 0;
                 self.status = ConversationStatus::Idle;
                 self.active_tool = None;
+                self.tool_rows.clear();
+                self.active_generation_id = None;
                 self.diagnostic = "screen cleared".to_string();
             }
             UiEvent::Input(Input::Character(character)) => {
@@ -1210,10 +1312,14 @@ impl App {
                 self.metrics = None;
                 self.status = ConversationStatus::Active;
                 self.diagnostic.clear();
+                self.stream_parts.clear();
+                self.stream_base_len = Some(self.transcript.len());
+                self.expanded_tool_rows.clear();
                 self.typewriter.start_stream();
             }
             ConversationEvent::TextDelta(delta) => {
                 if self.status == ConversationStatus::Active {
+                    self.push_stream_part(StreamPart::Text(delta.clone()));
                     self.typewriter.push_delta(&delta);
                 }
             }
@@ -1364,19 +1470,27 @@ impl App {
     pub fn home_state_mut(&mut self) -> &mut HomeState {
         &mut self.home_state
     }
-
-    /// Whether text is actively streaming/typing out.
+    /// Whether assistant text is visible or may resume during active generation.
     pub fn is_typing(&self) -> bool {
-        self.typewriter.is_typing() || matches!(self.status, ConversationStatus::Active)
+        self.typewriter.is_typing()
+            || (self.text_stream_active
+                && matches!(self.status, ConversationStatus::Active)
+                && !self.is_reasoning()
+                && !self.tool_rows.iter().any(|row| {
+                    matches!(row.state, ToolRowState::Pending | ToolRowState::Running)
+                }))
     }
 
-    /// Whether the typewriter buffer has pending characters, active status, or a tool is running.
+    /// Whether generation, text, reasoning, or any tool row is active.
     pub fn is_streaming_active(&self) -> bool {
         matches!(self.status, ConversationStatus::Active)
             || self.typewriter.is_typing()
             || self.typewriter.pending_status().is_some()
             || self.is_reasoning()
-            || self.active_tool.is_some()
+            || self
+                .tool_rows
+                .iter()
+                .any(|row| matches!(row.state, ToolRowState::Pending | ToolRowState::Running))
     }
 
     pub fn reasoning_buffer(&self) -> &str {
@@ -1384,26 +1498,36 @@ impl App {
     }
 
     pub fn is_reasoning(&self) -> bool {
-        !self.reasoning_buffer.is_empty() && self.active_tool.is_none()
+        self.reasoning_active && self.active_tool.is_none()
     }
 
     pub fn reasoning_elapsed_seconds(&self) -> Option<f64> {
-        self.reasoning_start.map(|t| t.elapsed().as_secs_f64())
+        self.reasoning_duration
+            .map(|d| d.as_secs_f64())
+            .or_else(|| self.reasoning_start.map(|t| t.elapsed().as_secs_f64()))
     }
 
+    fn record_reasoning_duration(&mut self) {
+        if let Some(start) = self.reasoning_start
+            && self.reasoning_duration.is_none()
+        {
+            self.reasoning_duration = Some(start.elapsed());
+        }
+    }
     pub fn flush_reasoning(&mut self) {
         if self.reasoning_buffer.trim().is_empty() {
             self.reasoning_buffer.clear();
             self.reasoning_start = None;
+            self.reasoning_duration = None;
+            self.reasoning_active = false;
             return;
         }
         let duration = self
-            .reasoning_start
-            .map(|t| t.elapsed().as_secs_f64())
-            .unwrap_or(0.0);
+            .reasoning_duration
+            .or_else(|| self.reasoning_start.map(|t| t.elapsed()))
+            .unwrap_or_default()
+            .as_secs_f64();
         let dur_str = format!("{:.1}s", duration.max(0.1));
-        let reasoning = self.reasoning_buffer.trim();
-        let raw_lines: Vec<&str> = reasoning.lines().collect();
 
         let mut snippet = String::new();
         if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
@@ -1412,27 +1536,209 @@ impl App {
         if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
             snippet.push('\n');
         }
-        snippet.push_str(&format!("💭 Thought for {dur_str}\n"));
-        if raw_lines.len() <= 10 {
-            for l in raw_lines {
-                snippet.push_str(&format!("  │ {l}\n"));
-            }
-        } else {
-            for l in &raw_lines[..5] {
-                snippet.push_str(&format!("  │ {l}\n"));
-            }
-            snippet.push_str("  │ ...\n");
-        }
-        snippet.push('\n');
+        snippet.push_str(&format!("Thought for {dur_str}\n\n"));
         self.transcript.push_str(&snippet);
         self.truncate_transcript();
         self.reasoning_buffer.clear();
         self.reasoning_start = None;
+        self.reasoning_duration = None;
+        self.reasoning_active = false;
     }
 
     pub fn active_tool(&self) -> Option<&ActiveToolInfo> {
         self.active_tool.as_ref()
     }
+    pub fn tool_rows(&self) -> &[ToolRow] {
+        &self.tool_rows
+    }
+    pub fn stream_parts(&self) -> &[StreamPart] {
+        &self.stream_parts
+    }
+
+    pub fn stream_base_len(&self) -> Option<usize> {
+        self.stream_base_len
+    }
+
+    fn ensure_stream_parts(&mut self) {
+        if self.stream_base_len.is_none() {
+            self.stream_base_len = Some(self.transcript.len());
+        }
+    }
+
+    fn push_stream_part(&mut self, part: StreamPart) {
+        self.ensure_stream_parts();
+        match part {
+            StreamPart::Reasoning(delta) => {
+                if let Some(StreamPart::Reasoning(existing)) = self
+                    .stream_parts
+                    .iter_mut()
+                    .find(|p| matches!(p, StreamPart::Reasoning(_)))
+                {
+                    existing.push_str(&delta);
+                    if existing.len() > Self::MAX_TRANSCRIPT_BYTES {
+                        existing.truncate(floor_char_boundary(existing, Self::MAX_TRANSCRIPT_BYTES));
+                    }
+                } else {
+                    self.stream_parts.push(StreamPart::Reasoning(delta));
+                }
+            }
+            StreamPart::Text(delta) => {
+                if let Some(StreamPart::Text(existing)) = self.stream_parts.last_mut() {
+                    existing.push_str(&delta);
+                    if existing.len() > Self::MAX_TRANSCRIPT_BYTES {
+                        existing.truncate(floor_char_boundary(existing, Self::MAX_TRANSCRIPT_BYTES));
+                    }
+                } else {
+                    self.stream_parts.push(StreamPart::Text(delta));
+                }
+            }
+            StreamPart::Tool(call_id) => {
+                if !self.stream_parts.iter().any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id)) {
+                    self.stream_parts.push(StreamPart::Tool(call_id));
+                }
+            }
+        }
+        if self.stream_parts.len() > MAX_TOOL_ROWS * 2 {
+            self.stream_parts.drain(..self.stream_parts.len() - MAX_TOOL_ROWS * 2);
+        }
+    }
+
+    fn push_tool_part(&mut self, call_id: String) {
+        self.ensure_stream_parts();
+        if !self.stream_parts.iter().any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id)) {
+            self.stream_parts.push(StreamPart::Tool(call_id));
+        }
+    }
+
+    pub fn is_tool_expanded(&self, call_id: &str) -> bool {
+        self.expanded_tool_rows.contains(call_id)
+    }
+
+    pub fn toggle_tool_expanded(&mut self, call_id: &str) {
+        if !self.expanded_tool_rows.insert(call_id.to_string()) {
+            self.expanded_tool_rows.remove(call_id);
+        }
+    }
+
+    pub fn is_thought_expanded(&self) -> bool {
+        self.thought_expanded
+    }
+
+    pub fn toggle_thought_expanded(&mut self) {
+        self.thought_expanded = !self.thought_expanded;
+    }
+
+    pub fn set_tool_row_clicks(&self, clicks: Vec<(String, Rect)>) {
+        *self.last_tool_row_clicks.borrow_mut() = clicks;
+    }
+
+    fn tool_row_at(&self, x: u16, y: u16) -> Option<String> {
+        self.last_tool_row_clicks
+            .borrow()
+            .iter()
+            .find(|(_, area)| x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height)
+            .map(|(id, _)| id.clone())
+    }
+    fn upsert_tool_row(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        state: ToolRowState,
+        desc: String,
+        arguments: String,
+        metadata: Option<serde_json::Value>,
+    ) {
+        if let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == call_id) {
+            row.name = name.to_string();
+            row.state = state;
+            if !desc.is_empty() {
+                row.desc = bounded(desc, MAX_TOOL_ARGUMENT_BYTES);
+            }
+            if !arguments.is_empty() {
+                row.arguments = bounded(arguments, MAX_TOOL_ARGUMENT_BYTES);
+            }
+            if metadata.is_some() {
+                row.metadata = metadata;
+            }
+        } else {
+            self.tool_rows.push(ToolRow {
+                call_id: bounded(call_id.to_string(), MAX_IDENTITY_BYTES),
+                name: bounded(name.to_string(), MAX_IDENTITY_BYTES),
+                desc: bounded(desc, MAX_TOOL_ARGUMENT_BYTES),
+                arguments: bounded(arguments, MAX_TOOL_ARGUMENT_BYTES),
+                output: String::new(),
+                state,
+                arguments_complete: false,
+                metadata,
+                started_at: std::time::Instant::now(),
+            });
+            if self.tool_rows.len() > MAX_TOOL_ROWS {
+                self.tool_rows.remove(0);
+            }
+        }
+        self.refresh_active_tool();
+    }
+
+    fn normalized_tool_call_id(call_id: &str) -> String {
+        bounded(call_id.to_string(), MAX_IDENTITY_BYTES)
+    }
+
+
+
+    fn complete_tool_row(&mut self, call_id: &str, name: &str, success: bool, output: &str) -> bool {
+        let found_index = if !call_id.is_empty() {
+            let norm_id = Self::normalized_tool_call_id(call_id);
+            self.tool_rows
+                .iter()
+                .position(|r| r.call_id == norm_id)
+                .or_else(|| {
+                    self.tool_rows.iter().rposition(|r| {
+                        tool_names_match(&r.name, name)
+                            && matches!(r.state, ToolRowState::Pending | ToolRowState::Running)
+                    })
+                })
+        } else {
+            self.tool_rows
+                .iter()
+                .rposition(|r| {
+                    tool_names_match(&r.name, name)
+                        && matches!(r.state, ToolRowState::Pending | ToolRowState::Running)
+                })
+                .or_else(|| {
+                    self.tool_rows
+                        .iter()
+                        .rposition(|r| matches!(r.state, ToolRowState::Pending | ToolRowState::Running))
+                })
+        };
+        let Some(idx) = found_index else {
+            return false;
+        };
+        let row = &mut self.tool_rows[idx];
+        row.state = if success { ToolRowState::Completed } else { ToolRowState::Failed };
+        row.output = bounded(output.to_string(), MAX_TOOL_OUTPUT_BYTES);
+        self.refresh_active_tool();
+        true
+    }
+
+
+    fn refresh_active_tool(&mut self) {
+        self.active_tool = self
+            .tool_rows
+            .iter()
+            .rev()
+            .find(|row| matches!(row.state, ToolRowState::Pending | ToolRowState::Running))
+            .map(|row| ActiveToolInfo {
+                name: row.name.clone(),
+                desc: if row.desc.is_empty() {
+                    "preparing arguments...".to_string()
+                } else {
+                    row.desc.clone()
+                },
+                started_at: row.started_at,
+            });
+    }
+
+
 
     pub fn wave_spinner(&self) -> &crate::tui::WaveSpinner {
         &self.wave_spinner
@@ -1678,6 +1984,51 @@ impl App {
     }
 
     pub fn handle_mouse_click(&mut self, x: u16, y: u16) {
+        if let Some(call_id) = self.tool_row_at(x, y) {
+            if call_id == "__thought__" {
+                self.toggle_thought_expanded();
+                return;
+            }
+            let expandable = self
+                .tool_rows
+                .iter()
+                .find(|row| row.call_id == call_id)
+                .is_some_and(|row| {
+                    if matches!(row.name.as_str(), "bash" | "sh") {
+                        row.output.lines().count() > 10
+                    } else if matches!(row.name.as_str(), "edit_file" | "edit") {
+                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
+                            && let Some(old_str) = args.get("old_string").or_else(|| args.get("old_str")).and_then(|v| v.as_str())
+                            && let Some(new_str) = args.get("new_string").or_else(|| args.get("new_str")).and_then(|v| v.as_str())
+                        {
+                            let diff = crate::tui::diff::compute_diff(old_str, new_str, 20);
+                            diff.lines.len() > 10
+                        } else {
+                            false
+                        }
+                    } else if matches!(row.name.as_str(), "patch" | "apply_patch") {
+                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
+                            && let Some(patch_str) = args.get("patch").and_then(|v| v.as_str())
+                        {
+                            patch_str.lines().filter(|l| l.starts_with(['+', '-', ' '])).count() > 10
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                });
+            if expandable {
+                self.toggle_tool_expanded(&call_id);
+                self.diagnostic = if self.is_tool_expanded(&call_id) {
+                    "tool output expanded".to_string()
+                } else {
+                    "tool output collapsed".to_string()
+                };
+            }
+            return;
+        }
+
         let has_command_suggestions = !self.matching_suggestions().is_empty();
         let has_model_suggestions = self.prompt.starts_with("/model ")
             && !self.matching_model_suggestions().is_empty();
@@ -1743,44 +2094,40 @@ impl App {
         if self.transcript.is_empty()
             && let Some(cards) = self.get_or_compute_quick_actions_area()
         {
-                for (idx, card) in cards.iter().enumerate() {
-                    if x >= card.x
-                        && x < card.x + card.width
-                        && y >= card.y
-                        && y < card.y + card.height
-                    {
-                        self.prompt.clear();
-                        self.cursor_position = 0;
-                        match idx {
-                            0 => {
-                                self.set_mode(ConversationMode::Plan);
-                                self.diagnostic =
-                                    "Switched to Plan mode (read-only)".to_string();
-                            }
-                            1 => {
-                                self.set_mode(ConversationMode::Build);
-                                self.diagnostic =
-                                    "Switched to Build mode (edits enabled)".to_string();
-                            }
-                            2 => {
-                                let command = cli::parse_command("/models")
-                                    .expect("valid command");
-                                if let Ok(output) = self.command_service.execute(command) {
-                                    self.apply_command_output(output);
-                                }
-                            }
-                            3 => {
-                                self.which_key.show();
-                                self.diagnostic =
-                                    "Shortcuts cheatsheet (Ctrl+X or Esc to dismiss)"
-                                         .to_string();
-                            }
-                            _ => {}
+            for (idx, card) in cards.iter().enumerate() {
+                if x >= card.x
+                    && x < card.x + card.width
+                    && y >= card.y
+                    && y < card.y + card.height
+                {
+                    self.prompt.clear();
+                    self.cursor_position = 0;
+                    match idx {
+                        0 => {
+                            self.set_mode(ConversationMode::Plan);
+                            self.diagnostic = "Switched to Plan mode (read-only)".to_string();
                         }
-                        return;
+                        1 => {
+                            self.set_mode(ConversationMode::Build);
+                            self.diagnostic = "Switched to Build mode (edits enabled)".to_string();
+                        }
+                        2 => {
+                            let command = cli::parse_command("/models").expect("valid command");
+                            if let Ok(output) = self.command_service.execute(command) {
+                                self.apply_command_output(output);
+                            }
+                        }
+                        3 => {
+                            self.which_key.show();
+                            self.diagnostic =
+                                "Shortcuts cheatsheet (Ctrl+X or Esc to dismiss)".to_string();
+                        }
+                        _ => {}
                     }
+                    return;
                 }
             }
+        }
     }
 
     pub fn permission_dialog(&self) -> Option<&PermissionDialogState> {
@@ -2197,7 +2544,7 @@ impl App {
                 };
                 if let Some(name) = chosen_name {
                     if let Some(kind) = crate::tui::ThemeKind::from_name(name) {
-                        self.theme = kind;
+                        self.set_theme(kind);
                         self.diagnostic = format!("theme switched to: {}", kind.name());
                     } else {
                         self.diagnostic = format!("unknown theme: {name} (run /themes to list)");
@@ -2220,6 +2567,8 @@ impl App {
                 self.transcript.clear();
                 self.status = ConversationStatus::Idle;
                 self.active_tool = None;
+                self.tool_rows.clear();
+                self.active_generation_id = None;
                 self.diagnostic = "screen cleared".to_string();
                 return;
             }
@@ -2300,6 +2649,8 @@ impl App {
                     self.switch_session(session.id);
                     self.transcript.clear();
                     self.active_tool = None;
+                    self.tool_rows.clear();
+                    self.active_generation_id = None;
                     self.typewriter.reset();
                     self.chat_scroll = 0;
                     self.diagnostic = format!("session created: {}", session.title);
@@ -2322,8 +2673,13 @@ impl App {
     }
 
     pub fn submit_user_prompt(&mut self, prompt: &str) {
+        self.reasoning_active = false;
         self.flush_reasoning();
         self.flush_typewriter();
+        self.stream_parts.clear();
+        self.stream_base_len = None;
+        self.reasoning_start = None;
+        self.reasoning_duration = None;
         self.session_listings.clear();
         if self.active_session_id.is_none() {
             if let Some(runtime) = self.runtime.as_ref() {
@@ -2340,6 +2696,7 @@ impl App {
                 .append_message(session_id, "user", prompt);
         }
 
+        self.text_stream_active = false;
         if self.transcript.is_empty() {
             self.transcript.push_str(&format!("> {prompt}\n\n"));
         } else {
@@ -2401,21 +2758,42 @@ impl App {
         let mut had_events = false;
         while let Ok(event) = receiver.try_recv() {
             had_events = true;
+            if let Some(session_id) = self.active_session_id
+                && event.session_id != session_id
+            {
+                continue;
+            }
+            if event.kind == "generation_started" {
+                self.active_generation_id = event.generation_id;
+                self.stream_parts.clear();
+                self.stream_base_len = Some(self.transcript.len());
+                self.reasoning_buffer.clear();
+                self.reasoning_start = None;
+                self.reasoning_duration = None;
+                self.reasoning_active = false;
+            } else if self
+                .active_generation_id
+                .is_some_and(|generation_id| event.generation_id != Some(generation_id))
+            {
+                continue;
+            }
             match event.kind.as_str() {
                 "reasoning_delta" => {
-                    if let Ok(payload) =
-                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
                     {
                         if self.reasoning_start.is_none() {
                             self.reasoning_start = Some(std::time::Instant::now());
                         }
+                        self.reasoning_active = true;
+                        self.push_stream_part(StreamPart::Reasoning(delta.to_string()));
                         self.reasoning_buffer.push_str(delta);
                     }
                 }
                 "tool_call_start" => {
-                    self.flush_reasoning();
-                    self.flush_typewriter();
+                    self.text_stream_active = false;
+                    self.reasoning_active = false;
+                    self.record_reasoning_duration();
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                     {
@@ -2423,25 +2801,84 @@ impl App {
                             .get("name")
                             .and_then(|v| v.as_str())
                             .unwrap_or("tool");
-                        self.active_tool = Some(ActiveToolInfo {
-                            name: name.to_string(),
-                            desc: "preparing arguments...".to_string(),
-                            started_at: std::time::Instant::now(),
-                        });
+                        let call_id = payload
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| format!("{name}:{}", event.seq));
+                        self.push_tool_part(call_id.clone());
+                        self.upsert_tool_row(
+                            &call_id,
+                            name,
+                            ToolRowState::Pending,
+                            "preparing arguments...".to_string(),
+                            String::new(),
+                            payload.get("metadata").cloned(),
+                        );
+                    }
+                }
+                "tool_call_delta" => {
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    {
+                        let call_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let delta = payload
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == call_id) {
+                            row.arguments = bounded(
+                                format!("{}{}", row.arguments, delta),
+                                MAX_TOOL_ARGUMENT_BYTES,
+                            );
+                            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments) {
+                                let (_, _, desc) = tool_target_and_verbs(&row.name, Some(&args));
+                                if !desc.is_empty() {
+                                    row.desc = bounded(desc, MAX_TOOL_ARGUMENT_BYTES);
+                                }
+                            }
+                        }
+                        self.refresh_active_tool();
+                    }
+                }
+                "tool_call_end" => {
+                    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json) else {
+                        continue;
+                    };
+                    let Some(call_id) = payload.get("id").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == call_id) {
+                        row.arguments_complete = true;
+                        if let Some(metadata) = payload.get("metadata") {
+                            row.metadata = Some(metadata.clone());
+                        }
+                        if row.desc == "preparing arguments..."
+                            && let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
+                        {
+                            let (_, _, desc) = tool_target_and_verbs(&row.name, Some(&args));
+                            if !desc.is_empty() {
+                                row.desc = bounded(desc, MAX_TOOL_ARGUMENT_BYTES);
+                            }
+                        }
                     }
                 }
                 "text_delta" => {
+                    self.reasoning_active = false;
+                    self.record_reasoning_duration();
                     self.flush_reasoning();
-                    if let Ok(payload) =
-                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
                     {
+                        self.push_stream_part(StreamPart::Text(delta.to_string()));
                         self.typewriter.push_delta(delta);
+                        self.text_stream_active = true;
                     }
                 }
                 "tool_executing" => {
-                    self.flush_reasoning();
-                    self.flush_typewriter();
+                    self.text_stream_active = false;
+                    self.reasoning_active = false;
+                    self.record_reasoning_duration();
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                     {
@@ -2461,6 +2898,21 @@ impl App {
                         if desc.is_empty() {
                             desc = "preparing arguments...".to_string();
                         }
+                        let call_id = payload
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| format!("inline:{}:{}", name, event.seq));
+                        self.push_tool_part(call_id.clone());
+                        let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
+                        self.upsert_tool_row(
+                            &call_id,
+                            name,
+                            ToolRowState::Running,
+                            desc.clone(),
+                            arguments,
+                            payload.get("metadata").cloned(),
+                        );
                         self.active_tool = Some(ActiveToolInfo {
                             name: name.to_string(),
                             desc,
@@ -2491,9 +2943,6 @@ impl App {
                     }
                 }
                 "tool_executed" => {
-                    self.flush_reasoning();
-                    self.flush_typewriter();
-                    let prev_active = self.active_tool.take();
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                     {
@@ -2504,16 +2953,12 @@ impl App {
                         let success = payload
                             .get("success")
                             .and_then(|v| v.as_bool())
-                            .unwrap_or(true);
+                            .unwrap_or(false)
+                            && payload.get("output").is_some();
                         let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
                         let args = payload.get("arguments");
 
-                        let (verb, _active_verb, mut target) = tool_target_and_verbs(name, args);
-                        if target.is_empty()
-                            && let Some(prev) = prev_active
-                        {
-                            target = prev.desc;
-                        }
+                        let (verb, _active_verb, target) = tool_target_and_verbs(name, args);
 
                         let detail = if !success {
                             let err_line = output.lines().next().unwrap_or("error").trim();
@@ -2524,6 +2969,124 @@ impl App {
                         } else {
                             format_tool_success_detail(name, output)
                         };
+                        let call_id = payload
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let existing_id = if !call_id.is_empty() {
+                            if self.tool_rows.iter().any(|row| row.call_id == call_id) {
+                                Some(call_id.to_string())
+                            } else {
+                                self.tool_rows
+                                    .iter()
+                                    .rev()
+                                    .find(|row| tool_names_match(&row.name, name) && matches!(row.state, ToolRowState::Pending | ToolRowState::Running))
+                                    .map(|row| row.call_id.clone())
+                            }
+                        } else {
+                            self.tool_rows
+                                .iter()
+                                .rev()
+                                .find(|row| tool_names_match(&row.name, name) && matches!(row.state, ToolRowState::Pending | ToolRowState::Running))
+                                .or_else(|| {
+                                    self.tool_rows
+                                        .iter()
+                                        .rev()
+                                        .find(|row| matches!(row.state, ToolRowState::Pending | ToolRowState::Running))
+                                })
+                                .map(|row| row.call_id.clone())
+                        };
+                        let part_id = existing_id.clone().unwrap_or_else(|| {
+                            if !call_id.is_empty() {
+                                call_id.to_string()
+                            } else {
+                                format!("inline:{}:{}", name, event.seq)
+                            }
+                        });
+                        let had_row = existing_id.is_some() || (!call_id.is_empty() && self.tool_rows.iter().any(|row| row.call_id == call_id));
+                        if !had_row {
+                            if !call_id.is_empty() {
+                                self.upsert_tool_row(
+                                    &part_id,
+                                    name,
+                                    ToolRowState::Running,
+                                    target.clone(),
+                                    args.map(serde_json::Value::to_string).unwrap_or_default(),
+                                    payload.get("metadata").cloned(),
+                                );
+                            }
+                        } else if let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == part_id) {
+                            row.name = name.to_string();
+                            if !target.is_empty() && (row.desc == "preparing arguments..." || row.desc.is_empty()) {
+                                row.desc = bounded(target.clone(), MAX_TOOL_ARGUMENT_BYTES);
+                            }
+                            if let Some(a) = args {
+                                row.arguments = bounded(a.to_string(), MAX_TOOL_ARGUMENT_BYTES);
+                            }
+                        }
+                        if name == "update_plan" && success {
+                            let parsed_args_holder: Option<serde_json::Value> = match args {
+                                Some(serde_json::Value::String(s)) => serde_json::from_str(s).ok(),
+                                Some(v @ serde_json::Value::Object(_)) => Some(v.clone()),
+                                _ => None,
+                            };
+                            let args_ref = parsed_args_holder.as_ref().or(args);
+                            let plan_items: Vec<(String, String)> = args_ref
+                                .and_then(|a| a.get("plan"))
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|item| {
+                                            let obj = item.as_object()?;
+                                            let step = obj
+                                                .get("step")
+                                                .or_else(|| obj.get("content"))
+                                                .or_else(|| obj.get("title"))
+                                                .and_then(|v| v.as_str())?
+                                                .trim();
+                                            if step.is_empty() {
+                                                return None;
+                                            }
+                                            let clean_step =
+                                                if let Some((num, rest)) = step.split_once(". ") {
+                                                    if !num.is_empty()
+                                                        && num.chars().all(|c| c.is_ascii_digit())
+                                                    {
+                                                        rest.trim()
+                                                    } else {
+                                                        step
+                                                    }
+                                                } else {
+                                                    step
+                                                };
+
+                                            let status = obj
+                                                .get("status")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("pending")
+                                                .trim()
+                                                .to_ascii_lowercase();
+                                            let norm_status = match status.as_str() {
+                                                "todo" | "open" | "pending" | "not_started"
+                                                | "not-started" => "pending",
+                                                "in_progress" | "in-progress" | "in progress"
+                                                | "doing" | "active" => "in_progress",
+                                                "done" | "completed" | "complete" => "completed",
+                                                other => other,
+                                            };
+                                            Some((clean_step.to_string(), norm_status.to_string()))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            self.current_plan = plan_items;
+                        }
+                        let structured = self.complete_tool_row(&part_id, name, success, output);
+                        if structured {
+                            self.push_tool_part(part_id);
+                        } else {
+                            self.stream_parts.retain(|part| !matches!(part, StreamPart::Tool(id) if id == &part_id));
+                            self.tool_rows.retain(|row| row.call_id != part_id);
                         if name == "update_plan" {
                             let parsed_args_holder: Option<serde_json::Value> = match args {
                                 Some(serde_json::Value::String(s)) => serde_json::from_str(s).ok(),
@@ -2877,21 +3440,27 @@ impl App {
                             snippet.push_str(&header);
                             snippet.push('\n');
                             snippet.push_str(&branch);
-                            snippet.push_str("\n\n");
                             self.transcript.push_str(&snippet);
                             self.truncate_transcript();
                         }
+                        }
+                        self.refresh_active_tool();
                     }
                 }
                 "generation_finished" => {
                     self.flush_reasoning();
-                    self.active_tool = None;
-                    if let Some(session_id) = self.active_session_id
-                        && event.session_id == session_id
-                        && let Ok(payload) =
-                            serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    for row in &mut self.tool_rows {
+                        if matches!(row.state, ToolRowState::Pending | ToolRowState::Running) {
+                            row.state = ToolRowState::Failed;
+                            row.output = "generation ended before tool completion".to_string();
+                        }
+                    }
+                    self.active_generation_id = None;
+                    self.refresh_active_tool();
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(status) = payload.get("status").and_then(|v| v.as_str())
                     {
+                        self.text_stream_active = false;
                         let target_status = match status {
                             "cancelled" => ConversationStatus::Cancelled,
                             "failed" => ConversationStatus::Error,
@@ -2908,7 +3477,13 @@ impl App {
                 "error" => {
                     self.flush_reasoning();
                     self.flush_typewriter();
-                    self.active_tool = None;
+                    self.text_stream_active = false;
+                    for row in &mut self.tool_rows {
+                        if matches!(row.state, ToolRowState::Pending | ToolRowState::Running) {
+                            row.state = ToolRowState::Failed;
+                        }
+                    }
+                    self.refresh_active_tool();
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
                         && let Some(message) = payload.get("message").and_then(|v| v.as_str())
@@ -2956,6 +3531,12 @@ impl App {
         state.scroll = self.chat_scroll;
         state.status = self.status;
         state.current_plan = self.current_plan.clone();
+        state.text_stream_active = self.text_stream_active;
+        state.active_generation_id = self.active_generation_id;
+        state.tool_rows = std::mem::take(&mut self.tool_rows);
+        state.stream_parts = std::mem::take(&mut self.stream_parts);
+        state.stream_base_len = self.stream_base_len;
+        state.expanded_tool_rows = std::mem::take(&mut self.expanded_tool_rows);
     }
 
     /// Restore the target session's state into the live view fields.
@@ -2967,6 +3548,13 @@ impl App {
         self.chat_scroll = state.scroll;
         self.status = state.status;
         self.current_plan = state.current_plan.clone();
+        self.text_stream_active = state.text_stream_active;
+        self.active_generation_id = state.active_generation_id;
+        self.stream_parts = std::mem::take(&mut state.stream_parts);
+        self.stream_base_len = state.stream_base_len;
+        self.expanded_tool_rows = std::mem::take(&mut state.expanded_tool_rows);
+        self.tool_rows = std::mem::take(&mut state.tool_rows);
+        self.refresh_active_tool();
         self.metrics = None;
         self.diagnostic.clear();
         self.selected_suggestion = 0;
@@ -3214,7 +3802,7 @@ impl UiEventQueue {
     }
 }
 
-fn floor_char_boundary(value: &str, index: usize) -> usize {
+pub(crate) fn floor_char_boundary(value: &str, index: usize) -> usize {
     let mut index = index.min(value.len());
     while !value.is_char_boundary(index) {
         index = index.saturating_sub(1);

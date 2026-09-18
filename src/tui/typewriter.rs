@@ -25,6 +25,7 @@ impl Default for TypewriterState {
 }
 
 impl TypewriterState {
+    const MAX_QUEUE_BYTES: usize = 64 * 1024;
     pub fn new() -> Self {
         Self {
             queue: String::new(),
@@ -43,14 +44,19 @@ impl TypewriterState {
         self.token_count = 0;
     }
 
-    /// Ingest a text delta from the provider.
     pub fn push_delta(&mut self, delta: &str) {
         if self.stream_start.is_none() {
             self.stream_start = Some(Instant::now());
         }
-        let est_tokens = delta.len().div_ceil(4);
+        let remaining = Self::MAX_QUEUE_BYTES.saturating_sub(self.queue.len());
+        let mut end = delta.len().min(remaining);
+        while end > 0 && !delta.is_char_boundary(end) {
+            end -= 1;
+        }
+        let accepted = &delta[..end];
+        let est_tokens = accepted.len().div_ceil(4);
         self.token_count += est_tokens.max(1);
-        self.queue.push_str(delta);
+        self.queue.push_str(accepted);
     }
 
     /// Whether there are pending characters in the queue.
