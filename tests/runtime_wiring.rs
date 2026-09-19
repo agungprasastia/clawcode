@@ -2,14 +2,16 @@
 //! generation thread, and `App::poll_runtime` drains bus events into the
 //! transcript view. Provider is a fake; no network involved.
 
-use clawcode::persistence::{Db, WriterHandle};
+use clawcode::persistence::{Db, ToolCallStatus, WriterHandle};
 use clawcode::provider::{
     FinishReason, ModelInfo, Provider, ProviderCapabilities, ProviderError, ProviderId,
     StreamEvent, StreamRequest, StreamResponse, Usage,
 };
+use clawcode::runtime::{EventBus, client::RuntimeClient};
 use clawcode::tui::{App, Input, UiEvent};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -164,14 +166,328 @@ fn error_from_provider_surfaces_as_diagnostic() {
 
     let _ = std::fs::remove_file(&path);
 }
+#[derive(Debug)]
+struct SingleToolProvider {
+    calls: Arc<AtomicUsize>,
+    path: &'static str,
+}
+
+impl Provider for SingleToolProvider {
+    fn id(&self) -> &ProviderId {
+        static ID: std::sync::LazyLock<ProviderId> =
+            std::sync::LazyLock::new(|| ProviderId::new("fake-tool"));
+        &ID
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tools: true,
+        }
+    }
+
+    fn models(&self) -> Vec<ModelInfo> {
+        Vec::new()
+    }
+
+    fn send(&self, _request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(StreamResponse {
+            events: vec![
+                StreamEvent::ToolCallStart {
+                    id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                },
+                StreamEvent::ToolCallDelta {
+                    id: "call-1".to_string(),
+                    arguments: format!(r#"{{"path":"{}"}}"#, self.path),
+                },
+                StreamEvent::ToolCallEnd {
+                    id: "call-1".to_string(),
+                },
+                StreamEvent::Finish {
+                    reason: FinishReason::ToolCall,
+                },
+            ],
+        })
+    }
+}
+
+#[derive(Debug)]
+struct MalformedToolProvider {
+    calls: Arc<AtomicUsize>,
+    events: Vec<StreamEvent>,
+}
+
+impl Provider for MalformedToolProvider {
+    fn id(&self) -> &ProviderId {
+        static ID: std::sync::LazyLock<ProviderId> =
+            std::sync::LazyLock::new(|| ProviderId::new("malformed-tool"));
+        &ID
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tools: true,
+        }
+    }
+
+    fn models(&self) -> Vec<ModelInfo> {
+        Vec::new()
+    }
+
+    fn send(&self, _request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(StreamResponse {
+            events: self.events.clone(),
+        })
+    }
+}
 
 #[test]
-fn recovery_empty_turn_loop_recovers_after_empty_response() {
-    use std::sync::atomic::AtomicUsize;
+fn one_tool_call_is_joined_and_settled_before_generation_finishes() {
+    let path = temp_db_path("one_tool_settlement");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("tool").unwrap();
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let (_subscription, receiver) = bus.subscribe(Some(session.id));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = RuntimeClient::spawn(
+        db,
+        writer,
+        Box::new(SingleToolProvider {
+            calls: Arc::clone(&calls),
+            path: "Cargo.toml",
+        }),
+        bus,
+    );
+    client
+        .start_generation(session.id, "plan", "fake-tool", "model", "read")
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let mut finished = None;
+    while started.elapsed() < std::time::Duration::from_secs(3) {
+        if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(50))
+            && event.kind == "generation_finished"
+        {
+            finished = Some(event);
+            break;
+        }
+    }
+    let finished = finished.expect("generation must finish after joined tool");
+    assert!(finished.payload_json.contains("completed"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let db = client.shutdown();
+    let messages = db.messages(session.id).unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect::<Vec<_>>(),
+        vec!["user", "assistant", "tool"]
+    );
+    let assistant_id = messages[1].id;
+    let tool_calls = db.tool_calls(session.id).unwrap();
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].assistant_message_id, assistant_id);
+    assert_eq!(tool_calls[0].status, ToolCallStatus::Completed);
+    let events = db.events_after(session.id, -1).unwrap();
+    let created = events
+        .iter()
+        .find(|event| event.kind == "tool_call_created")
+        .expect("creation event must be durable");
+    assert!(created.payload_json.contains(&assistant_id.to_string()));
+    assert!(
+        events
+            .iter()
+            .position(|event| event.kind == "tool_call_settled")
+            .unwrap()
+            < events
+                .iter()
+                .position(|event| event.kind == "generation_finished")
+                .unwrap()
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn failed_local_tool_never_completes_generation() {
+    let path = temp_db_path("failed_tool");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("tool failure").unwrap();
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let (_subscription, receiver) = bus.subscribe(Some(session.id));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = RuntimeClient::spawn(
+        db,
+        writer,
+        Box::new(SingleToolProvider {
+            calls: Arc::clone(&calls),
+            path: "missing-phase1-file",
+        }),
+        bus,
+    );
+    client
+        .start_generation(session.id, "plan", "fake-tool", "model", "read")
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let mut finished = None;
+    while started.elapsed() < std::time::Duration::from_secs(3) {
+        if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(50))
+            && event.kind == "generation_finished"
+        {
+            finished = Some(event);
+            break;
+        }
+    }
+    let finished = finished.expect("failed tool generation must finish");
+    assert!(finished.payload_json.contains("failed"));
+    assert!(!finished.payload_json.contains("completed"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let db = client.shutdown();
+    let tool_calls = db.tool_calls(session.id).unwrap();
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].status, ToolCallStatus::Failed);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn incomplete_or_multiple_tool_calls_fail_before_execution() {
+    let cases = [
+        (
+            "incomplete",
+            vec![
+                StreamEvent::ToolCallStart {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                },
+                StreamEvent::ToolCallDelta {
+                    id: "call-1".into(),
+                    arguments: r#"{"path":"Cargo.toml"}"#.into(),
+                },
+                StreamEvent::Finish {
+                    reason: FinishReason::ToolCall,
+                },
+            ],
+        ),
+        (
+            "multiple",
+            vec![
+                StreamEvent::ToolCallStart {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                },
+                StreamEvent::ToolCallEnd {
+                    id: "call-1".into(),
+                },
+                StreamEvent::ToolCallStart {
+                    id: "call-2".into(),
+                    name: "read_file".into(),
+                },
+                StreamEvent::ToolCallEnd {
+                    id: "call-2".into(),
+                },
+                StreamEvent::Finish {
+                    reason: FinishReason::ToolCall,
+                },
+            ],
+        ),
+        (
+            "delta_after_end",
+            vec![
+                StreamEvent::ToolCallStart {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                },
+                StreamEvent::ToolCallEnd {
+                    id: "call-1".into(),
+                },
+                StreamEvent::ToolCallDelta {
+                    id: "call-1".into(),
+                    arguments: "{}".into(),
+                },
+                StreamEvent::Finish {
+                    reason: FinishReason::ToolCall,
+                },
+            ],
+        ),
+        (
+            "oversized_delta",
+            vec![
+                StreamEvent::ToolCallStart {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                },
+                StreamEvent::ToolCallDelta {
+                    id: "call-1".into(),
+                    arguments: "x".repeat(clawcode::persistence::MAX_TOOL_OUTPUT_BYTES + 1),
+                },
+                StreamEvent::ToolCallEnd {
+                    id: "call-1".into(),
+                },
+                StreamEvent::Finish {
+                    reason: FinishReason::ToolCall,
+                },
+            ],
+        ),
+    ];
+    for (tag, events) in cases {
+        let path = temp_db_path(tag);
+        let db = Db::open(&path).unwrap();
+        let session = db.create_session(tag).unwrap();
+        let writer = WriterHandle::spawn(Db::open(&path).unwrap());
+        let bus = EventBus::new();
+        let (_subscription, receiver) = bus.subscribe(Some(session.id));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = RuntimeClient::spawn(
+            db,
+            writer,
+            Box::new(MalformedToolProvider {
+                calls: Arc::clone(&calls),
+                events,
+            }),
+            bus,
+        );
+        client
+            .start_generation(session.id, "plan", "malformed-tool", "model", "reject")
+            .unwrap();
+        let started = std::time::Instant::now();
+        let mut finished = None;
+        while started.elapsed() < std::time::Duration::from_secs(3) {
+            if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(50))
+                && event.kind == "generation_finished"
+            {
+                finished = Some(event);
+                break;
+            }
+        }
+        let finished = finished.expect("malformed tool stream must finish");
+        assert!(finished.payload_json.contains("failed"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let generation_id = finished.generation_id.unwrap();
+        let db = client.shutdown();
+        assert_eq!(db.tool_calls(session.id).unwrap().len(), 0);
+        assert_eq!(
+            db.generation_status(generation_id).unwrap(),
+            Some(clawcode::persistence::GenerationStatus::Failed)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+#[test]
+fn one_tool_call_does_not_start_provider_continuation() {
+    let calls = Arc::new(AtomicUsize::new(0));
 
     #[derive(Debug)]
     struct ToolThenEmptyThenSummaryProvider {
-        turn: AtomicUsize,
+        turn: Arc<AtomicUsize>,
     }
 
     impl Provider for ToolThenEmptyThenSummaryProvider {
@@ -239,7 +555,7 @@ fn recovery_empty_turn_loop_recovers_after_empty_response() {
         }
     }
 
-    let path = temp_db_path("empty_turn_recovery");
+    let path = temp_db_path("one_call_no_continuation");
     let mut app = App::default();
     let db = Db::open(&path).expect("runtime db");
     let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
@@ -247,7 +563,7 @@ fn recovery_empty_turn_loop_recovers_after_empty_response() {
         db,
         writer,
         Box::new(ToolThenEmptyThenSummaryProvider {
-            turn: AtomicUsize::new(0),
+            turn: Arc::clone(&calls),
         }),
     );
 
@@ -267,10 +583,10 @@ fn recovery_empty_turn_loop_recovers_after_empty_response() {
     }
     app.poll_runtime();
 
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(
-        app.transcript().contains("Here is the recovered summary."),
-        "transcript should contain recovered summary, got: {}",
-        app.transcript()
+        !app.transcript().contains("Here is the recovered summary."),
+        "one-call tool path must not request continuation"
     );
     assert!(matches!(
         app.conversation_status(),

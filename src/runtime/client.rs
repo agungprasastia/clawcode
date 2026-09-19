@@ -6,7 +6,9 @@
 //! `Mutex` with short-lived accesses.
 
 use super::{EventBus, RuntimeEvent};
-use crate::persistence::{Db, GenerationStatus, WriterHandle};
+use crate::persistence::{
+    Db, GenerationStatus, MAX_TOOL_OUTPUT_BYTES, ToolCallStatus, WriterHandle,
+};
 use crate::provider::{FinishReason, Provider, StreamEvent, StreamRequest};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -179,7 +181,7 @@ fn worker_loop(
 ) {
     // (session_id, generation_id) per in-flight generation thread.
     let active: Arc<Mutex<Vec<(i64, i64)>>> = Default::default();
-    let mut handles: Vec<thread::JoinHandle<()>> = Vec::new();
+    let mut handles: Vec<(SharedGenerationCtx, thread::JoinHandle<()>)> = Vec::new();
 
     while let Ok(command) = receiver.recv() {
         match command {
@@ -233,36 +235,44 @@ fn worker_loop(
                     writer: writer.clone(),
                     bus: bus.clone(),
                     active: Arc::clone(&active),
+                    active_tool_call: Arc::new(Mutex::new(None)),
                     session_id,
                     generation_id: generation.id,
                 };
                 let generation_provider = provider.clone();
-                handles.push(thread::spawn(move || {
-                    // A panic must not leave the session stuck as "running":
-                    // finalise the row, notify subscribers, then deactivate.
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_generation(
-                            &ctx,
-                            generation_provider.as_ref(),
-                            &model,
-                            &prompt,
-                            &agent_mode,
-                            &provider_name,
-                        );
-                    }));
-                    if result.is_err() {
-                        tracing::error!(
-                            session_id,
-                            generation_id = ctx.generation_id,
-                            "generation thread panicked"
-                        );
-                        let _ = ctx.db.with(|db| {
-                            db.finish_generation(ctx.generation_id, GenerationStatus::Failed, None)
-                        });
-                        ctx.emit_status("failed", None);
-                    }
-                    ctx.deactivate();
-                }));
+                let ctx_for_handle = ctx.clone();
+                handles.push((
+                    ctx_for_handle,
+                    thread::spawn(move || {
+                        // A panic must not leave the session stuck as "running":
+                        // finalise the row, notify subscribers, then deactivate.
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            run_generation(
+                                &ctx,
+                                generation_provider.as_ref(),
+                                &model,
+                                &prompt,
+                                &agent_mode,
+                                &provider_name,
+                            );
+                        }));
+                        if result.is_err() {
+                            tracing::error!(
+                                session_id,
+                                generation_id = ctx.generation_id,
+                                "generation thread panicked"
+                            );
+                            let message = match ctx.fail_active_tool("generation thread panicked") {
+                                Ok(()) => "generation thread panicked".to_string(),
+                                Err(error) => format!(
+                                    "generation thread panicked; durable call may remain running: {error}"
+                                ),
+                            };
+                            ctx.fail_generation_state(&message);
+                        }
+                        ctx.deactivate();
+                    }),
+                ));
             }
             ClientCommand::CancelGeneration { session_id } => {
                 let generation_ids: Vec<i64> = active
@@ -293,26 +303,30 @@ fn worker_loop(
             }
         }
     }
-    for handle in handles {
+    for (ctx, handle) in handles {
         if let Err(panic) = handle.join() {
             tracing::error!(?panic, "generation thread panicked");
+            let _ = ctx.fail_active_tool("generation thread panicked");
+            ctx.fail_generation_state("generation thread panicked");
+            ctx.deactivate();
         }
     }
     let _ = writer.shutdown();
 }
 
 /// Shared per-generation context: log-persisted emits with committed seqs.
+#[derive(Clone)]
 struct SharedGenerationCtx {
     db: SharedDb,
     writer: WriterHandle,
     bus: EventBus,
     active: Arc<Mutex<Vec<(i64, i64)>>>,
+    active_tool_call: Arc<Mutex<Option<i64>>>,
     session_id: i64,
     generation_id: i64,
 }
 
 impl SharedGenerationCtx {
-    /// Persist an event to the log and publish it with the committed seq.
     fn emit(&self, kind: &str, payload: &serde_json::Value) {
         let payload_json = payload.to_string();
         let seq = self
@@ -325,6 +339,53 @@ impl SharedGenerationCtx {
             )
             .ok()
             .unwrap_or(0);
+        self.publish(seq, kind, payload_json);
+    }
+
+    fn fail_generation_state(&self, message: &str) {
+        self.db.last_error(self.session_id, message);
+        let _ = self
+            .db
+            .with(|db| db.finish_generation(self.generation_id, GenerationStatus::Failed, None));
+        self.emit_error(message);
+        self.emit_status("failed", None);
+    }
+
+    fn set_active_tool_call(&self, id: i64) {
+        *self
+            .active_tool_call
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(id);
+    }
+
+    fn clear_active_tool_call(&self) {
+        *self
+            .active_tool_call
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    fn fail_active_tool(&self, message: &str) -> Result<(), String> {
+        let id = self
+            .active_tool_call
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        let Some(id) = id else {
+            return Ok(());
+        };
+        let (call, seq) =
+            self.writer
+                .settle_tool_call(id, ToolCallStatus::Failed, None, Some(message))?;
+        self.publish(
+            seq,
+            "tool_call_settled",
+            tool_call_event_payload(&call, None, Some(message)),
+        );
+        Ok(())
+    }
+
+    fn publish(&self, seq: i64, kind: &str, payload_json: String) {
         self.bus.publish(RuntimeEvent {
             seq,
             session_id: self.session_id,
@@ -355,6 +416,23 @@ impl SharedGenerationCtx {
                 session_id != self.session_id || generation_id != self.generation_id
             });
     }
+}
+
+enum LocalToolOutcome {
+    Completed(String),
+    Failed(String),
+    Cancelled,
+}
+fn bound_tool_text(mut value: String) -> String {
+    if value.len() <= MAX_TOOL_OUTPUT_BYTES {
+        return value;
+    }
+    let mut end = MAX_TOOL_OUTPUT_BYTES;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
 }
 
 /// Run one provider turn, streaming deltas onto the bus and persisting the
@@ -442,7 +520,7 @@ fn run_generation(
         .map(|m| (m.role.as_str(), m.content.as_str()))
         != Some(("user", prompt))
     {
-        if !persist_message(ctx, "user", prompt) {
+        if persist_message(ctx, "user", prompt).is_none() {
             ctx.deactivate();
             return;
         }
@@ -490,6 +568,9 @@ fn run_generation(
 
         let mut text = String::new();
         let mut turn_tool_calls: Vec<(String, String, String)> = Vec::new();
+        let mut completed_tool_call_ids: Vec<String> = Vec::new();
+        let mut malformed_tool_stream = false;
+        let mut provider_tool_results: Vec<(String, String)> = Vec::new();
         let mut failed = false;
         let mut provider_cancelled = false;
 
@@ -506,39 +587,38 @@ fn run_generation(
                     ctx.emit("reasoning_delta", &serde_json::json!({ "delta": delta }));
                 }
                 StreamEvent::ToolCallStart { id, name } => {
-                    turn_tool_calls.push((id.clone(), name.clone(), String::new()));
-                    ctx.emit(
-                        "tool_call_start",
-                        &serde_json::json!({ "id": id, "name": name }),
-                    );
+                    if turn_tool_calls.iter().any(|(call_id, _, _)| call_id == &id) {
+                        malformed_tool_stream = true;
+                    } else {
+                        turn_tool_calls.push((id, name, String::new()));
+                    }
                 }
                 StreamEvent::ToolCallDelta { id, arguments } => {
-                    if let Some(call) = turn_tool_calls.iter_mut().find(|(cid, _, _)| cid == &id) {
-                        call.2.push_str(&arguments);
+                    if completed_tool_call_ids.contains(&id) {
+                        malformed_tool_stream = true;
+                    } else if let Some(call) =
+                        turn_tool_calls.iter_mut().find(|(cid, _, _)| cid == &id)
+                    {
+                        if call.2.len().saturating_add(arguments.len()) > MAX_TOOL_OUTPUT_BYTES {
+                            malformed_tool_stream = true;
+                        } else {
+                            call.2.push_str(&arguments);
+                        }
+                    } else {
+                        malformed_tool_stream = true;
                     }
-                    ctx.emit(
-                        "tool_call_delta",
-                        &serde_json::json!({ "id": id, "arguments": arguments }),
-                    );
                 }
                 StreamEvent::ToolCallEnd { id } => {
-                    let mut payload = serde_json::json!({
-                        "id": &id,
-                        "arguments_complete": true,
-                    });
-                    if let Some((_, name, _)) = turn_tool_calls
-                        .iter()
-                        .find(|(call_id, _, _)| call_id == &id)
+                    if !turn_tool_calls.iter().any(|(call_id, _, _)| call_id == &id)
+                        || completed_tool_call_ids.contains(&id)
                     {
-                        payload["name"] = serde_json::Value::String(name.clone());
+                        malformed_tool_stream = true;
+                    } else {
+                        completed_tool_call_ids.push(id);
                     }
-                    ctx.emit("tool_call_end", &payload);
                 }
                 StreamEvent::ToolResult { id, result } => {
-                    ctx.emit(
-                        "tool_result",
-                        &serde_json::json!({ "id": id, "result": result }),
-                    );
+                    provider_tool_results.push((id, result));
                 }
                 StreamEvent::Usage(value) => {
                     total_usage.input_tokens += value.input_tokens;
@@ -570,7 +650,7 @@ fn run_generation(
         }
 
         if cancel_requested(&ctx.db, ctx.generation_id) || provider_cancelled {
-            if !text.is_empty() && !persist_message(ctx, "assistant", &text) {
+            if !text.is_empty() && persist_message(ctx, "assistant", &text).is_none() {
                 ctx.deactivate();
                 return;
             }
@@ -590,9 +670,23 @@ fn run_generation(
             return;
         }
 
+        if !turn_tool_calls.is_empty() {
+            let complete_count = turn_tool_calls
+                .iter()
+                .filter(|(call_id, _, _)| completed_tool_call_ids.contains(call_id))
+                .count();
+            if malformed_tool_stream || turn_tool_calls.len() != 1 || complete_count != 1 {
+                let message = "first slice requires exactly one complete local tool call";
+                ctx.db.last_error(ctx.session_id, message);
+                fail_generation(ctx, message);
+                ctx.deactivate();
+                return;
+            }
+        }
+
         if turn_tool_calls.is_empty() {
             if !text.trim().is_empty() {
-                if !persist_message(ctx, "assistant", &text) {
+                if persist_message(ctx, "assistant", &text).is_none() {
                     ctx.deactivate();
                     return;
                 }
@@ -615,95 +709,255 @@ fn run_generation(
             break;
         }
 
-        empty_turn_retries = 0;
-        // Assistant called tools
-        let tool_calls_json: Vec<serde_json::Value> = turn_tool_calls
-            .iter()
-            .map(|(id, name, args)| {
-                serde_json::json!({
-                    "id": id,
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": args,
-                    }
-                })
-            })
-            .collect();
-
-        if !text.is_empty() {
-            if !persist_message(ctx, "assistant", &text) {
+        // Persist owning assistant row before any tool identity or side effect.
+        let assistant_message = match persist_message(ctx, "assistant", &text) {
+            Some(message) => message,
+            None => {
                 ctx.deactivate();
                 return;
             }
-            ctx.emit("assistant_message", &serde_json::json!({ "content": text }));
+        };
+        ctx.emit(
+            "assistant_message",
+            &serde_json::json!({ "content": text, "assistant_message_id": assistant_message.id }),
+        );
+
+        for (call_id, tool_name, args_str) in &turn_tool_calls {
+            ctx.publish(
+                0,
+                "tool_call_start",
+                serde_json::json!({
+                    "id": call_id,
+                    "name": tool_name,
+                    "assistant_message_id": assistant_message.id,
+                })
+                .to_string(),
+            );
+            ctx.publish(
+                0,
+                "tool_call_delta",
+                serde_json::json!({
+                    "id": call_id,
+                    "arguments": args_str,
+                    "assistant_message_id": assistant_message.id,
+                })
+                .to_string(),
+            );
+            ctx.publish(
+                0,
+                "tool_call_end",
+                serde_json::json!({
+                    "id": call_id,
+                    "name": tool_name,
+                    "arguments_complete": true,
+                    "assistant_message_id": assistant_message.id,
+                })
+                .to_string(),
+            );
+        }
+        for (call_id, result) in provider_tool_results {
+            ctx.publish(
+                0,
+                "tool_result",
+                serde_json::json!({
+                    "id": call_id,
+                    "result": result,
+                    "assistant_message_id": assistant_message.id,
+                })
+                .to_string(),
+            );
         }
 
-        messages.push(crate::provider::ChatMessage {
-            role: "assistant".to_string(),
-            content: text,
-            tool_call_id: None,
-            tool_calls: Some(tool_calls_json),
-            name: None,
-        });
-
-        for (call_id, tool_name, args_str) in turn_tool_calls {
-            let args_val: serde_json::Value = serde_json::from_str(&args_str)
-                .unwrap_or_else(|_| serde_json::json!({ "raw": args_str }));
-            ctx.emit(
-                "tool_executing",
-                &serde_json::json!({
-                    "id": &call_id,
-                    "name": &tool_name,
-                    "arguments": &args_val,
-                }),
-            );
-
-            let effective_ws_dir =
-                if workspace_dir.as_os_str().is_empty() || !workspace_dir.exists() {
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                } else {
-                    workspace_dir.clone()
-                };
-
-            let result = match crate::workspace::Workspace::with_filesystem(
-                &effective_ws_dir,
-                crate::workspace::RealFileSystem,
-            ) {
-                Ok(ws) => {
-                    crate::conversation::tools::execute_tool(&ws, mode, &tool_name, &args_str)
+        let Some((call_id, tool_name, args_str)) = turn_tool_calls.into_iter().next() else {
+            fail_generation(ctx, "provider returned no complete local tool call");
+            ctx.deactivate();
+            return;
+        };
+        let (created_call, created_seq) = match ctx.writer.create_tool_call(
+            ctx.session_id,
+            ctx.generation_id,
+            assistant_message.id,
+            &call_id,
+            &tool_name,
+            &args_str,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                fail_generation(ctx, &error);
+                ctx.deactivate();
+                return;
+            }
+        };
+        ctx.set_active_tool_call(created_call.id);
+        ctx.publish(
+            created_seq,
+            "tool_call_created",
+            tool_call_event_payload(&created_call, None, None),
+        );
+        let (running_call, running_seq) = match ctx.writer.start_tool_call(created_call.id) {
+            Ok(value) => value,
+            Err(error) => {
+                let mut message = format!("tool start failed before execution: {error}");
+                match ctx.writer.settle_tool_call(
+                    created_call.id,
+                    ToolCallStatus::Failed,
+                    None,
+                    Some(&message),
+                ) {
+                    Ok((failed_call, failed_seq)) => ctx.publish(
+                        failed_seq,
+                        "tool_call_settled",
+                        tool_call_event_payload(&failed_call, None, Some(&message)),
+                    ),
+                    Err(settle_error) => {
+                        message.push_str(&format!(
+                            "; durable call may remain created: {settle_error}"
+                        ));
+                    }
                 }
-                Err(e) => Err(format!(
-                    "Failed to open workspace {}: {e}",
-                    effective_ws_dir.display()
-                )),
-            };
+                ctx.clear_active_tool_call();
+                fail_generation(ctx, &message);
+                ctx.deactivate();
+                return;
+            }
+        };
+        ctx.publish(
+            running_seq,
+            "tool_call_started",
+            tool_call_event_payload(&running_call, None, None),
+        );
 
-            let (success, output) = match result {
-                Ok(out) => (true, out),
-                Err(err) => (false, format!("Error executing {tool_name}: {err}")),
-            };
-            ctx.emit(
-                "tool_executed",
-                &serde_json::json!({
-                    "id": &call_id,
-                    "name": &tool_name,
-                    "arguments": &args_val,
-                    "success": success,
-                    "output": &output,
-                }),
-            );
-
-            messages.push(crate::provider::ChatMessage {
-                role: "tool".to_string(),
-                content: output,
-                tool_call_id: Some(call_id),
-                tool_calls: None,
-                name: Some(tool_name),
+        let effective_ws_dir = if workspace_dir.as_os_str().is_empty() || !workspace_dir.exists() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            workspace_dir.clone()
+        };
+        let child_db = ctx.db.clone();
+        let child_generation_id = ctx.generation_id;
+        let child_tool_name = tool_name.clone();
+        let child_args = args_str.clone();
+        let child = thread::Builder::new()
+            .name("clawcode-local-tool".to_string())
+            .spawn(move || {
+                if cancel_requested(&child_db, child_generation_id) {
+                    return LocalToolOutcome::Cancelled;
+                }
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match crate::workspace::Workspace::with_filesystem(
+                        &effective_ws_dir,
+                        crate::workspace::RealFileSystem,
+                    ) {
+                        Ok(ws) => crate::conversation::tools::execute_tool(
+                            &ws,
+                            mode,
+                            &child_tool_name,
+                            &child_args,
+                        ),
+                        Err(error) => Err(format!(
+                            "Failed to open workspace {}: {error}",
+                            effective_ws_dir.display()
+                        )),
+                    }
+                }));
+                match result {
+                    Ok(Ok(output)) => LocalToolOutcome::Completed(output),
+                    Ok(Err(error)) => LocalToolOutcome::Failed(error),
+                    Err(_) => LocalToolOutcome::Failed("local tool thread panicked".to_string()),
+                }
             });
-        }
+        let outcome = match child {
+            Ok(handle) => match handle.join() {
+                Ok(outcome) => outcome,
+                Err(_) => LocalToolOutcome::Failed("local tool thread panicked".to_string()),
+            },
+            Err(error) => LocalToolOutcome::Failed(format!("failed to spawn local tool: {error}")),
+        };
+        let outcome = if cancel_requested(&ctx.db, ctx.generation_id) {
+            LocalToolOutcome::Cancelled
+        } else {
+            outcome
+        };
 
-        ctx.emit("agent_turn", &serde_json::json!({ "turn": turn + 1 }));
+        let (settlement_status, result, error) = match outcome {
+            LocalToolOutcome::Completed(output) => (
+                ToolCallStatus::Completed,
+                Some(bound_tool_text(output)),
+                None,
+            ),
+            LocalToolOutcome::Failed(error) => {
+                (ToolCallStatus::Failed, None, Some(bound_tool_text(error)))
+            }
+            LocalToolOutcome::Cancelled => (ToolCallStatus::Cancelled, None, None),
+        };
+        let (settled_call, settled_seq) = match ctx.writer.settle_tool_call(
+            created_call.id,
+            settlement_status,
+            result.as_deref(),
+            error.as_deref(),
+        ) {
+            Ok(value) => {
+                ctx.clear_active_tool_call();
+                value
+            }
+            Err(error) => {
+                ctx.clear_active_tool_call();
+                let message =
+                    format!("tool settlement failed; durable call may remain running: {error}");
+                ctx.db.last_error(ctx.session_id, &message);
+                fail_generation(ctx, &message);
+                ctx.deactivate();
+                return;
+            }
+        };
+        ctx.publish(
+            settled_seq,
+            "tool_call_settled",
+            tool_call_event_payload(&settled_call, result.as_deref(), error.as_deref()),
+        );
+        let projected_content = result.as_deref().or(error.as_deref()).unwrap_or("");
+        if persist_message(ctx, "tool", projected_content).is_none() {
+            ctx.deactivate();
+            return;
+        }
+        let _reloaded_messages = ctx.db.with(|db| db.messages(ctx.session_id));
+        let success = settled_call.status == ToolCallStatus::Completed;
+        let output = result.as_deref().or(error.as_deref()).unwrap_or("");
+        ctx.emit(
+            "tool_executed",
+            &serde_json::json!({
+                "id": call_id,
+                "name": tool_name,
+                "arguments": serde_json::from_str::<serde_json::Value>(&args_str)
+                    .unwrap_or_else(|_| serde_json::Value::String(args_str.clone())),
+                "success": success,
+                "output": output,
+                "assistant_message_id": assistant_message.id,
+            }),
+        );
+        if settled_call.status == ToolCallStatus::Cancelled {
+            ctx.db.clear_last_error(ctx.session_id);
+            let _ = ctx.db.with(|db| {
+                db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None)
+            });
+            ctx.emit_status("cancelled", None);
+            ctx.deactivate();
+            return;
+        }
+        if settled_call.status == ToolCallStatus::Failed {
+            let message = error.as_deref().unwrap_or("local tool failed");
+            ctx.db.last_error(ctx.session_id, message);
+            fail_generation(ctx, message);
+            ctx.deactivate();
+            return;
+        }
+        ctx.emit(
+            "agent_turn",
+            &serde_json::json!({
+                "turn": turn + 1,
+                "assistant_message_id": assistant_message.id,
+            }),
+        );
+        break;
     }
 
     if cancel_requested(&ctx.db, ctx.generation_id) {
@@ -751,13 +1005,37 @@ fn cancel_requested(db: &SharedDb, generation_id: i64) -> bool {
         .is_some_and(|status| status == GenerationStatus::Cancelling)
 }
 
-fn persist_message(ctx: &SharedGenerationCtx, role: &str, content: &str) -> bool {
-    match ctx.writer.append(ctx.session_id, role, content) {
-        Ok(()) => true,
+fn tool_call_event_payload(
+    tool_call: &crate::persistence::ToolCall,
+    result: Option<&str>,
+    error: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "tool_call_id": tool_call.id,
+        "call_id": tool_call.call_id,
+        "tool_name": tool_call.tool_name,
+        "arguments": serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
+            .unwrap_or_else(|_| serde_json::Value::String(tool_call.arguments.clone())),
+        "assistant_message_id": tool_call.assistant_message_id,
+        "generation_id": tool_call.generation_id,
+        "status": tool_call.status.as_str(),
+        "result": result,
+        "error": error,
+    })
+    .to_string()
+}
+
+fn persist_message(
+    ctx: &SharedGenerationCtx,
+    role: &str,
+    content: &str,
+) -> Option<crate::persistence::Message> {
+    match ctx.writer.append_message(ctx.session_id, role, content) {
+        Ok(message) => Some(message),
         Err(error) => {
             ctx.db.last_error(ctx.session_id, &error);
             fail_generation(ctx, &error);
-            false
+            None
         }
     }
 }
@@ -1003,5 +1281,59 @@ mod tests {
         let res = client.create_session(1, "test");
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("client shut down"));
+    }
+
+    #[test]
+    fn panic_cleanup_settles_active_tool_call_as_failed() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("panic_test").unwrap();
+        let generation = db
+            .start_generation(session.id, "plan", "fake", "model")
+            .unwrap();
+        let writer = WriterHandle::spawn(db);
+        let assistant = writer.append_message(session.id, "assistant", "").unwrap();
+        let (created, _) = writer
+            .create_tool_call(
+                session.id,
+                generation.id,
+                assistant.id,
+                "call-panic",
+                "read_file",
+                "{}",
+            )
+            .unwrap();
+        let (running, _) = writer.start_tool_call(created.id).unwrap();
+
+        let bus = EventBus::new();
+        let (_sub, rx) = bus.subscribe(Some(session.id));
+        let active = Arc::new(Mutex::new(vec![(session.id, generation.id)]));
+        let dummy_db = Db::open_in_memory().unwrap();
+        let ctx = SharedGenerationCtx {
+            db: SharedDb::new(Arc::new(Mutex::new(dummy_db))),
+            writer: writer.clone(),
+            bus,
+            active,
+            active_tool_call: Arc::new(Mutex::new(Some(running.id))),
+            session_id: session.id,
+            generation_id: generation.id,
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic!("simulated generation panic");
+        }));
+        assert!(result.is_err());
+        assert!(ctx.fail_active_tool("generation thread panicked").is_ok());
+
+        let db = writer.shutdown().unwrap();
+        let tool_call = db.tool_call(running.id).unwrap().unwrap();
+        assert_eq!(tool_call.status, ToolCallStatus::Failed);
+        assert_eq!(
+            tool_call.error.as_deref(),
+            Some("generation thread panicked")
+        );
+        let event = rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        assert_eq!(event.kind, "tool_call_settled");
     }
 }

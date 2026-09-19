@@ -193,6 +193,170 @@ fn migration_is_idempotent_and_rejects_future_schema() {
 }
 
 #[test]
+fn v2_database_migrates_tool_call_projection() {
+    let path = temp_db_path("tool_calls_migration");
+    {
+        let _db = Db::open(&path).unwrap();
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE tool_calls; PRAGMA user_version = 2;")
+            .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.schema_version(), clawcode::persistence::SCHEMA_VERSION);
+    assert!(db.tool_calls(1).unwrap().is_empty());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn v3_database_rebuild_preserves_rows_with_assistant_identity() {
+    let path = temp_db_path("tool_calls_v3_migration");
+    let (session_id, generation_id, assistant_a, assistant_b) = {
+        let db = Db::open(&path).unwrap();
+        let session = db.create_session("v3").unwrap();
+        let generation = db
+            .start_generation(session.id, "plan", "fake", "model")
+            .unwrap();
+        let first = db.append_message(session.id, "assistant", "one").unwrap();
+        let second = db.append_message(session.id, "assistant", "two").unwrap();
+        (session.id, generation.id, first.id, second.id)
+    };
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+             DROP TABLE tool_calls;
+             CREATE TABLE tool_calls (
+                 id INTEGER PRIMARY KEY,
+                 session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                 generation_id INTEGER NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
+                 assistant_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                 call_id TEXT NOT NULL,
+                 tool_name TEXT NOT NULL,
+                 arguments TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 result TEXT,
+                 error TEXT,
+                 created_at TEXT NOT NULL,
+                 settled_at TEXT,
+                 UNIQUE (generation_id, call_id)
+             );
+             INSERT INTO tool_calls VALUES
+                 (11, 1, 1, 1, 'same-call', 'read_file', '{}', 'created', NULL, NULL, 'now', NULL),
+                 (12, 1, 1, 2, 'other-call', 'read_file', '{}', 'created', NULL, NULL, 'now', NULL);
+             PRAGMA user_version = 3;",
+            )
+            .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    let calls = db.tool_calls(session_id).unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].assistant_message_id, assistant_a);
+    assert_eq!(calls[1].assistant_message_id, assistant_b);
+    assert_eq!(
+        (session_id, generation_id, assistant_a, assistant_b),
+        (1, 1, 1, 2)
+    );
+    assert_eq!(db.schema_version(), clawcode::persistence::SCHEMA_VERSION);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn call_id_reuses_across_assistant_messages_but_not_same_owner() {
+    let db = Db::open_in_memory().unwrap();
+    let first_session = db.create_session("identity").unwrap();
+    let first_generation = db
+        .start_generation(first_session.id, "plan", "fake", "model")
+        .unwrap();
+    let second_session = db.create_session("other").unwrap();
+    let first_assistant = db
+        .append_message(first_session.id, "assistant", "one")
+        .unwrap();
+    let second_assistant = db
+        .append_message(first_session.id, "assistant", "two")
+        .unwrap();
+    let other_assistant = db
+        .append_message(second_session.id, "assistant", "other")
+        .unwrap();
+    let writer = WriterHandle::spawn(db);
+    writer
+        .create_tool_call(
+            first_session.id,
+            first_generation.id,
+            first_assistant.id,
+            "same-call",
+            "read_file",
+            "{}",
+        )
+        .unwrap();
+    writer
+        .create_tool_call(
+            first_session.id,
+            first_generation.id,
+            second_assistant.id,
+            "same-call",
+            "read_file",
+            "{}",
+        )
+        .unwrap();
+    assert!(
+        writer
+            .create_tool_call(
+                first_session.id,
+                first_generation.id,
+                first_assistant.id,
+                "same-call",
+                "read_file",
+                "{}",
+            )
+            .is_err()
+    );
+    assert!(
+        writer
+            .create_tool_call(
+                first_session.id,
+                first_generation.id,
+                other_assistant.id,
+                "cross-parent",
+                "read_file",
+                "{}",
+            )
+            .is_err()
+    );
+    let db = writer.shutdown().unwrap();
+    assert_eq!(db.tool_calls(first_session.id).unwrap().len(), 2);
+}
+
+#[test]
+fn tool_call_arguments_respect_existing_storage_bound() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("tool_limits").unwrap();
+    let generation = db
+        .start_generation(session.id, "plan", "fake", "model")
+        .unwrap();
+    let writer = WriterHandle::spawn(db);
+    let assistant = writer.append_message(session.id, "assistant", "").unwrap();
+    let oversized = "x".repeat(clawcode::persistence::MAX_TOOL_OUTPUT_BYTES + 1);
+    assert!(
+        writer
+            .create_tool_call(
+                session.id,
+                generation.id,
+                assistant.id,
+                "call-too-large",
+                "read_file",
+                &oversized,
+            )
+            .is_err()
+    );
+    let db = writer.shutdown().unwrap();
+    assert!(db.tool_calls(session.id).unwrap().is_empty());
+}
+
+#[test]
 fn delete_session_cascades_messages() {
     let db = Db::open_in_memory().unwrap();
     let session = db.create_session("cascade").unwrap();
@@ -253,4 +417,275 @@ fn writer_operations_after_shutdown_fail_gracefully() {
     let event_err = writer.append_event(session.id, None, "event", "{}");
     assert!(event_err.is_err());
     assert!(event_err.unwrap_err().contains("writer shut down"));
+}
+#[test]
+fn tool_call_identity_and_settlement_use_assistant_message_id() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("tool_identity").unwrap();
+    let generation = db
+        .start_generation(session.id, "plan", "fake", "model")
+        .unwrap();
+    let writer = WriterHandle::spawn(db);
+
+    let assistant = writer
+        .append_message(session.id, "assistant", "")
+        .expect("assistant message must commit before tool call");
+    let (created, created_seq) = writer
+        .create_tool_call(
+            session.id,
+            generation.id,
+            assistant.id,
+            "call-7",
+            "read_file",
+            r#"{"path":"README.md"}"#,
+        )
+        .expect("tool identity must commit");
+    assert_eq!(created.assistant_message_id, assistant.id);
+    assert_eq!(created.generation_id, generation.id);
+    assert_eq!(
+        created.status,
+        clawcode::persistence::ToolCallStatus::Created
+    );
+
+    let (running, running_seq) = writer
+        .start_tool_call(created.id)
+        .expect("running transition must commit");
+    assert!(running_seq > created_seq);
+    assert_eq!(
+        running.status,
+        clawcode::persistence::ToolCallStatus::Running
+    );
+
+    let (settled, settled_seq) = writer
+        .settle_tool_call(
+            created.id,
+            clawcode::persistence::ToolCallStatus::Completed,
+            Some("done"),
+            None,
+        )
+        .expect("settlement must commit");
+    assert!(settled_seq > running_seq);
+    assert_eq!(settled.assistant_message_id, assistant.id);
+    assert_eq!(
+        settled.status,
+        clawcode::persistence::ToolCallStatus::Completed
+    );
+    assert_eq!(settled.result.as_deref(), Some("done"));
+
+    let db = writer.shutdown().expect("sole writer");
+    let events = db.events_after(session.id, -1).unwrap();
+    assert_eq!(events.len(), 3);
+    for event in events {
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                .unwrap()
+                .get("assistant_message_id")
+                .and_then(serde_json::Value::as_i64),
+            Some(assistant.id)
+        );
+    }
+}
+
+#[test]
+fn failed_tool_settlement_does_not_claim_success() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("tool_failure").unwrap();
+    let generation = db
+        .start_generation(session.id, "plan", "fake", "model")
+        .unwrap();
+    let writer = WriterHandle::spawn(db);
+    let assistant = writer.append_message(session.id, "assistant", "").unwrap();
+    let (created, _) = writer
+        .create_tool_call(
+            session.id,
+            generation.id,
+            assistant.id,
+            "call-9",
+            "read_file",
+            "{}",
+        )
+        .unwrap();
+    writer.start_tool_call(created.id).unwrap();
+
+    let (settled, _) = writer
+        .settle_tool_call(
+            created.id,
+            clawcode::persistence::ToolCallStatus::Failed,
+            None,
+            Some("permission denied"),
+        )
+        .unwrap();
+    assert_eq!(
+        settled.status,
+        clawcode::persistence::ToolCallStatus::Failed
+    );
+    assert_eq!(settled.error.as_deref(), Some("permission denied"));
+    assert!(
+        writer
+            .settle_tool_call(
+                created.id,
+                clawcode::persistence::ToolCallStatus::Completed,
+                Some("wrong"),
+                None,
+            )
+            .is_err()
+    );
+    let db = writer.shutdown().unwrap();
+    let persisted = db.tool_call(created.id).unwrap().unwrap();
+    assert_eq!(
+        persisted.status,
+        clawcode::persistence::ToolCallStatus::Failed
+    );
+    assert_eq!(persisted.result, None);
+}
+
+#[test]
+fn tool_call_creation_rejects_non_assistant_roles() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("role_rejection").unwrap();
+    let generation = db
+        .start_generation(session.id, "plan", "fake", "model")
+        .unwrap();
+    let writer = WriterHandle::spawn(db);
+    let user_msg = writer.append_message(session.id, "user", "hi").unwrap();
+    let tool_msg = writer.append_message(session.id, "tool", "result").unwrap();
+
+    assert!(
+        writer
+            .create_tool_call(
+                session.id,
+                generation.id,
+                user_msg.id,
+                "call-user",
+                "read_file",
+                "{}",
+            )
+            .is_err()
+    );
+
+    assert!(
+        writer
+            .create_tool_call(
+                session.id,
+                generation.id,
+                tool_msg.id,
+                "call-tool",
+                "read_file",
+                "{}",
+            )
+            .is_err()
+    );
+
+    let db = writer.shutdown().unwrap();
+    assert!(db.tool_calls(session.id).unwrap().is_empty());
+}
+
+#[test]
+fn tool_call_settlement_transitions_enforce_running_status() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("transitions").unwrap();
+    let generation = db
+        .start_generation(session.id, "plan", "fake", "model")
+        .unwrap();
+    let writer = WriterHandle::spawn(db);
+    let assistant = writer.append_message(session.id, "assistant", "").unwrap();
+
+    let (created_1, _) = writer
+        .create_tool_call(
+            session.id,
+            generation.id,
+            assistant.id,
+            "call-1",
+            "read_file",
+            "{}",
+        )
+        .unwrap();
+    // created -> completed rejected
+    assert!(
+        writer
+            .settle_tool_call(
+                created_1.id,
+                clawcode::persistence::ToolCallStatus::Completed,
+                Some("ok"),
+                None,
+            )
+            .is_err()
+    );
+    // created -> cancelled rejected
+    assert!(
+        writer
+            .settle_tool_call(
+                created_1.id,
+                clawcode::persistence::ToolCallStatus::Cancelled,
+                None,
+                None,
+            )
+            .is_err()
+    );
+    // created -> failed allowed
+    let (failed_1, _) = writer
+        .settle_tool_call(
+            created_1.id,
+            clawcode::persistence::ToolCallStatus::Failed,
+            None,
+            Some("start failure"),
+        )
+        .unwrap();
+    assert_eq!(
+        failed_1.status,
+        clawcode::persistence::ToolCallStatus::Failed
+    );
+
+    let (created_2, _) = writer
+        .create_tool_call(
+            session.id,
+            generation.id,
+            assistant.id,
+            "call-2",
+            "read_file",
+            "{}",
+        )
+        .unwrap();
+    writer.start_tool_call(created_2.id).unwrap();
+    // running -> completed allowed
+    let (completed_2, _) = writer
+        .settle_tool_call(
+            created_2.id,
+            clawcode::persistence::ToolCallStatus::Completed,
+            Some("done"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        completed_2.status,
+        clawcode::persistence::ToolCallStatus::Completed
+    );
+
+    let (created_3, _) = writer
+        .create_tool_call(
+            session.id,
+            generation.id,
+            assistant.id,
+            "call-3",
+            "read_file",
+            "{}",
+        )
+        .unwrap();
+    writer.start_tool_call(created_3.id).unwrap();
+    // running -> cancelled allowed
+    let (cancelled_3, _) = writer
+        .settle_tool_call(
+            created_3.id,
+            clawcode::persistence::ToolCallStatus::Cancelled,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        cancelled_3.status,
+        clawcode::persistence::ToolCallStatus::Cancelled
+    );
+
+    let db = writer.shutdown().unwrap();
+    assert_eq!(db.tool_calls(session.id).unwrap().len(), 3);
 }

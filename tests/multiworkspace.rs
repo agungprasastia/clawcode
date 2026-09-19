@@ -97,7 +97,7 @@ fn migration_v1_to_v2_preserves_data_and_adds_workspace_defaults() {
     // Now open through Db::open, which triggers migration to v2
     {
         let db = Db::open(&path).expect("open and migrate to v2");
-        assert_eq!(db.schema_version(), 2);
+        assert_eq!(db.schema_version(), clawcode::persistence::SCHEMA_VERSION);
 
         // Verify session preserved and updated with defaults
         let sessions = db.list_sessions_in_workspace(1).expect("list workspace 1");

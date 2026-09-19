@@ -1,7 +1,9 @@
 //! Bounded async-batch writer. Owns the `Db` on a worker thread; the UI thread
 //! only sends appends through a bounded channel and never blocks on SQLite.
 
-use crate::persistence::db::{Db, MAX_MESSAGE_BYTES};
+use crate::persistence::db::{
+    Db, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, Message, ToolCall, ToolCallStatus,
+};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
@@ -28,12 +30,38 @@ enum Command {
         content: String,
         reply: mpsc::Sender<Result<(), String>>,
     },
+    AppendMessage {
+        session_id: i64,
+        role: String,
+        content: String,
+        reply: mpsc::Sender<Result<Message, String>>,
+    },
     AppendEvent {
         session_id: i64,
         generation_id: Option<i64>,
         kind: String,
         payload_json: String,
         reply: mpsc::Sender<Result<i64, String>>,
+    },
+    CreateToolCall {
+        session_id: i64,
+        generation_id: i64,
+        assistant_message_id: i64,
+        call_id: String,
+        tool_name: String,
+        arguments: String,
+        reply: mpsc::Sender<Result<(ToolCall, i64), String>>,
+    },
+    StartToolCall {
+        id: i64,
+        reply: mpsc::Sender<Result<(ToolCall, i64), String>>,
+    },
+    SettleToolCall {
+        id: i64,
+        status: ToolCallStatus,
+        result: Option<String>,
+        error: Option<String>,
+        reply: mpsc::Sender<Result<(ToolCall, i64), String>>,
     },
     Flush(mpsc::Sender<()>),
 }
@@ -62,6 +90,19 @@ impl WriterHandle {
                         content,
                         reply,
                     } => pending.push((session_id, role, content, reply)),
+                    Command::AppendMessage {
+                        session_id,
+                        role,
+                        content,
+                        reply,
+                    } => {
+                        flush_batch(&db, &mut pending);
+                        flush_events(&db, &mut pending_events);
+                        let _ = reply.send(
+                            db.append_message(session_id, &role, &content)
+                                .map_err(|error| error.to_string()),
+                        );
+                    }
                     Command::AppendEvent {
                         session_id,
                         generation_id,
@@ -70,6 +111,49 @@ impl WriterHandle {
                         reply,
                     } => {
                         pending_events.push((session_id, generation_id, kind, payload_json, reply))
+                    }
+                    Command::CreateToolCall {
+                        session_id,
+                        generation_id,
+                        assistant_message_id,
+                        call_id,
+                        tool_name,
+                        arguments,
+                        reply,
+                    } => {
+                        flush_batch(&db, &mut pending);
+                        flush_events(&db, &mut pending_events);
+                        let _ = reply.send(
+                            db.create_tool_call(
+                                session_id,
+                                generation_id,
+                                assistant_message_id,
+                                &call_id,
+                                &tool_name,
+                                &arguments,
+                            )
+                            .map_err(|error| error.to_string()),
+                        );
+                    }
+                    Command::StartToolCall { id, reply } => {
+                        flush_batch(&db, &mut pending);
+                        flush_events(&db, &mut pending_events);
+                        let _ =
+                            reply.send(db.start_tool_call(id).map_err(|error| error.to_string()));
+                    }
+                    Command::SettleToolCall {
+                        id,
+                        status,
+                        result,
+                        error,
+                        reply,
+                    } => {
+                        flush_batch(&db, &mut pending);
+                        flush_events(&db, &mut pending_events);
+                        let _ = reply.send(
+                            db.settle_tool_call(id, status, result.as_deref(), error.as_deref())
+                                .map_err(|error| error.to_string()),
+                        );
                     }
                     Command::Flush(ack) => {
                         flush_batch(&db, &mut pending);
@@ -86,6 +170,19 @@ impl WriterHandle {
                             content,
                             reply,
                         } => pending.push((session_id, role, content, reply)),
+                        Command::AppendMessage {
+                            session_id,
+                            role,
+                            content,
+                            reply,
+                        } => {
+                            flush_batch(&db, &mut pending);
+                            flush_events(&db, &mut pending_events);
+                            let _ = reply.send(
+                                db.append_message(session_id, &role, &content)
+                                    .map_err(|error| error.to_string()),
+                            );
+                        }
                         Command::AppendEvent {
                             session_id,
                             generation_id,
@@ -99,6 +196,54 @@ impl WriterHandle {
                             payload_json,
                             reply,
                         )),
+                        Command::CreateToolCall {
+                            session_id,
+                            generation_id,
+                            assistant_message_id,
+                            call_id,
+                            tool_name,
+                            arguments,
+                            reply,
+                        } => {
+                            flush_batch(&db, &mut pending);
+                            flush_events(&db, &mut pending_events);
+                            let _ = reply.send(
+                                db.create_tool_call(
+                                    session_id,
+                                    generation_id,
+                                    assistant_message_id,
+                                    &call_id,
+                                    &tool_name,
+                                    &arguments,
+                                )
+                                .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::StartToolCall { id, reply } => {
+                            flush_batch(&db, &mut pending);
+                            flush_events(&db, &mut pending_events);
+                            let _ = reply
+                                .send(db.start_tool_call(id).map_err(|error| error.to_string()));
+                        }
+                        Command::SettleToolCall {
+                            id,
+                            status,
+                            result,
+                            error,
+                            reply,
+                        } => {
+                            flush_batch(&db, &mut pending);
+                            flush_events(&db, &mut pending_events);
+                            let _ = reply.send(
+                                db.settle_tool_call(
+                                    id,
+                                    status,
+                                    result.as_deref(),
+                                    error.as_deref(),
+                                )
+                                .map_err(|error| error.to_string()),
+                            );
+                        }
                         Command::Flush(ack) => {
                             flush_batch(&db, &mut pending);
                             flush_events(&db, &mut pending_events);
@@ -162,6 +307,91 @@ impl WriterHandle {
     /// tests and callers that need the durable ack.
     pub fn append(&self, session_id: i64, role: &str, content: &str) -> Result<(), String> {
         let reply_rx = self.try_append(session_id, role, content)?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+    /// Queue an assistant/tool message and return its committed SQLite id.
+    pub fn append_message(
+        &self,
+        session_id: i64,
+        role: &str,
+        content: &str,
+    ) -> Result<Message, String> {
+        if content.len() > MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
+                content.len()
+            ));
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::AppendMessage {
+                session_id,
+                role: role.to_string(),
+                content: content.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn create_tool_call(
+        &self,
+        session_id: i64,
+        generation_id: i64,
+        assistant_message_id: i64,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &str,
+    ) -> Result<(ToolCall, i64), String> {
+        if arguments.len() > MAX_TOOL_OUTPUT_BYTES {
+            return Err(format!(
+                "tool arguments too large: {} bytes (max {MAX_TOOL_OUTPUT_BYTES})",
+                arguments.len()
+            ));
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::CreateToolCall {
+                session_id,
+                generation_id,
+                assistant_message_id,
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments: arguments.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn start_tool_call(&self, id: i64) -> Result<(ToolCall, i64), String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::StartToolCall {
+                id,
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn settle_tool_call(
+        &self,
+        id: i64,
+        status: ToolCallStatus,
+        result: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<(ToolCall, i64), String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::SettleToolCall {
+                id,
+                status,
+                result: result.map(str::to_string),
+                error: error.map(str::to_string),
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
         reply_rx.recv().map_err(|error| error.to_string())?
     }
 

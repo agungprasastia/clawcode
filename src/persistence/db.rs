@@ -8,6 +8,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub const MAX_MESSAGES_PER_SESSION: usize = 1_200;
 /// Maximum stored message size in bytes.
 pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
+/// Maximum stored tool arguments and settlement output size in bytes.
+pub const MAX_TOOL_OUTPUT_BYTES: usize = MAX_MESSAGE_BYTES;
 /// Maximum sessions kept.
 pub const MAX_SESSIONS: usize = 200;
 
@@ -58,12 +60,57 @@ impl Session {
 
     const SELECT_COLUMNS: &str = "id, title, workspace_id, status, pinned_at";
 }
-
 #[derive(Debug)]
 pub struct Message {
     pub id: i64,
     pub role: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ToolCallStatus {
+    Created,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl ToolCallStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "created" => Self::Created,
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ToolCall {
+    pub id: i64,
+    pub session_id: i64,
+    pub generation_id: i64,
+    pub assistant_message_id: i64,
+    pub call_id: String,
+    pub tool_name: String,
+    pub arguments: String,
+    pub status: ToolCallStatus,
+    pub result: Option<String>,
+    pub error: Option<String>,
 }
 
 /// A workspace root registered in the database.
@@ -305,6 +352,187 @@ impl Db {
                 })
             },
         )
+    }
+    /// Fetch one durable local tool call by row id.
+    pub fn tool_call(&self, id: i64) -> Result<Option<ToolCall>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT id, session_id, generation_id, assistant_message_id,
+                        call_id, tool_name, arguments, status, result, error
+                 FROM tool_calls WHERE id = ?1",
+                params![id],
+                tool_call_from_row,
+            )
+            .optional()
+    }
+
+    /// Fetch durable local tool calls for one session in creation order.
+    pub fn tool_calls(&self, session_id: i64) -> Result<Vec<ToolCall>, rusqlite::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, generation_id, assistant_message_id,
+                    call_id, tool_name, arguments, status, result, error
+             FROM tool_calls WHERE session_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![session_id], tool_call_from_row)?;
+        rows.collect()
+    }
+
+    /// Atomically create a durable call identity and its lifecycle event.
+    pub fn create_tool_call(
+        &self,
+        session_id: i64,
+        generation_id: i64,
+        assistant_message_id: i64,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &str,
+    ) -> Result<(ToolCall, i64), rusqlite::Error> {
+        ensure_tool_text_size(arguments)?;
+        let tx = self.connection.unchecked_transaction()?;
+        let owns_message: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM messages
+                 WHERE id = ?1 AND session_id = ?2 AND role = 'assistant'
+             ) AND EXISTS(
+                 SELECT 1 FROM generations
+                 WHERE id = ?3 AND session_id = ?2
+             )",
+            params![assistant_message_id, session_id, generation_id],
+            |row| row.get(0),
+        )?;
+        if !owns_message {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        tx.execute(
+            "INSERT INTO tool_calls (
+                 session_id, generation_id, assistant_message_id,
+                 call_id, tool_name, arguments, status
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'created')",
+            params![
+                session_id,
+                generation_id,
+                assistant_message_id,
+                call_id,
+                tool_name,
+                arguments
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        let payload = serde_json::json!({
+            "tool_call_id": id,
+            "call_id": call_id,
+            "tool_name": tool_name,
+            "arguments": serde_json::from_str::<serde_json::Value>(arguments)
+                .unwrap_or_else(|_| serde_json::Value::String(arguments.to_string())),
+            "assistant_message_id": assistant_message_id,
+            "generation_id": generation_id,
+            "status": ToolCallStatus::Created.as_str(),
+        })
+        .to_string();
+        let seq = append_event_in_transaction(
+            &tx,
+            session_id,
+            Some(generation_id),
+            "tool_call_created",
+            &payload,
+        )?;
+        let tool_call = tx.query_row(
+            "SELECT id, session_id, generation_id, assistant_message_id,
+                    call_id, tool_name, arguments, status, result, error
+             FROM tool_calls WHERE id = ?1",
+            params![id],
+            tool_call_from_row,
+        )?;
+        tx.commit()?;
+        Ok((tool_call, seq))
+    }
+
+    /// Atomically mark a created call as running and append its event.
+    pub fn start_tool_call(&self, id: i64) -> Result<(ToolCall, i64), rusqlite::Error> {
+        let tx = self.connection.unchecked_transaction()?;
+        if tx.execute(
+            "UPDATE tool_calls SET status = 'running'
+             WHERE id = ?1 AND status = 'created'",
+            params![id],
+        )? != 1
+        {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let tool_call = tx.query_row(
+            "SELECT id, session_id, generation_id, assistant_message_id,
+                    call_id, tool_name, arguments, status, result, error
+             FROM tool_calls WHERE id = ?1",
+            params![id],
+            tool_call_from_row,
+        )?;
+        let payload = tool_call_payload(&tool_call, None, None);
+        let seq = append_event_in_transaction(
+            &tx,
+            tool_call.session_id,
+            Some(tool_call.generation_id),
+            "tool_call_started",
+            &payload,
+        )?;
+        tx.commit()?;
+        Ok((tool_call, seq))
+    }
+
+    /// Atomically settle a running call and append the terminal event.
+    pub fn settle_tool_call(
+        &self,
+        id: i64,
+        status: ToolCallStatus,
+        result: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<(ToolCall, i64), rusqlite::Error> {
+        if !matches!(
+            status,
+            ToolCallStatus::Completed | ToolCallStatus::Failed | ToolCallStatus::Cancelled
+        ) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "tool call settlement must be terminal".to_string(),
+            ));
+        }
+        if let Some(value) = result {
+            ensure_tool_text_size(value)?;
+        }
+        if let Some(value) = error {
+            ensure_tool_text_size(value)?;
+        }
+        let tx = self.connection.unchecked_transaction()?;
+        let updated = match status {
+            ToolCallStatus::Failed => tx.execute(
+                "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4
+                 WHERE id = ?1 AND status IN ('created', 'running')",
+                params![id, status.as_str(), result, error],
+            )?,
+            ToolCallStatus::Completed | ToolCallStatus::Cancelled => tx.execute(
+                "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4
+                 WHERE id = ?1 AND status = 'running'",
+                params![id, status.as_str(), result, error],
+            )?,
+            _ => unreachable!(),
+        };
+        if updated != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let tool_call = tx.query_row(
+            "SELECT id, session_id, generation_id, assistant_message_id,
+                    call_id, tool_name, arguments, status, result, error
+             FROM tool_calls WHERE id = ?1",
+            params![id],
+            tool_call_from_row,
+        )?;
+        let payload = tool_call_payload(&tool_call, result, error);
+        let seq = append_event_in_transaction(
+            &tx,
+            tool_call.session_id,
+            Some(tool_call.generation_id),
+            "tool_call_settled",
+            &payload,
+        )?;
+        tx.commit()?;
+        Ok((tool_call, seq))
     }
 
     pub fn messages(&self, session_id: i64) -> Result<Vec<Message>, rusqlite::Error> {
@@ -628,6 +856,72 @@ impl Db {
         )?;
         Ok(())
     }
+}
+
+fn ensure_tool_text_size(value: &str) -> Result<(), rusqlite::Error> {
+    if value.len() > MAX_TOOL_OUTPUT_BYTES {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            MessageTooLarge(value.len()),
+        )));
+    }
+    Ok(())
+}
+
+fn tool_call_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCall> {
+    Ok(ToolCall {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        generation_id: row.get(2)?,
+        assistant_message_id: row.get(3)?,
+        call_id: row.get(4)?,
+        tool_name: row.get(5)?,
+        arguments: row.get(6)?,
+        status: ToolCallStatus::from_str(&row.get::<_, String>(7)?),
+        result: row.get(8)?,
+        error: row.get(9)?,
+    })
+}
+
+fn tool_call_payload(tool_call: &ToolCall, result: Option<&str>, error: Option<&str>) -> String {
+    serde_json::json!({
+        "tool_call_id": tool_call.id,
+        "call_id": tool_call.call_id,
+        "tool_name": tool_call.tool_name,
+        "arguments": serde_json::from_str::<serde_json::Value>(&tool_call.arguments)
+            .unwrap_or_else(|_| serde_json::Value::String(tool_call.arguments.clone())),
+        "assistant_message_id": tool_call.assistant_message_id,
+        "generation_id": tool_call.generation_id,
+        "status": tool_call.status.as_str(),
+        "result": result,
+        "error": error,
+    })
+    .to_string()
+}
+
+fn append_event_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: i64,
+    generation_id: Option<i64>,
+    kind: &str,
+    payload_json: &str,
+) -> Result<i64, rusqlite::Error> {
+    let seq = tx.query_row(
+        "INSERT INTO generation_events (seq, session_id, generation_id, kind, payload_json)
+         VALUES (
+             COALESCE((SELECT MAX(seq) + 1 FROM generation_events WHERE session_id = ?1), 0),
+             ?1, ?2, ?3, ?4
+         )
+         RETURNING seq",
+        params![session_id, generation_id, kind, payload_json],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "UPDATE sessions SET last_event_seq = MAX(last_event_seq, ?2),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ?1",
+        params![session_id, seq],
+    )?;
+    Ok(seq)
 }
 
 /// Message exceeds [`MAX_MESSAGE_BYTES`].

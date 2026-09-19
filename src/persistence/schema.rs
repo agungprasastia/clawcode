@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 
 /// Current persistence schema version.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Apply all migrations up to [`SCHEMA_VERSION`]. Idempotent.
 pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
@@ -78,6 +78,65 @@ pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
              ALTER TABLE sessions ADD COLUMN archived_at TEXT;
              CREATE INDEX idx_sessions_workspace ON sessions(workspace_id);
              PRAGMA user_version = 2;
+             COMMIT;",
+        )?;
+    }
+    if current < 3 {
+        connection.execute_batch(
+            "BEGIN;
+             CREATE TABLE tool_calls (
+                 id INTEGER PRIMARY KEY,
+                 session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                 generation_id INTEGER NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
+                 assistant_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                 call_id TEXT NOT NULL,
+                 tool_name TEXT NOT NULL,
+                 arguments TEXT NOT NULL,
+                 status TEXT NOT NULL CHECK (status IN ('created', 'running', 'completed', 'failed', 'cancelled')),
+                 result TEXT,
+                 error TEXT,
+                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                 settled_at TEXT,
+                 UNIQUE (generation_id, call_id)
+             );
+             CREATE INDEX idx_tool_calls_session ON tool_calls(session_id, id);
+             CREATE INDEX idx_tool_calls_assistant ON tool_calls(assistant_message_id);
+             PRAGMA user_version = 3;
+             COMMIT;",
+        )?;
+    }
+    if current < 4 {
+        connection.execute_batch(
+            "BEGIN;
+             ALTER TABLE tool_calls RENAME TO tool_calls_v3;
+             CREATE TABLE tool_calls (
+                 id INTEGER PRIMARY KEY,
+                 session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                 generation_id INTEGER NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
+                 assistant_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                 call_id TEXT NOT NULL,
+                 tool_name TEXT NOT NULL,
+                 arguments TEXT NOT NULL,
+                 status TEXT NOT NULL CHECK (status IN ('created', 'running', 'completed', 'failed', 'cancelled')),
+                 result TEXT,
+                 error TEXT,
+                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                 settled_at TEXT,
+                 UNIQUE (assistant_message_id, call_id)
+             );
+             INSERT INTO tool_calls (
+                 id, session_id, generation_id, assistant_message_id,
+                 call_id, tool_name, arguments, status, result, error,
+                 created_at, settled_at
+             )
+             SELECT id, session_id, generation_id, assistant_message_id,
+                    call_id, tool_name, arguments, status, result, error,
+                    created_at, settled_at
+             FROM tool_calls_v3;
+             DROP TABLE tool_calls_v3;
+             CREATE INDEX idx_tool_calls_session ON tool_calls(session_id, id);
+             CREATE INDEX idx_tool_calls_assistant ON tool_calls(assistant_message_id);
+             PRAGMA user_version = 4;
              COMMIT;",
         )?;
     }
