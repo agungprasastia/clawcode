@@ -517,6 +517,7 @@ impl WriterHandle {
         reply_rx.recv().map_err(|error| error.to_string())?
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_tool_call(
         &self,
         session_id: i64,

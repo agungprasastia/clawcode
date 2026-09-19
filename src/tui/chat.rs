@@ -310,6 +310,7 @@ fn indent_assistant_line(line: &mut Line<'static>) {
     line.spans.insert(0, Span::raw("   "));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_stream_parts(
     lines: &mut Vec<Line<'static>>,
     parts: &[StreamPart],
@@ -484,6 +485,7 @@ pub fn strip_ansi_codes(s: &str) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_shell_card(
     lines: &mut Vec<Line<'static>>,
     row: &ToolRow,
@@ -694,6 +696,7 @@ fn extract_diff_lines(row: &ToolRow) -> Vec<crate::tui::diff::DiffLine> {
     Vec::new()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_diff_card(
     lines: &mut Vec<Line<'static>>,
     row: &ToolRow,
@@ -887,6 +890,7 @@ fn render_diff_card(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_tool_card_or_row(
     lines: &mut Vec<Line<'static>>,
     row: &ToolRow,
@@ -908,6 +912,7 @@ fn render_tool_card_or_row(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_generic_tool_card(
     lines: &mut Vec<Line<'static>>,
     row: &ToolRow,

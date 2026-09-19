@@ -605,6 +605,7 @@ impl Db {
     }
 
     /// Atomically create a durable call identity and its lifecycle event.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_tool_call(
         &self,
         session_id: i64,
