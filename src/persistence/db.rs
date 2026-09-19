@@ -68,6 +68,65 @@ pub struct Message {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum InputDelivery {
+    Queue,
+    Steer,
+}
+
+impl InputDelivery {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Steer => "steer",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "steer" => Self::Steer,
+            _ => Self::Queue,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum InputStatus {
+    Pending,
+    Promoted,
+    Discarded,
+}
+
+impl InputStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Promoted => "promoted",
+            Self::Discarded => "discarded",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "pending" => Self::Pending,
+            "promoted" => Self::Promoted,
+            _ => Self::Discarded,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SessionInput {
+    pub id: i64,
+    pub session_id: i64,
+    pub content: String,
+    pub delivery: InputDelivery,
+    pub status: InputStatus,
+    pub created_at: String,
+    pub promoted_at: Option<String>,
+    pub user_message_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ToolCallStatus {
     Created,
     Running,
@@ -352,6 +411,111 @@ impl Db {
                 })
             },
         )
+    }
+
+    /// Fetch one session input by row id.
+    pub fn session_input(&self, id: i64) -> Result<Option<SessionInput>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT id, session_id, content, delivery, status, created_at, promoted_at, user_message_id
+                 FROM session_inputs WHERE id = ?1",
+                params![id],
+                session_input_from_row,
+            )
+            .optional()
+    }
+
+    /// Fetch session inputs for one session in admission order.
+    pub fn session_inputs(&self, session_id: i64) -> Result<Vec<SessionInput>, rusqlite::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, content, delivery, status, created_at, promoted_at, user_message_id
+             FROM session_inputs WHERE session_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![session_id], session_input_from_row)?;
+        rows.collect()
+    }
+
+    /// Atomically admit an input to the inbox and record prompt_admitted event.
+    pub fn admit_input(
+        &self,
+        session_id: i64,
+        content: &str,
+        delivery: InputDelivery,
+    ) -> Result<(SessionInput, i64), rusqlite::Error> {
+        if content.len() > MAX_MESSAGE_BYTES {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                MessageTooLarge(content.len()),
+            )));
+        }
+        let tx = self.connection.unchecked_transaction()?;
+        let session_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        if !session_exists {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let input = tx.query_row(
+            "INSERT INTO session_inputs (session_id, content, delivery, status)
+             VALUES (?1, ?2, ?3, 'pending')
+             RETURNING id, session_id, content, delivery, status, created_at, promoted_at, user_message_id",
+            params![session_id, content, delivery.as_str()],
+            session_input_from_row,
+        )?;
+        let payload = serde_json::json!({
+            "input_id": input.id,
+            "session_id": session_id,
+            "delivery": delivery.as_str(),
+        })
+        .to_string();
+        let seq = append_event_in_transaction(&tx, session_id, None, "prompt_admitted", &payload)?;
+        tx.commit()?;
+        Ok((input, seq))
+    }
+
+    /// Atomically promote a pending input to a user message and record prompt_promoted event.
+    pub fn promote_input(
+        &self,
+        input_id: i64,
+    ) -> Result<(SessionInput, Message, i64), rusqlite::Error> {
+        let tx = self.connection.unchecked_transaction()?;
+        let (session_id, content): (i64, String) = tx.query_row(
+            "SELECT session_id, content FROM session_inputs WHERE id = ?1 AND status = 'pending'",
+            params![input_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let message = tx.query_row(
+            "INSERT INTO messages (session_id, role, content) VALUES (?1, 'user', ?2)
+             RETURNING id, role, content",
+            params![session_id, content],
+            |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    role: row.get(1)?,
+                    content: row.get(2)?,
+                })
+            },
+        )?;
+        let input = tx.query_row(
+            "UPDATE session_inputs
+             SET status = 'promoted',
+                 promoted_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                 user_message_id = ?1
+             WHERE id = ?2
+             RETURNING id, session_id, content, delivery, status, created_at, promoted_at, user_message_id",
+            params![message.id, input_id],
+            session_input_from_row,
+        )?;
+        let payload = serde_json::json!({
+            "input_id": input_id,
+            "session_id": session_id,
+            "user_message_id": message.id,
+        })
+        .to_string();
+        let seq = append_event_in_transaction(&tx, session_id, None, "prompt_promoted", &payload)?;
+        tx.commit()?;
+        Ok((input, message, seq))
     }
     /// Fetch one durable local tool call by row id.
     pub fn tool_call(&self, id: i64) -> Result<Option<ToolCall>, rusqlite::Error> {
@@ -882,6 +1046,18 @@ fn tool_call_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCall> {
     })
 }
 
+fn session_input_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionInput> {
+    Ok(SessionInput {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        content: row.get(2)?,
+        delivery: InputDelivery::from_str(&row.get::<_, String>(3)?),
+        status: InputStatus::from_str(&row.get::<_, String>(4)?),
+        created_at: row.get(5)?,
+        promoted_at: row.get(6)?,
+        user_message_id: row.get(7)?,
+    })
+}
 fn tool_call_payload(tool_call: &ToolCall, result: Option<&str>, error: Option<&str>) -> String {
     serde_json::json!({
         "tool_call_id": tool_call.id,

@@ -1,4 +1,4 @@
-use clawcode::persistence::{Db, WriterHandle};
+use clawcode::persistence::{Db, InputDelivery, InputStatus, MAX_MESSAGE_BYTES, WriterHandle};
 use std::path::PathBuf;
 
 fn temp_db_path(tag: &str) -> PathBuf {
@@ -688,4 +688,235 @@ fn tool_call_settlement_transitions_enforce_running_status() {
 
     let db = writer.shutdown().unwrap();
     assert_eq!(db.tool_calls(session.id).unwrap().len(), 3);
+}
+
+#[test]
+fn input_admission_creates_pending_row_and_event() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("input_admission").unwrap();
+
+    let (input, seq) = db
+        .admit_input(session.id, "prompt content", InputDelivery::Queue)
+        .unwrap();
+
+    assert!(input.id > 0);
+    assert_eq!(input.session_id, session.id);
+    assert_eq!(input.content, "prompt content");
+    assert_eq!(input.delivery, InputDelivery::Queue);
+    assert_eq!(input.status, InputStatus::Pending);
+    assert!(input.promoted_at.is_none());
+    assert!(input.user_message_id.is_none());
+    assert!(!input.created_at.is_empty());
+
+    // Input is queryable by id and by session.
+    let by_id = db.session_input(input.id).unwrap().expect("input exists");
+    assert_eq!(by_id, input);
+
+    let inputs = db.session_inputs(session.id).unwrap();
+    assert_eq!(inputs, vec![input.clone()]);
+
+    // Admission does not create a user message.
+    let messages = db.messages(session.id).unwrap();
+    assert!(messages.is_empty());
+
+    // Event log contains prompt_admitted event.
+    let events = db.events_after(session.id, -1).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].seq, seq);
+    assert_eq!(events[0].session_id, session.id);
+    assert_eq!(events[0].generation_id, None);
+    assert_eq!(events[0].kind, "prompt_admitted");
+
+    let payload: serde_json::Value = serde_json::from_str(&events[0].payload_json).unwrap();
+    assert_eq!(payload["input_id"], input.id);
+    assert_eq!(payload["session_id"], session.id);
+    assert_eq!(payload["delivery"], "queue");
+}
+
+#[test]
+fn input_admission_survives_restart() {
+    let path = temp_db_path("input_restart");
+    let (session_id, input_id) = {
+        let db = Db::open(&path).unwrap();
+        let session = db.create_session("restart_session").unwrap();
+        let (input, _) = db
+            .admit_input(session.id, "durable prompt", InputDelivery::Steer)
+            .unwrap();
+        (session.id, input.id)
+    };
+
+    // Restart: fresh handle to same database.
+    let db = Db::open(&path).unwrap();
+    let inputs = db.session_inputs(session_id).unwrap();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].id, input_id);
+    assert_eq!(inputs[0].content, "durable prompt");
+    assert_eq!(inputs[0].delivery, InputDelivery::Steer);
+    assert_eq!(inputs[0].status, InputStatus::Pending);
+
+    let messages = db.messages(session_id).unwrap();
+    assert!(messages.is_empty());
+
+    let events = db.events_after(session_id, -1).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, "prompt_admitted");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn input_promotion_atomically_creates_message_updates_status_and_appends_event() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("input_promotion").unwrap();
+
+    let (input, admit_seq) = db
+        .admit_input(session.id, "to be promoted", InputDelivery::Queue)
+        .unwrap();
+
+    let (promoted_input, message, promo_seq) = db.promote_input(input.id).unwrap();
+
+    assert!(promo_seq > admit_seq);
+
+    // Message created with role='user'.
+    assert!(message.id > 0);
+    assert_eq!(message.role, "user");
+    assert_eq!(message.content, "to be promoted");
+
+    // Promoted input row updated.
+    assert_eq!(promoted_input.id, input.id);
+    assert_eq!(promoted_input.session_id, session.id);
+    assert_eq!(promoted_input.content, "to be promoted");
+    assert_eq!(promoted_input.delivery, InputDelivery::Queue);
+    assert_eq!(promoted_input.status, InputStatus::Promoted);
+    assert!(promoted_input.promoted_at.is_some());
+    assert_eq!(promoted_input.user_message_id, Some(message.id));
+
+    // Verified through independent queries.
+    let fetched_input = db.session_input(input.id).unwrap().unwrap();
+    assert_eq!(fetched_input, promoted_input);
+
+    let messages = db.messages(session.id).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id, message.id);
+    assert_eq!(messages[0].role, "user");
+    assert_eq!(messages[0].content, "to be promoted");
+
+    // Event log has prompt_admitted and prompt_promoted.
+    let events = db.events_after(session.id, -1).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, "prompt_admitted");
+    assert_eq!(events[1].kind, "prompt_promoted");
+    assert_eq!(events[1].seq, promo_seq);
+    assert_eq!(events[1].generation_id, None);
+
+    let payload: serde_json::Value = serde_json::from_str(&events[1].payload_json).unwrap();
+    assert_eq!(payload["input_id"], input.id);
+    assert_eq!(payload["session_id"], session.id);
+    assert_eq!(payload["user_message_id"], message.id);
+}
+
+#[test]
+fn promoting_already_promoted_or_nonexistent_input_fails() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("promo_edge_cases").unwrap();
+
+    let (input, _) = db
+        .admit_input(session.id, "once only", InputDelivery::Queue)
+        .unwrap();
+
+    // First promotion succeeds.
+    assert!(db.promote_input(input.id).is_ok());
+
+    // Second promotion fails.
+    assert!(db.promote_input(input.id).is_err());
+
+    // Promoting non-existent input fails.
+    assert!(db.promote_input(999_999).is_err());
+
+    // Exactly one message and two events exist.
+    assert_eq!(db.messages(session.id).unwrap().len(), 1);
+    assert_eq!(db.events_after(session.id, -1).unwrap().len(), 2);
+}
+
+#[test]
+fn oversized_content_or_invalid_session_fails_without_partial_row_or_event() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("input_validation").unwrap();
+
+    // Content exceeding limit fails.
+    let oversized = "x".repeat(MAX_MESSAGE_BYTES + 1);
+    assert!(
+        db.admit_input(session.id, &oversized, InputDelivery::Queue)
+            .is_err()
+    );
+    assert!(db.session_inputs(session.id).unwrap().is_empty());
+    assert!(db.events_after(session.id, -1).unwrap().is_empty());
+
+    // Non-existent session fails.
+    assert!(
+        db.admit_input(999_999, "valid", InputDelivery::Queue)
+            .is_err()
+    );
+    assert!(db.session_inputs(session.id).unwrap().is_empty());
+    assert!(db.events_after(session.id, -1).unwrap().is_empty());
+}
+
+#[test]
+fn writer_handles_admit_and_promote_input() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("writer_inputs").unwrap();
+    let writer = WriterHandle::spawn(db);
+
+    // Oversized input rejected immediately.
+    let oversized = "x".repeat(MAX_MESSAGE_BYTES + 1);
+    assert!(
+        writer
+            .admit_input(session.id, &oversized, InputDelivery::Queue)
+            .is_err()
+    );
+
+    // Valid input admitted.
+    let (input, admit_seq) = writer
+        .admit_input(session.id, "async prompt", InputDelivery::Steer)
+        .unwrap();
+    assert_eq!(input.status, InputStatus::Pending);
+    assert_eq!(input.delivery, InputDelivery::Steer);
+
+    // Valid input promoted.
+    let (promoted, message, promo_seq) = writer.promote_input(input.id).unwrap();
+    assert!(promo_seq > admit_seq);
+    assert_eq!(promoted.status, InputStatus::Promoted);
+    assert_eq!(message.role, "user");
+    assert_eq!(message.content, "async prompt");
+
+    // Double-promote rejected.
+    assert!(writer.promote_input(input.id).is_err());
+
+    let db = writer.shutdown().unwrap();
+    assert_eq!(db.messages(session.id).unwrap().len(), 1);
+    assert_eq!(db.session_inputs(session.id).unwrap().len(), 1);
+}
+
+#[test]
+fn v4_database_migrates_to_v5_session_inputs() {
+    let path = temp_db_path("v4_to_v5_migration");
+    {
+        let _db = Db::open(&path).unwrap();
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE IF EXISTS session_inputs; PRAGMA user_version = 4;")
+            .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.schema_version(), clawcode::persistence::SCHEMA_VERSION);
+    let session = db.create_session("migrated").unwrap();
+    let (input, _) = db
+        .admit_input(session.id, "post-migration prompt", InputDelivery::Queue)
+        .unwrap();
+    assert_eq!(input.status, InputStatus::Pending);
+    let (promoted, _, _) = db.promote_input(input.id).unwrap();
+    assert_eq!(promoted.status, InputStatus::Promoted);
+    let _ = std::fs::remove_file(&path);
 }

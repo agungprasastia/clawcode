@@ -7,7 +7,7 @@
 
 use super::{EventBus, RuntimeEvent};
 use crate::persistence::{
-    Db, GenerationStatus, MAX_TOOL_OUTPUT_BYTES, ToolCallStatus, WriterHandle,
+    Db, GenerationStatus, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, ToolCallStatus, WriterHandle,
 };
 use crate::provider::{FinishReason, Provider, StreamEvent, StreamRequest};
 use std::sync::{Arc, Mutex, mpsc};
@@ -98,6 +98,12 @@ impl RuntimeClient {
         model: &str,
         prompt: &str,
     ) -> Result<(), String> {
+        if prompt.len() > MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
+                prompt.len()
+            ));
+        }
         self.try_send(ClientCommand::StartGeneration {
             session_id,
             agent_mode: agent_mode.to_string(),
@@ -217,6 +223,49 @@ fn worker_loop(
                     );
                     continue;
                 }
+                let (input, admit_seq) = match writer.admit_input(
+                    session_id,
+                    &prompt,
+                    crate::persistence::db::InputDelivery::Queue,
+                ) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        publish_error(&bus, session_id, None, &error);
+                        continue;
+                    }
+                };
+                bus.publish(RuntimeEvent {
+                    seq: admit_seq,
+                    session_id,
+                    generation_id: None,
+                    kind: "prompt_admitted".to_string(),
+                    payload_json: serde_json::json!({
+                        "input_id": input.id,
+                        "session_id": session_id,
+                        "delivery": input.delivery.as_str(),
+                    })
+                    .to_string(),
+                });
+                let (promoted_input, user_message, promo_seq) = match writer.promote_input(input.id)
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        publish_error(&bus, session_id, None, &error);
+                        continue;
+                    }
+                };
+                bus.publish(RuntimeEvent {
+                    seq: promo_seq,
+                    session_id,
+                    generation_id: None,
+                    kind: "prompt_promoted".to_string(),
+                    payload_json: serde_json::json!({
+                        "input_id": promoted_input.id,
+                        "session_id": session_id,
+                        "user_message_id": user_message.id,
+                    })
+                    .to_string(),
+                });
                 let generation = match db
                     .with(|db| db.start_generation(session_id, &agent_mode, &provider_name, &model))
                 {
@@ -648,7 +697,6 @@ fn run_generation(
                 }
             }
         }
-
         if cancel_requested(&ctx.db, ctx.generation_id) || provider_cancelled {
             if !text.is_empty() && persist_message(ctx, "assistant", &text).is_none() {
                 ctx.deactivate();
@@ -1148,14 +1196,28 @@ mod tests {
 
     #[test]
     fn failed_assistant_persistence_fails_generation() {
-        let db = Db::open_in_memory().unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("clawcode-test-persist-fail-{nonce}.db"));
+        let db = Db::open(&path).unwrap();
         let session = db.create_session("persistence_failure").unwrap();
         let session_id = session.id;
-        // Existing prompt skips user persistence; missing writer session forces assistant append to fail.
-        db.append_message(session_id, "user", "hello").unwrap();
         let bus = EventBus::new();
         let (_sub_id, rx) = bus.subscribe(Some(session_id));
-        let writer = WriterHandle::spawn(Db::open_in_memory().unwrap());
+        let writer = WriterHandle::spawn(Db::open(&path).unwrap());
+        // Force assistant message append to fail via trigger
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_assistant BEFORE INSERT ON messages
+                 WHEN NEW.role = 'assistant'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced assistant failure');
+                 END;",
+            )
+            .unwrap();
         let client = RuntimeClient::spawn(db, writer, Box::new(TextProvider), bus);
 
         client
@@ -1183,6 +1245,8 @@ mod tests {
             db.generation_status(generation_id).unwrap(),
             Some(GenerationStatus::Failed)
         );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

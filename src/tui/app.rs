@@ -2761,63 +2761,103 @@ impl App {
         self.reset_turn_view(false);
         self.status = ConversationStatus::Idle;
         self.session_listings.clear();
-        if self.active_session_id.is_none() {
-            if let Some(runtime) = self.runtime.as_ref() {
-                if let Ok(id) = runtime.create_session(1, prompt) {
-                    self.switch_session(id);
-                }
-            } else if let Ok(session) = self.command_service.create_session(prompt) {
-                self.switch_session(session.id);
+        if self.runtime.is_some() {
+            if prompt.len() > crate::persistence::MAX_MESSAGE_BYTES {
+                self.diagnostic = format!(
+                    "message too large: {} bytes (max {})",
+                    prompt.len(),
+                    crate::persistence::MAX_MESSAGE_BYTES
+                );
+                return;
             }
-        }
-        if let Some(session_id) = self.active_session_id {
-            let _ = self
-                .command_service
-                .append_message(session_id, "user", prompt);
-        }
+            if self.active_session_id.is_none()
+                && let Some(runtime) = self.runtime.as_ref()
+                && let Ok(id) = runtime.create_session(1, prompt)
+            {
+                self.switch_session(id);
+            }
+            let Some(session_id) = self.active_session_id else {
+                return;
+            };
 
-        self.text_stream_active = false;
-        if self.transcript.is_empty() {
-            self.transcript.push_str(&format!("> {prompt}\n\n"));
-        } else {
-            self.transcript.push_str(&format!("\n\n> {prompt}\n\n"));
-        }
-        self.truncate_transcript();
-
-        let provider = if self.provider.is_empty() {
-            "anthropic".to_string()
-        } else {
-            self.provider.clone()
-        };
-        let model = if self.model.is_empty() {
-            "claude-3-7-sonnet".to_string()
-        } else {
-            self.model.clone()
-        };
-
-        let is_connected = self.command_service.is_connected() || !self.provider.is_empty();
-
-        self.apply_conversation(ConversationEvent::PromptSubmitted {
-            prompt: prompt.to_string(),
-            provider: provider.clone(),
-            model: model.clone(),
-        });
-
-        if let Some(runtime) = self.runtime.as_ref()
-            && let Some(session_id) = self.active_session_id
-        {
+            let provider = if self.provider.is_empty() {
+                "anthropic".to_string()
+            } else {
+                self.provider.clone()
+            };
+            let model = if self.model.is_empty() {
+                "claude-3-7-sonnet".to_string()
+            } else {
+                self.model.clone()
+            };
             let agent_mode = match self.mode {
                 ConversationMode::Plan => "plan",
                 ConversationMode::Build => "build",
             };
-            if let Err(error) =
-                runtime.start_generation(session_id, agent_mode, &provider, &model, prompt)
+
+            if let Some(runtime) = self.runtime.as_ref()
+                && let Err(error) =
+                    runtime.start_generation(session_id, agent_mode, &provider, &model, prompt)
             {
-                self.diagnostic = format!("generation failed to start: {error}");
-                self.status = ConversationStatus::Error;
+                self.diagnostic = error;
+                return;
             }
-        } else if !is_connected {
-            self.diagnostic = "provider not connected; use /connect".into();
+
+            self.text_stream_active = false;
+            if self.transcript.is_empty() {
+                self.transcript.push_str(&format!("> {prompt}\n\n"));
+            } else {
+                self.transcript.push_str(&format!("\n\n> {prompt}\n\n"));
+            }
+            self.truncate_transcript();
+
+            self.apply_conversation(ConversationEvent::PromptSubmitted {
+                prompt: prompt.to_string(),
+                provider,
+                model,
+            });
+        } else {
+            if self.active_session_id.is_none()
+                && let Ok(session) = self.command_service.create_session(prompt)
+            {
+                self.switch_session(session.id);
+            }
+            if let Some(session_id) = self.active_session_id {
+                let _ = self
+                    .command_service
+                    .append_message(session_id, "user", prompt);
+            }
+
+            self.text_stream_active = false;
+            if self.transcript.is_empty() {
+                self.transcript.push_str(&format!("> {prompt}\n\n"));
+            } else {
+                self.transcript.push_str(&format!("\n\n> {prompt}\n\n"));
+            }
+            self.truncate_transcript();
+
+            let provider = if self.provider.is_empty() {
+                "anthropic".to_string()
+            } else {
+                self.provider.clone()
+            };
+            let model = if self.model.is_empty() {
+                "claude-3-7-sonnet".to_string()
+            } else {
+                self.model.clone()
+            };
+
+            let is_connected = self.command_service.is_connected() || !self.provider.is_empty();
+
+            self.apply_conversation(ConversationEvent::PromptSubmitted {
+                prompt: prompt.to_string(),
+                provider: provider.clone(),
+                model: model.clone(),
+            });
+
+            if !is_connected {
+                self.diagnostic = "provider not connected; use /connect".into();
+            }
         }
     }
 
@@ -2872,12 +2912,15 @@ impl App {
                                 .map(|status| status == "cancelled")
                         })
                         .unwrap_or(false);
+                let is_session_event =
+                    matches!(event.kind.as_str(), "prompt_admitted" | "prompt_promoted");
                 if (ignored_generation && !cancellation_completion)
-                    || self
-                        .active_generation_id
-                        .is_some_and(|active_generation_id| {
-                            event.generation_id != Some(active_generation_id)
-                        })
+                    || (!is_session_event
+                        && self
+                            .active_generation_id
+                            .is_some_and(|active_generation_id| {
+                                event.generation_id != Some(active_generation_id)
+                            }))
                 {
                     continue;
                 }
@@ -3664,6 +3707,20 @@ impl App {
                         self.diagnostic = bounded(message.to_string(), MAX_DIAGNOSTIC_BYTES);
                         self.status = ConversationStatus::Error;
                     }
+                }
+                "prompt_admitted" => {
+                    tracing::debug!(
+                        session_id = event.session_id,
+                        seq = event.seq,
+                        "prompt admitted"
+                    );
+                }
+                "prompt_promoted" => {
+                    tracing::debug!(
+                        session_id = event.session_id,
+                        seq = event.seq,
+                        "prompt promoted"
+                    );
                 }
                 _ => {}
             }

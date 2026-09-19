@@ -2,7 +2,8 @@
 //! only sends appends through a bounded channel and never blocks on SQLite.
 
 use crate::persistence::db::{
-    Db, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, Message, ToolCall, ToolCallStatus,
+    Db, InputDelivery, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, Message, SessionInput, ToolCall,
+    ToolCallStatus,
 };
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -62,6 +63,16 @@ enum Command {
         result: Option<String>,
         error: Option<String>,
         reply: mpsc::Sender<Result<(ToolCall, i64), String>>,
+    },
+    AdmitInput {
+        session_id: i64,
+        content: String,
+        delivery: InputDelivery,
+        reply: mpsc::Sender<Result<(SessionInput, i64), String>>,
+    },
+    PromoteInput {
+        input_id: i64,
+        reply: mpsc::Sender<Result<(SessionInput, Message, i64), String>>,
     },
     Flush(mpsc::Sender<()>),
 }
@@ -155,6 +166,27 @@ impl WriterHandle {
                                 .map_err(|error| error.to_string()),
                         );
                     }
+                    Command::AdmitInput {
+                        session_id,
+                        content,
+                        delivery,
+                        reply,
+                    } => {
+                        flush_batch(&db, &mut pending);
+                        flush_events(&db, &mut pending_events);
+                        let _ = reply.send(
+                            db.admit_input(session_id, &content, delivery)
+                                .map_err(|error| error.to_string()),
+                        );
+                    }
+                    Command::PromoteInput { input_id, reply } => {
+                        flush_batch(&db, &mut pending);
+                        flush_events(&db, &mut pending_events);
+                        let _ = reply.send(
+                            db.promote_input(input_id)
+                                .map_err(|error| error.to_string()),
+                        );
+                    }
                     Command::Flush(ack) => {
                         flush_batch(&db, &mut pending);
                         flush_events(&db, &mut pending_events);
@@ -242,6 +274,27 @@ impl WriterHandle {
                                     error.as_deref(),
                                 )
                                 .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::AdmitInput {
+                            session_id,
+                            content,
+                            delivery,
+                            reply,
+                        } => {
+                            flush_batch(&db, &mut pending);
+                            flush_events(&db, &mut pending_events);
+                            let _ = reply.send(
+                                db.admit_input(session_id, &content, delivery)
+                                    .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::PromoteInput { input_id, reply } => {
+                            flush_batch(&db, &mut pending);
+                            flush_events(&db, &mut pending_events);
+                            let _ = reply.send(
+                                db.promote_input(input_id)
+                                    .map_err(|error| error.to_string()),
                             );
                         }
                         Command::Flush(ack) => {
@@ -389,6 +442,41 @@ impl WriterHandle {
                 status,
                 result: result.map(str::to_string),
                 error: error.map(str::to_string),
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn admit_input(
+        &self,
+        session_id: i64,
+        content: &str,
+        delivery: InputDelivery,
+    ) -> Result<(SessionInput, i64), String> {
+        if content.len() > MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
+                content.len()
+            ));
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::AdmitInput {
+                session_id,
+                content: content.to_string(),
+                delivery,
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn promote_input(&self, input_id: i64) -> Result<(SessionInput, Message, i64), String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::PromoteInput {
+                input_id,
                 reply: reply_tx,
             })
             .map_err(|error| error.to_string())?;

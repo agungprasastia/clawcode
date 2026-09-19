@@ -6,9 +6,9 @@ pub mod schema;
 pub mod writer;
 
 pub use db::{
-    Db, Generation, GenerationEvent, GenerationStatus, MAX_MESSAGE_BYTES, MAX_MESSAGES_PER_SESSION,
-    MAX_SESSIONS, MAX_TOOL_OUTPUT_BYTES, Message, MessageTooLarge, Session, SessionStatus,
-    ToolCall, ToolCallStatus, Workspace,
+    Db, Generation, GenerationEvent, GenerationStatus, InputDelivery, InputStatus,
+    MAX_MESSAGE_BYTES, MAX_MESSAGES_PER_SESSION, MAX_SESSIONS, MAX_TOOL_OUTPUT_BYTES, Message,
+    MessageTooLarge, Session, SessionInput, SessionStatus, ToolCall, ToolCallStatus, Workspace,
 };
 pub use schema::{SCHEMA_VERSION, SchemaTooNew, migrate};
 pub use writer::{WRITER_CHANNEL_CAPACITY, WriterHandle};

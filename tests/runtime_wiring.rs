@@ -2,7 +2,7 @@
 //! generation thread, and `App::poll_runtime` drains bus events into the
 //! transcript view. Provider is a fake; no network involved.
 
-use clawcode::persistence::{Db, ToolCallStatus, WriterHandle};
+use clawcode::persistence::{Db, InputStatus, ToolCallStatus, WriterHandle};
 use clawcode::provider::{
     FinishReason, ModelInfo, Provider, ProviderCapabilities, ProviderError, ProviderId,
     StreamEvent, StreamRequest, StreamResponse, Usage,
@@ -592,6 +592,114 @@ fn one_tool_call_does_not_start_provider_continuation() {
         app.conversation_status(),
         clawcode::tui::ConversationStatus::Finished(_)
     ));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn runtime_backed_prompt_submission_admits_and_promotes_input() {
+    let path = temp_db_path("admit_and_promote");
+    let mut app = App::default();
+    attach(&mut app, &path);
+
+    app.apply(UiEvent::Input(Input::Character('p')));
+    app.apply(UiEvent::Input(Input::Character('i')));
+    app.apply(UiEvent::Input(Input::Character('n')));
+    app.apply(UiEvent::Input(Input::Character('g')));
+    app.apply(UiEvent::Input(Input::Submit));
+
+    let session_id = app.active_session_id().expect("active session id");
+
+    for _ in 0..500 {
+        app.poll_runtime();
+        if matches!(
+            app.conversation_status(),
+            clawcode::tui::ConversationStatus::Finished(_)
+        ) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    app.poll_runtime();
+
+    let db = Db::open(&path).expect("open db");
+
+    // DB has session_inputs with status Promoted and user_message_id linked
+    let inputs = db.session_inputs(session_id).expect("session inputs");
+    assert_eq!(inputs.len(), 1);
+    let input = &inputs[0];
+    assert_eq!(input.content, "ping");
+    assert_eq!(input.status, InputStatus::Promoted);
+    let user_message_id = input.user_message_id.expect("linked user_message_id");
+
+    // DB has messages with role="user" created via promotion
+    let messages = db.messages(session_id).expect("messages");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.id == user_message_id && m.role == "user" && m.content == "ping"),
+        "db must have message with role='user' created via promotion"
+    );
+
+    // Events include prompt_admitted and prompt_promoted
+    let events = db.events_after(session_id, -1).expect("events");
+    assert!(
+        events.iter().any(|e| e.kind == "prompt_admitted"),
+        "events must include prompt_admitted"
+    );
+    assert!(
+        events.iter().any(|e| e.kind == "prompt_promoted"),
+        "events must include prompt_promoted"
+    );
+
+    // App transcript shows user prompt and echo response
+    assert!(
+        app.transcript().contains("> ping"),
+        "transcript must show user prompt, got: {}",
+        app.transcript()
+    );
+    assert!(
+        app.transcript().contains("echo:ping"),
+        "transcript must show echo response, got: {}",
+        app.transcript()
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn runtime_backed_oversized_prompt_rejected_without_transcript_or_db_write() {
+    let path = temp_db_path("oversized_rejected");
+    let mut app = App::default();
+    attach(&mut app, &path);
+
+    let oversized = "x".repeat(clawcode::persistence::MAX_MESSAGE_BYTES + 1);
+    app.submit_user_prompt(&oversized);
+
+    // App transcript remains empty (does not show rejected prompt)
+    assert!(
+        app.transcript().is_empty(),
+        "transcript must remain empty, got: {}",
+        app.transcript()
+    );
+
+    // Diagnostic contains "message too large"
+    assert!(
+        app.diagnostic().contains("message too large"),
+        "diagnostic must contain 'message too large', got: {}",
+        app.diagnostic()
+    );
+
+    // DB has 0 session_inputs and 0 messages
+    let conn = rusqlite::Connection::open(&path).expect("open sqlite");
+    let inputs_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM session_inputs", [], |r| r.get(0))
+        .unwrap();
+    let messages_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(inputs_count, 0, "session_inputs must have 0 rows");
+    assert_eq!(messages_count, 0, "messages must have 0 rows");
 
     let _ = std::fs::remove_file(&path);
 }
