@@ -14,12 +14,10 @@ pub fn translate(event: Event) -> Option<UiEvent> {
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollUp => Some(UiEvent::Input(Input::ScrollUp)),
             MouseEventKind::ScrollDown => Some(UiEvent::Input(Input::ScrollDown)),
-            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
-                Some(UiEvent::MouseClick {
-                    x: mouse.column,
-                    y: mouse.row,
-                })
-            }
+            MouseEventKind::Down(MouseButton::Left) => Some(UiEvent::MouseClick {
+                x: mouse.column,
+                y: mouse.row,
+            }),
             _ => None,
         },
         _ => None,
@@ -186,9 +184,6 @@ mod tests {
             row: 20,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(
-            translate(up_event),
-            Some(UiEvent::MouseClick { x: 15, y: 20 })
-        );
+        assert_eq!(translate(up_event), None);
     }
 }

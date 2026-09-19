@@ -54,8 +54,10 @@ impl TypewriterState {
             end -= 1;
         }
         let accepted = &delta[..end];
-        let est_tokens = accepted.len().div_ceil(4);
-        self.token_count += est_tokens.max(1);
+        if !accepted.is_empty() {
+            let est_tokens = accepted.len().div_ceil(4);
+            self.token_count += est_tokens.max(1);
+        }
         self.queue.push_str(accepted);
     }
 
@@ -209,5 +211,14 @@ mod tests {
         assert_eq!(state.pending_status(), Some(ConversationStatus::Idle));
         assert_eq!(state.take_pending_status(), Some(ConversationStatus::Idle));
         assert_eq!(state.pending_status(), None);
+    }
+
+    #[test]
+    fn test_typewriter_empty_delta_does_not_increment_token_count() {
+        let mut state = TypewriterState::new();
+        state.start_stream();
+        assert_eq!(state.token_count, 0);
+        state.push_delta("");
+        assert_eq!(state.token_count, 0);
     }
 }

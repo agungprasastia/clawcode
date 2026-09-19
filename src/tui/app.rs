@@ -220,6 +220,45 @@ pub struct ToolRow {
     pub arguments_complete: bool,
     pub metadata: Option<serde_json::Value>,
     pub started_at: std::time::Instant,
+    pub expandable: bool,
+}
+
+impl ToolRow {
+    pub fn compute_expandable(&self) -> bool {
+        if matches!(self.name.as_str(), "bash" | "sh") {
+            self.output.lines().count() > 10
+        } else if matches!(self.name.as_str(), "edit_file" | "edit") {
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&self.arguments)
+                && let Some(old_str) = args
+                    .get("old_string")
+                    .or_else(|| args.get("old_str"))
+                    .and_then(|v| v.as_str())
+                && let Some(new_str) = args
+                    .get("new_string")
+                    .or_else(|| args.get("new_str"))
+                    .and_then(|v| v.as_str())
+            {
+                let diff = crate::tui::diff::compute_diff(old_str, new_str, 20);
+                diff.lines.len() > 10
+            } else {
+                false
+            }
+        } else if matches!(self.name.as_str(), "patch" | "apply_patch") {
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&self.arguments)
+                && let Some(patch_str) = args.get("patch").and_then(|v| v.as_str())
+            {
+                patch_str
+                    .lines()
+                    .filter(|l| l.starts_with(['+', '-', ' ']))
+                    .count()
+                    > 10
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1601,7 +1640,10 @@ impl App {
                     .iter()
                     .any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id))
                 {
-                    self.stream_parts.push(StreamPart::Tool(call_id));
+                    self.stream_parts.push(StreamPart::Tool(call_id.clone()));
+                }
+                if let Some(row) = self.tool_rows.iter_mut().find(|r| r.call_id == call_id) {
+                    row.expandable = row.compute_expandable();
                 }
             }
         }
@@ -1618,7 +1660,10 @@ impl App {
             .iter()
             .any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id))
         {
-            self.stream_parts.push(StreamPart::Tool(call_id));
+            self.stream_parts.push(StreamPart::Tool(call_id.clone()));
+        }
+        if let Some(row) = self.tool_rows.iter_mut().find(|r| r.call_id == call_id) {
+            row.expandable = row.compute_expandable();
         }
     }
 
@@ -1674,8 +1719,9 @@ impl App {
             if metadata.is_some() {
                 row.metadata = metadata;
             }
+            row.expandable = row.compute_expandable();
         } else {
-            self.tool_rows.push(ToolRow {
+            let mut row = ToolRow {
                 call_id: bounded(call_id.to_string(), MAX_IDENTITY_BYTES),
                 name: bounded(name.to_string(), MAX_IDENTITY_BYTES),
                 desc: bounded(desc, MAX_TOOL_ARGUMENT_BYTES),
@@ -1685,7 +1731,10 @@ impl App {
                 arguments_complete: false,
                 metadata,
                 started_at: std::time::Instant::now(),
-            });
+                expandable: false,
+            };
+            row.expandable = row.compute_expandable();
+            self.tool_rows.push(row);
             if self.tool_rows.len() > MAX_TOOL_ROWS {
                 self.tool_rows.remove(0);
             }
@@ -1738,6 +1787,7 @@ impl App {
             ToolRowState::Failed
         };
         row.output = bounded(output.to_string(), MAX_TOOL_OUTPUT_BYTES);
+        row.expandable = row.compute_expandable();
         self.refresh_active_tool();
         true
     }
@@ -2012,41 +2062,7 @@ impl App {
                 .tool_rows
                 .iter()
                 .find(|row| row.call_id == call_id)
-                .is_some_and(|row| {
-                    if matches!(row.name.as_str(), "bash" | "sh") {
-                        row.output.lines().count() > 10
-                    } else if matches!(row.name.as_str(), "edit_file" | "edit") {
-                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
-                            && let Some(old_str) = args
-                                .get("old_string")
-                                .or_else(|| args.get("old_str"))
-                                .and_then(|v| v.as_str())
-                            && let Some(new_str) = args
-                                .get("new_string")
-                                .or_else(|| args.get("new_str"))
-                                .and_then(|v| v.as_str())
-                        {
-                            let diff = crate::tui::diff::compute_diff(old_str, new_str, 20);
-                            diff.lines.len() > 10
-                        } else {
-                            false
-                        }
-                    } else if matches!(row.name.as_str(), "patch" | "apply_patch") {
-                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
-                            && let Some(patch_str) = args.get("patch").and_then(|v| v.as_str())
-                        {
-                            patch_str
-                                .lines()
-                                .filter(|l| l.starts_with(['+', '-', ' ']))
-                                .count()
-                                > 10
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                });
+                .is_some_and(|row| row.expandable);
             if expandable {
                 self.toggle_tool_expanded(&call_id);
                 self.diagnostic = if self.is_tool_expanded(&call_id) {
@@ -2877,6 +2893,7 @@ impl App {
                                     row.desc = bounded(desc, MAX_TOOL_ARGUMENT_BYTES);
                                 }
                             }
+                            row.expandable = row.compute_expandable();
                         }
                         self.refresh_active_tool();
                     }
@@ -2905,6 +2922,7 @@ impl App {
                                 row.desc = bounded(desc, MAX_TOOL_ARGUMENT_BYTES);
                             }
                         }
+                        row.expandable = row.compute_expandable();
                     }
                 }
                 "text_delta" => {
@@ -3085,6 +3103,7 @@ impl App {
                             if let Some(a) = args {
                                 row.arguments = bounded(a.to_string(), MAX_TOOL_ARGUMENT_BYTES);
                             }
+                            row.expandable = row.compute_expandable();
                         }
                         if name == "update_plan" && success {
                             let parsed_args_holder: Option<serde_json::Value> = match args {
@@ -4110,5 +4129,67 @@ mod tests {
         app.apply(UiEvent::Input(Input::Character('d')));
         assert_eq!(app.sessions_dialog.as_ref().unwrap().items.len(), 0);
         assert_eq!(app.diagnostic(), format!("session deleted: {title}"));
+    }
+
+    #[test]
+    fn test_tool_row_expandable_and_click() {
+        let mut app = App::default();
+        app.upsert_tool_row(
+            "bash-short",
+            "bash",
+            ToolRowState::Running,
+            "echo 1".to_string(),
+            String::new(),
+            None,
+        );
+        app.complete_tool_row("bash-short", "bash", true, "line 1\nline 2");
+        assert!(!app.tool_rows[0].expandable);
+
+        app.upsert_tool_row(
+            "bash-long",
+            "bash",
+            ToolRowState::Running,
+            "echo many".to_string(),
+            String::new(),
+            None,
+        );
+        let long_output = (1..=12)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.complete_tool_row("bash-long", "bash", true, &long_output);
+        assert!(app.tool_rows[1].expandable);
+
+        app.set_tool_row_clicks(vec![
+            (
+                "bash-short".to_string(),
+                ratatui::layout::Rect {
+                    x: 0,
+                    y: 10,
+                    width: 50,
+                    height: 1,
+                },
+            ),
+            (
+                "bash-long".to_string(),
+                ratatui::layout::Rect {
+                    x: 0,
+                    y: 15,
+                    width: 50,
+                    height: 1,
+                },
+            ),
+        ]);
+
+        app.handle_mouse_click(5, 10);
+        assert!(!app.is_tool_expanded("bash-short"));
+
+        app.handle_mouse_click(5, 15);
+        assert!(app.is_tool_expanded("bash-long"));
+        assert_eq!(app.diagnostic(), "tool output expanded");
+
+        app.handle_mouse_click(5, 15);
+        assert!(!app.is_tool_expanded("bash-long"));
+        assert_eq!(app.diagnostic(), "tool output collapsed");
     }
 }

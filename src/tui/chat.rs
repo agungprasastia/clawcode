@@ -234,11 +234,19 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
     let scroll_offset = app.chat_scroll().min(max_scroll);
     let scroll_y = max_scroll.saturating_sub(scroll_offset);
 
+    let mut prefix_visual_lines = Vec::with_capacity(lines.len() + 1);
+    prefix_visual_lines.push(0u16);
+    let mut running = 0u16;
+    for line in &lines {
+        running = running
+            .saturating_add(visual_line_count(std::slice::from_ref(line), content_width) as u16);
+        prefix_visual_lines.push(running);
+    }
+
     let clicks = tool_row_lines
         .into_iter()
         .filter_map(|(call_id, line_index)| {
-            let before =
-                visual_line_count(&lines[..line_index.min(lines.len())], content_width) as u16;
+            let before = prefix_visual_lines[line_index.min(lines.len())];
             let y = transcript_area
                 .y
                 .saturating_add(before)
@@ -1239,9 +1247,7 @@ fn tool_row_detail(row: &ToolRow) -> String {
 }
 
 fn text_cell_width(text: &str) -> usize {
-    text.chars()
-        .map(|ch| Span::raw(ch.to_string()).width())
-        .sum()
+    Span::raw(text).width()
 }
 
 fn truncate_tool_text(text: &str, max_width: usize) -> String {
@@ -1252,8 +1258,9 @@ fn truncate_tool_text(text: &str, max_width: usize) -> String {
     let ellipsis_width = text_cell_width(ellipsis);
     let mut result = String::new();
     let mut width = 0;
+    let mut buf = [0u8; 4];
     for ch in text.chars() {
-        let ch_width = text_cell_width(&ch.to_string());
+        let ch_width = Span::raw(&*ch.encode_utf8(&mut buf)).width();
         if width + ch_width + ellipsis_width > max_width {
             break;
         }
@@ -2325,6 +2332,7 @@ mod tests {
             arguments_complete: true,
             metadata: None,
             started_at: std::time::Instant::now(),
+            expandable: false,
         };
         let app = App::default();
         render_shell_card(
@@ -2372,6 +2380,7 @@ mod tests {
             arguments_complete: true,
             metadata: None,
             started_at: std::time::Instant::now(),
+            expandable: true,
         };
         render_shell_card(
             &mut lines1,
@@ -2411,6 +2420,7 @@ mod tests {
             arguments_complete: true,
             metadata: None,
             started_at: std::time::Instant::now(),
+            expandable: true,
         };
         render_shell_card(
             &mut lines2,
@@ -2456,6 +2466,7 @@ mod tests {
             arguments_complete: true,
             metadata: None,
             started_at: std::time::Instant::now(),
+            expandable: false,
         };
         let app = App::default();
         render_diff_card(
@@ -2901,6 +2912,7 @@ mod tests {
             arguments_complete: true,
             metadata: None,
             started_at: std::time::Instant::now(),
+            expandable: false,
         };
         let app = App::default();
         let theme = ThemeKind::ClawcodeDark.to_theme();
