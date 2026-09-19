@@ -6,7 +6,7 @@ mod credentials;
 pub mod git;
 mod shell;
 
-pub use clipboard::{BackendClipboard, ClipboardBackend, SystemClipboard};
+pub use clipboard::{BackendClipboard, ClipboardBackend, SystemClipboard, trim_clipboard_newlines};
 pub use credentials::UnsupportedCredentialStore;
 pub use git::{get_branch_for_path, get_current_branch, is_git_repo};
 pub use shell::PathShellDiscovery;

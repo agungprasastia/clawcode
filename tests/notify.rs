@@ -36,3 +36,14 @@ fn successful_notifier_reports_success() {
             .is_success()
     );
 }
+
+#[test]
+fn best_effort_notifier_handles_special_characters_safely() {
+    let notification = Notification::new(
+        NotificationKind::Success,
+        "Title with $special, $(whoami), & <tag> \"quotes\"",
+        "Body with $env:PATH and 'single' `backticks`",
+    )
+    .unwrap();
+    let _ = clawcode::notify::BestEffortNotifier.notify(&notification);
+}

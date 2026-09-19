@@ -17,7 +17,10 @@ impl SecretRef {
     pub fn resolve(&self) -> Result<String, ConfigDiagnostic> {
         match self {
             Self::Env(name) => std::env::var(name)
-                .map_err(|_| ConfigDiagnostic::MissingSecret { name: name.clone() }),
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ConfigDiagnostic::MissingSecret { name: name.clone() }),
             // OS credential-store lookup lands with the Task 10 OS adapters.
             // Until then the reference is accepted and stored without
             // resolution; failing here would break config-only usage.

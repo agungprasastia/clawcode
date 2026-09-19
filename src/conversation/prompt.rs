@@ -49,7 +49,7 @@ impl SystemPromptComposer {
         mode: Mode,
     ) -> Self {
         let wd = working_directory.into();
-        let is_git = wd.join(".git").exists();
+        let is_git = crate::platform::is_git_repo(&wd);
         Self {
             provider_kind: ProviderKind::from_model_or_provider(model, provider),
             working_directory: wd,
@@ -338,5 +338,12 @@ mod tests {
         let prompt = composer.compose();
         assert!(prompt.contains("MODE: BUILD"));
         assert!(prompt.contains("edit_file"));
+    }
+
+    #[test]
+    fn test_git_repo_detected_in_subdirectory() {
+        let subdir = std::env::current_dir().unwrap().join("src");
+        let composer = SystemPromptComposer::new("gpt-4o", "openai", subdir, Mode::Build);
+        assert!(composer.is_git_repo);
     }
 }

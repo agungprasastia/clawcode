@@ -528,6 +528,31 @@ fn test_read_file_inline_selectors_and_formatting() {
         assert!(out.contains("  1: line 1"));
         assert!(out.contains("  2: line 2"));
     }
+
+    // 7. Single letter filenames with selectors
+    let parsed_single = clawcode::conversation::tools::parse_read_path("a:10");
+    assert_eq!(parsed_single.path, "a");
+    assert_eq!(
+        parsed_single.selector,
+        Some(clawcode::conversation::tools::LineSelector::From(10))
+    );
+
+    // 8. Verbatim Windows path
+    let parsed_verbatim =
+        clawcode::conversation::tools::parse_read_path(r"\\?\C:\test\file.rs:10-20");
+    assert_eq!(parsed_verbatim.path, r"C:\test\file.rs");
+    assert_eq!(
+        parsed_verbatim.selector,
+        Some(clawcode::conversation::tools::LineSelector::Range(10, 20))
+    );
+
+    // 9. Path separator before colon
+    let parsed_col_dir = clawcode::conversation::tools::parse_read_path("dir:subdir/file.txt:5");
+    assert_eq!(parsed_col_dir.path, "dir:subdir/file.txt");
+    assert_eq!(
+        parsed_col_dir.selector,
+        Some(clawcode::conversation::tools::LineSelector::From(5))
+    );
 }
 
 #[test]
@@ -885,4 +910,56 @@ fn test_tui_app_web_and_skill_verbs_and_formatting() {
     let skill_detail =
         format_tool_success_detail("skill", "<skill_content name=\"test\">...</skill_content>");
     assert_eq!(skill_detail, "skill loaded successfully");
+}
+
+#[test]
+fn test_edit_file_crlf_mixed_and_normalization() {
+    let (root, workspace) = workspace("edit-crlf-norm");
+    let file_path = root.join("crlf.txt");
+    fs::write(&file_path, "header\r\nline one\r\nline two\r\nfooter\r\n").unwrap();
+
+    // 1. Edit with mixed CRLF and LF in old_string, and LF in new_string
+    let edit_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Build,
+        "edit_file",
+        &serde_json::json!({
+            "path": "crlf.txt",
+            "old_string": "line one\r\nline two\n",
+            "new_string": "alpha\nbeta\n"
+        })
+        .to_string(),
+    );
+    assert!(edit_res.is_ok(), "Edit failed: {:?}", edit_res);
+
+    let updated_bytes = fs::read(&file_path).unwrap();
+    let updated_str = String::from_utf8(updated_bytes).unwrap();
+    assert_eq!(updated_str, "header\r\nalpha\r\nbeta\r\nfooter\r\n");
+}
+
+#[test]
+fn test_walk_dir_recursion_limit() {
+    let (root, workspace) = workspace("recursion-limit");
+    let mut current = root.clone();
+    for i in 0..40 {
+        current = current.join(format!("d{i}"));
+    }
+    fs::create_dir_all(&current).unwrap();
+    fs::write(current.join("deep.txt"), "target content").unwrap();
+
+    let glob_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "glob_search",
+        r#"{"pattern": "*.txt"}"#,
+    );
+    assert!(glob_res.is_ok());
+
+    let grep_res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Plan,
+        "grep_search",
+        r#"{"query": "target"}"#,
+    );
+    assert!(grep_res.is_ok());
 }

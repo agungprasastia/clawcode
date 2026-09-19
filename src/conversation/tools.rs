@@ -274,24 +274,35 @@ pub fn parse_line_selector(tag: &str) -> Option<LineSelector> {
 }
 
 pub fn parse_read_path(input: &str) -> ParsedReadPath<'_> {
-    let mut remaining = input;
+    let mut remaining = input.strip_prefix(r"\\?\").unwrap_or(input);
     let mut is_raw = false;
     let mut selector = None;
 
     loop {
-        let min_idx = if remaining.len() >= 2
+        let min_idx = if remaining.len() >= 3
             && remaining.as_bytes()[0].is_ascii_alphabetic()
             && remaining.as_bytes()[1] == b':'
+            && (remaining.as_bytes()[2] == b'\\' || remaining.as_bytes()[2] == b'/')
         {
             2
         } else {
             0
         };
 
-        let Some(colon_offset) = remaining[min_idx..].rfind(':') else {
+        let last_sep = remaining.rfind(['/', '\\']);
+        let search_start = match last_sep {
+            Some(pos) => min_idx.max(pos + 1),
+            None => min_idx,
+        };
+
+        if search_start >= remaining.len() {
+            break;
+        }
+
+        let Some(colon_offset) = remaining[search_start..].rfind(':') else {
             break;
         };
-        let colon_pos = min_idx + colon_offset;
+        let colon_pos = search_start + colon_offset;
         let tag = &remaining[colon_pos + 1..];
 
         if tag.trim().eq_ignore_ascii_case("raw") {
@@ -749,8 +760,15 @@ pub fn execute_tool(
             let content = String::from_utf8(read_res.bytes)
                 .map_err(|_| format!("File '{path_str}' is not valid UTF-8 text"))?;
 
-            let (target_old, target_new) = if content.matches(old_string).count() == 1 {
-                (old_string.to_string(), new_string.to_string())
+            let is_crlf = content.contains("\r\n");
+            let target_new = if is_crlf {
+                new_string.replace("\r\n", "\n").replace('\n', "\r\n")
+            } else {
+                new_string.replace("\r\n", "\n")
+            };
+
+            let target_old = if content.matches(old_string).count() == 1 {
+                old_string.to_string()
             } else if content.matches(old_string).count() > 1 {
                 let count = content.matches(old_string).count();
                 return Err(format!(
@@ -758,24 +776,14 @@ pub fn execute_tool(
                 ));
             } else {
                 // Fallback 1: CRLF / LF line ending mismatch
-                let is_crlf = content.contains("\r\n");
-                let norm_old = if is_crlf && !old_string.contains("\r\n") {
-                    old_string.replace('\n', "\r\n")
-                } else if !is_crlf && old_string.contains("\r\n") {
+                let norm_old = if is_crlf {
+                    old_string.replace("\r\n", "\n").replace('\n', "\r\n")
+                } else {
                     old_string.replace("\r\n", "\n")
-                } else {
-                    old_string.to_string()
-                };
-                let norm_new = if is_crlf && !new_string.contains("\r\n") {
-                    new_string.replace('\n', "\r\n")
-                } else if !is_crlf && new_string.contains("\r\n") {
-                    new_string.replace("\r\n", "\n")
-                } else {
-                    new_string.to_string()
                 };
 
                 if content.matches(&norm_old).count() == 1 {
-                    (norm_old, norm_new)
+                    norm_old
                 } else if content.matches(&norm_old).count() > 1 {
                     let count = content.matches(&norm_old).count();
                     return Err(format!(
@@ -791,7 +799,7 @@ pub fn execute_tool(
                             && content.ends_with(t_old)
                             && content.matches(t_old).count() == 1
                         {
-                            (t_old.to_string(), norm_new)
+                            t_old.to_string()
                         } else {
                             return Err(format!(
                                 "old_string not found in '{path_str}'. Verify exact line breaks, whitespace, and surrounding context."
@@ -896,6 +904,7 @@ pub fn execute_tool(
                 pattern,
                 &mut matched,
                 100,
+                0,
             );
 
             if matched.is_empty() {
@@ -923,7 +932,14 @@ pub fn execute_tool(
             }
 
             let mut matches = Vec::new();
-            walk_dir_grep(&target_dir, workspace.root_path(), query, &mut matches, 100);
+            walk_dir_grep(
+                &target_dir,
+                workspace.root_path(),
+                query,
+                &mut matches,
+                100,
+                0,
+            );
 
             if matches.is_empty() {
                 Ok(format!("No matches found for query '{query}'"))
@@ -1873,14 +1889,17 @@ pub fn list_available_skills(ws_root: &Path) -> Vec<String> {
     skills
 }
 
+const MAX_WALK_DEPTH: usize = 32;
+
 fn walk_dir_glob(
     dir: &Path,
     root: &Path,
     pattern: &str,
     results: &mut Vec<String>,
     max_items: usize,
+    depth: usize,
 ) {
-    if results.len() >= max_items {
+    if results.len() >= max_items || depth >= MAX_WALK_DEPTH {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1897,7 +1916,7 @@ fn walk_dir_glob(
         }
         let path = entry.path();
         if file_type.is_dir() {
-            walk_dir_glob(&path, root, pattern, results, max_items);
+            walk_dir_glob(&path, root, pattern, results, max_items, depth + 1);
         } else if file_type.is_file() {
             let rel = path.strip_prefix(root).unwrap_or(&path);
             let rel_str = rel.to_string_lossy().replace('\\', "/");
@@ -1917,8 +1936,9 @@ fn walk_dir_grep(
     query: &str,
     results: &mut Vec<String>,
     max_items: usize,
+    depth: usize,
 ) {
-    if results.len() >= max_items {
+    if results.len() >= max_items || depth >= MAX_WALK_DEPTH {
         return;
     }
     let query_lower = query.to_lowercase();
@@ -1936,7 +1956,7 @@ fn walk_dir_grep(
         }
         let path = entry.path();
         if file_type.is_dir() {
-            walk_dir_grep(&path, root, query, results, max_items);
+            walk_dir_grep(&path, root, query, results, max_items, depth + 1);
         } else if file_type.is_file() {
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
@@ -2207,6 +2227,31 @@ mod tests {
         assert_eq!(p9.path, "file.rs");
         assert_eq!(p9.selector, Some(LineSelector::Range(2, 4)));
         assert!(p9.is_raw);
+
+        let p10 = parse_read_path("a:10");
+        assert_eq!(p10.path, "a");
+        assert_eq!(p10.selector, Some(LineSelector::From(10)));
+        assert!(!p10.is_raw);
+
+        let p11 = parse_read_path("a");
+        assert_eq!(p11.path, "a");
+        assert_eq!(p11.selector, None);
+
+        let p12 = parse_read_path(r"\\?\C:\test\file.rs:10-20");
+        assert_eq!(p12.path, r"C:\test\file.rs");
+        assert_eq!(p12.selector, Some(LineSelector::Range(10, 20)));
+
+        let p13 = parse_read_path(r"\\?\C:\test\file.rs");
+        assert_eq!(p13.path, r"C:\test\file.rs");
+        assert_eq!(p13.selector, None);
+
+        let p14 = parse_read_path("dir:subdir/file.txt");
+        assert_eq!(p14.path, "dir:subdir/file.txt");
+        assert_eq!(p14.selector, None);
+
+        let p15 = parse_read_path("dir:subdir/file.txt:5");
+        assert_eq!(p15.path, "dir:subdir/file.txt");
+        assert_eq!(p15.selector, Some(LineSelector::From(5)));
     }
 
     #[test]
@@ -2452,6 +2497,40 @@ mod tests {
             "Expected CRLF file edit with LF string to succeed: {:?}",
             crlf_edit
         );
+        // 2b. CRLF file edit with mixed CRLF/LF old_string and LF new_string
+        let mixed_crlf_content = "start\r\nline A\r\nline B\r\nend";
+        let mixed_path = "mixed_crlf.txt";
+        let _ = execute_tool(
+            &workspace,
+            Mode::Build,
+            "write_file",
+            &serde_json::json!({
+                "path": mixed_path,
+                "content": mixed_crlf_content
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mixed_edit = execute_tool(
+            &workspace,
+            Mode::Build,
+            "edit_file",
+            &serde_json::json!({
+                "path": mixed_path,
+                "old_string": "line A\r\nline B\n",
+                "new_string": "line alpha\nline beta\n"
+            })
+            .to_string(),
+        );
+        assert!(
+            mixed_edit.is_ok(),
+            "Expected CRLF file edit with mixed CRLF/LF to succeed: {:?}",
+            mixed_edit
+        );
+        let read_res = workspace.read(mixed_path, 1024).unwrap();
+        let content_str = String::from_utf8(read_res.bytes).unwrap();
+        assert_eq!(content_str, "start\r\nline alpha\r\nline beta\r\nend");
 
         // 3. Empty old_string is rejected
         let empty_edit = execute_tool(

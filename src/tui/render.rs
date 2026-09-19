@@ -449,11 +449,7 @@ fn render_status_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme
 
     let mut left_spans = vec![Span::styled(cwd_display, Style::default().fg(theme.dim))];
 
-    let branch = app
-        .git_branch()
-        .map(|b| b.to_string())
-        .or_else(crate::platform::get_current_branch);
-    if let Some(branch) = branch {
+    if let Some(branch) = app.git_branch() {
         left_spans.push(Span::styled(
             format!(":{branch}"),
             Style::default().fg(theme.dim),

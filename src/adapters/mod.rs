@@ -146,6 +146,7 @@ impl Transport for HttpTransport {
         let reader = std::io::BufReader::new(resp.into_reader());
         use std::io::BufRead;
         let mut usage = None;
+        let mut usage_emitted = false;
         let mut current_data = String::new();
 
         let mut process_data = |data: &str| -> Result<(), ProviderError> {
@@ -153,9 +154,12 @@ impl Transport for HttpTransport {
             if trimmed.is_empty() || trimmed == "[DONE]" {
                 return Ok(());
             }
-            let value: Value = match serde_json::from_str(trimmed) {
+            let value: Value = match serde_json::from_str(data) {
                 Ok(v) => v,
-                Err(_) => return Ok(()),
+                Err(_) => match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => return Ok(()),
+                },
             };
 
             usage = usage.or_else(|| value.get("usage").and_then(parse_usage));
@@ -163,10 +167,15 @@ impl Transport for HttpTransport {
                 Ok(events) => {
                     for event in events {
                         let event = match event {
+                            StreamEvent::Usage(_) => {
+                                usage_emitted = true;
+                                event
+                            }
                             StreamEvent::Finish { reason } => {
-                                if let Some(u) = usage {
+                                if !usage_emitted && let Some(u) = usage.take() {
                                     let _ = sender.send(StreamEvent::Usage(u));
                                     let _ = sender.flush();
+                                    usage_emitted = true;
                                 }
                                 StreamEvent::Finish { reason }
                             }
@@ -191,13 +200,10 @@ impl Transport for HttpTransport {
             let line = match line_result {
                 Ok(l) => l,
                 Err(e) => {
-                    let _ = sender.send(StreamEvent::Error(e.to_string()));
-                    let _ = sender.flush();
                     return Err(ProviderError::Network(e.to_string()));
                 }
             };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
+            if line.trim().is_empty() {
                 if !current_data.is_empty() {
                     let to_process = std::mem::take(&mut current_data);
                     if process_data(&to_process).is_err() {
@@ -206,15 +212,16 @@ impl Transport for HttpTransport {
                 }
                 continue;
             }
-            if trimmed.starts_with(':') {
+            let trimmed_start = line.trim_start();
+            if trimmed_start.starts_with(':') {
                 continue;
             }
-            if trimmed == "data: [DONE]" || trimmed == "[DONE]" {
+            if line.trim() == "data: [DONE]" || line.trim() == "[DONE]" {
                 break;
             }
-            if let Some(rest) = trimmed.strip_prefix("data:") {
-                let payload = rest.trim();
-                if payload == "[DONE]" {
+            if let Some(rest) = trimmed_start.strip_prefix("data:") {
+                let payload = rest.strip_prefix(' ').unwrap_or(rest);
+                if payload.trim() == "[DONE]" {
                     break;
                 }
                 if current_data.is_empty() && serde_json::from_str::<Value>(payload).is_ok() {
@@ -233,14 +240,14 @@ impl Transport for HttpTransport {
                         return Ok(());
                     }
                 }
-            } else if trimmed.starts_with("event:")
-                || trimmed.starts_with("id:")
-                || trimmed.starts_with("retry:")
+            } else if trimmed_start.starts_with("event:")
+                || trimmed_start.starts_with("id:")
+                || trimmed_start.starts_with("retry:")
             {
                 continue;
-            } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
-                if current_data.is_empty() && serde_json::from_str::<Value>(trimmed).is_ok() {
-                    if process_data(trimmed).is_err() {
+            } else if trimmed_start.starts_with('{') || trimmed_start.starts_with('[') {
+                if current_data.is_empty() && serde_json::from_str::<Value>(trimmed_start).is_ok() {
+                    if process_data(trimmed_start).is_err() {
                         return Ok(());
                     }
                     continue;
@@ -248,7 +255,7 @@ impl Transport for HttpTransport {
                 if !current_data.is_empty() {
                     current_data.push('\n');
                 }
-                current_data.push_str(trimmed);
+                current_data.push_str(trimmed_start);
                 if serde_json::from_str::<Value>(&current_data).is_ok() {
                     let to_process = std::mem::take(&mut current_data);
                     if process_data(&to_process).is_err() {
@@ -259,6 +266,11 @@ impl Transport for HttpTransport {
         }
         if !current_data.is_empty() {
             let _ = process_data(&current_data);
+        }
+        if let Ok(done_events) = parser(Value::String("[DONE]".into())) {
+            for event in done_events {
+                let _ = sender.send(event);
+            }
         }
         let _ = sender.flush();
         Ok(())
@@ -338,40 +350,33 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
 
         let (body, parser): (serde_json::Value, StreamEventParser) = match self.id.as_str() {
             "anthropic" => {
-                let mut system_prompt = None;
+                let mut system_prompt: Option<String> = None;
                 let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
 
-                for m in &request.messages {
+                for (idx, m) in request.messages.iter().enumerate() {
                     if m.role == "system" {
-                        system_prompt = Some(m.content.clone());
-                    } else if m.role == "tool" {
+                        if let Some(existing) = system_prompt.as_mut() {
+                            existing.push_str("\n\n");
+                            existing.push_str(&m.content);
+                        } else {
+                            system_prompt = Some(m.content.clone());
+                        }
+                        continue;
+                    }
+
+                    let (role, new_content) = if m.role == "tool" {
+                        let tool_use_id = m
+                            .tool_call_id
+                            .as_deref()
+                            .filter(|id| !id.trim().is_empty())
+                            .map(String::from)
+                            .unwrap_or_else(|| format!("call_{idx}"));
                         let tool_result = serde_json::json!({
                             "type": "tool_result",
-                            "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                            "tool_use_id": tool_use_id,
                             "content": m.content,
                         });
-                        let merged = if let Some(last) = anthropic_messages.last_mut() {
-                            if last.get("role").and_then(|r| r.as_str()) == Some("user") {
-                                if let Some(arr) =
-                                    last.get_mut("content").and_then(|c| c.as_array_mut())
-                                {
-                                    arr.push(tool_result.clone());
-                                    true
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-                        if !merged {
-                            anthropic_messages.push(serde_json::json!({
-                                "role": "user",
-                                "content": [tool_result],
-                            }));
-                        }
+                        ("user", serde_json::Value::Array(vec![tool_result]))
                     } else if m.role == "assistant" && m.tool_calls.is_some() {
                         let mut contents = Vec::new();
                         if !m.content.is_empty() {
@@ -381,8 +386,12 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                             }));
                         }
                         if let Some(tcalls) = &m.tool_calls {
-                            for call in tcalls {
-                                let id = &call.id;
+                            for (c_idx, call) in tcalls.iter().enumerate() {
+                                let id = if call.id.trim().is_empty() {
+                                    format!("call_{idx}_{c_idx}")
+                                } else {
+                                    call.id.clone()
+                                };
                                 let name = &call.name;
                                 let args_val: Value = serde_json::from_str(&call.arguments)
                                     .unwrap_or_else(|_| serde_json::json!({}));
@@ -394,16 +403,59 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                                 }));
                             }
                         }
-                        anthropic_messages.push(serde_json::json!({
-                            "role": "assistant",
-                            "content": contents,
-                        }));
+                        ("assistant", serde_json::Value::Array(contents))
                     } else {
-                        anthropic_messages.push(serde_json::json!({
-                            "role": m.role,
-                            "content": m.content,
-                        }));
+                        let role = if m.role == "assistant" {
+                            "assistant"
+                        } else {
+                            "user"
+                        };
+                        (role, serde_json::Value::String(m.content.clone()))
+                    };
+
+                    if let Some(last) = anthropic_messages.last_mut()
+                        && last.get("role").and_then(|r| r.as_str()) == Some(role)
+                    {
+                        match (&mut last["content"], new_content) {
+                            (Value::Array(last_arr), Value::Array(new_arr)) => {
+                                last_arr.extend(new_arr);
+                            }
+                            (Value::Array(last_arr), Value::String(new_str)) => {
+                                if !new_str.is_empty() {
+                                    last_arr.push(serde_json::json!({
+                                        "type": "text",
+                                        "text": new_str,
+                                    }));
+                                }
+                            }
+                            (Value::String(last_str), Value::Array(new_arr)) => {
+                                let mut arr = Vec::new();
+                                if !last_str.is_empty() {
+                                    arr.push(serde_json::json!({
+                                        "type": "text",
+                                        "text": last_str.clone(),
+                                    }));
+                                }
+                                arr.extend(new_arr);
+                                last["content"] = Value::Array(arr);
+                            }
+                            (Value::String(last_str), Value::String(new_str)) => {
+                                if last_str.is_empty() {
+                                    *last_str = new_str;
+                                } else if !new_str.is_empty() {
+                                    last_str.push_str("\n\n");
+                                    last_str.push_str(&new_str);
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
                     }
+
+                    anthropic_messages.push(serde_json::json!({
+                        "role": role,
+                        "content": new_content,
+                    }));
                 }
 
                 if anthropic_messages.is_empty() {
@@ -552,7 +604,9 @@ impl<T: Transport + Clone + 'static> crate::provider::Provider for JsonProvider<
         let this = self.clone();
         let req = request.clone();
         std::thread::spawn(move || {
-            let _ = this.stream_body(&req, &sender);
+            if let Err(err) = this.stream_body(&req, &sender) {
+                let _ = sender.send(StreamEvent::Error(err.to_string()));
+            }
         });
         Ok(stream)
     }
@@ -569,11 +623,15 @@ fn parse_lines(
     if (trimmed_body.starts_with('{') || trimmed_body.starts_with('['))
         && let Ok(value) = serde_json::from_str::<Value>(trimmed_body)
     {
-        let raw_usage = value.get("usage").and_then(parse_usage);
+        let mut raw_usage = value.get("usage").and_then(parse_usage);
         for event in parser(value)? {
             let event = match event {
+                StreamEvent::Usage(_) => {
+                    raw_usage = None;
+                    event
+                }
                 StreamEvent::Finish { reason } => {
-                    if let Some(value) = raw_usage {
+                    if let Some(value) = raw_usage.take() {
                         events.push(StreamEvent::Usage(value));
                     }
                     StreamEvent::Finish { reason }
@@ -594,13 +652,18 @@ fn parse_lines(
         if trimmed.is_empty() || trimmed == "[DONE]" {
             return Ok(());
         }
-        let value: Value = serde_json::from_str(trimmed)
+        let value: Value = serde_json::from_str(data)
+            .or_else(|_| serde_json::from_str(trimmed))
             .map_err(|error| ProviderError::Protocol(error.to_string()))?;
         *usage = usage.or_else(|| value.get("usage").and_then(parse_usage));
         for event in parser(value)? {
             let event = match event {
+                StreamEvent::Usage(_) => {
+                    *usage = None;
+                    event
+                }
                 StreamEvent::Finish { reason } => {
-                    if let Some(value) = *usage {
+                    if let Some(value) = usage.take() {
                         events.push(StreamEvent::Usage(value));
                     }
                     StreamEvent::Finish { reason }
@@ -613,23 +676,23 @@ fn parse_lines(
     };
 
     for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if line.trim().is_empty() {
             if !current_data.is_empty() {
                 let data = std::mem::take(&mut current_data);
                 parse_block(&data, &mut events, &mut usage)?;
             }
             continue;
         }
-        if trimmed.starts_with(':') {
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with(':') {
             continue;
         }
-        if trimmed == "data: [DONE]" || trimmed == "[DONE]" {
+        if line.trim() == "data: [DONE]" || line.trim() == "[DONE]" {
             break;
         }
-        if let Some(rest) = trimmed.strip_prefix("data:") {
-            let payload = rest.trim();
-            if payload == "[DONE]" {
+        if let Some(rest) = trimmed_start.strip_prefix("data:") {
+            let payload = rest.strip_prefix(' ').unwrap_or(rest);
+            if payload.trim() == "[DONE]" {
                 break;
             }
             if current_data.is_empty() && serde_json::from_str::<Value>(payload).is_ok() {
@@ -644,20 +707,20 @@ fn parse_lines(
                 let data = std::mem::take(&mut current_data);
                 parse_block(&data, &mut events, &mut usage)?;
             }
-        } else if trimmed.starts_with("event:")
-            || trimmed.starts_with("id:")
-            || trimmed.starts_with("retry:")
+        } else if trimmed_start.starts_with("event:")
+            || trimmed_start.starts_with("id:")
+            || trimmed_start.starts_with("retry:")
         {
             continue;
-        } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
-            if current_data.is_empty() && serde_json::from_str::<Value>(trimmed).is_ok() {
-                parse_block(trimmed, &mut events, &mut usage)?;
+        } else if trimmed_start.starts_with('{') || trimmed_start.starts_with('[') {
+            if current_data.is_empty() && serde_json::from_str::<Value>(trimmed_start).is_ok() {
+                parse_block(trimmed_start, &mut events, &mut usage)?;
                 continue;
             }
             if !current_data.is_empty() {
                 current_data.push('\n');
             }
-            current_data.push_str(trimmed);
+            current_data.push_str(trimmed_start);
             if serde_json::from_str::<Value>(&current_data).is_ok() {
                 let data = std::mem::take(&mut current_data);
                 parse_block(&data, &mut events, &mut usage)?;
@@ -667,6 +730,9 @@ fn parse_lines(
 
     if !current_data.is_empty() {
         parse_block(&current_data, &mut events, &mut usage)?;
+    }
+    if let Ok(done_events) = parser(Value::String("[DONE]".into())) {
+        events.extend(done_events);
     }
 
     Ok(StreamResponse { events })
@@ -687,12 +753,31 @@ fn parse_usage(value: &Value) -> Option<crate::provider::Usage> {
     })
 }
 
+#[derive(Debug, Default)]
+struct ToolCallState {
+    id: String,
+    name: String,
+    started: bool,
+}
+
 pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, ProviderError> + Send
 {
-    let mut active_tools: std::collections::HashMap<usize, String> =
-        std::collections::HashMap::new();
+    let mut active_tools: std::collections::BTreeMap<usize, ToolCallState> =
+        std::collections::BTreeMap::new();
     move |value: Value| -> Result<Vec<StreamEvent>, ProviderError> {
         let mut events = Vec::new();
+
+        if value.as_str() == Some("[DONE]")
+            || value.get("done").and_then(Value::as_bool) == Some(true)
+        {
+            for (_, tool) in std::mem::take(&mut active_tools) {
+                if tool.started {
+                    events.push(StreamEvent::ToolCallEnd { id: tool.id });
+                }
+            }
+            return Ok(events);
+        }
+
         if let Some(error) = value.get("error").and_then(Value::as_str) {
             return Err(ProviderError::Protocol(error.into()));
         }
@@ -700,6 +785,13 @@ pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
             && let Some(msg) = error_obj.get("message").and_then(Value::as_str)
         {
             return Err(ProviderError::Protocol(msg.into()));
+        }
+
+        // Usage: if chunk contains usage, parse it into Usage and emit StreamEvent::Usage(u) immediately
+        if let Some(usage_val) = value.get("usage")
+            && let Some(u) = parse_usage(usage_val)
+        {
+            events.push(StreamEvent::Usage(u));
         }
 
         // Content
@@ -729,23 +821,44 @@ pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
         {
             for call in tool_calls {
                 let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                if let Some(id) = call.get("id").and_then(Value::as_str) {
-                    let id_str = id.to_string();
-                    active_tools.insert(index, id_str.clone());
-                    let name = call
-                        .pointer("/function/name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    events.push(StreamEvent::ToolCallStart { id: id_str, name });
-                }
-                let call_id = active_tools.get(&index).cloned();
-                if let Some(id) = call_id
-                    && let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
-                    && !args.is_empty()
+                let state = active_tools.entry(index).or_default();
+
+                if let Some(id) = call.get("id").and_then(Value::as_str)
+                    && !id.is_empty()
+                    && !state.started
                 {
+                    state.id = id.to_string();
+                }
+                if let Some(name) = call.pointer("/function/name").and_then(Value::as_str)
+                    && !name.is_empty()
+                    && !state.started
+                {
+                    state.name = name.to_string();
+                }
+
+                let args = call
+                    .pointer("/function/arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+
+                if !state.started {
+                    let both_known = !state.id.is_empty() && !state.name.is_empty();
+                    let first_arg_delta = !args.is_empty();
+                    if both_known || first_arg_delta {
+                        if state.id.is_empty() {
+                            state.id = format!("call_{index}");
+                        }
+                        events.push(StreamEvent::ToolCallStart {
+                            id: state.id.clone(),
+                            name: state.name.clone(),
+                        });
+                        state.started = true;
+                    }
+                }
+
+                if !args.is_empty() && state.started {
                     events.push(StreamEvent::ToolCallDelta {
-                        id,
+                        id: state.id.clone(),
                         arguments: args.to_string(),
                     });
                 }
@@ -793,8 +906,10 @@ pub(crate) fn openai_parser() -> impl FnMut(Value) -> Result<Vec<StreamEvent>, P
             .pointer("/choices/0/finish_reason")
             .and_then(Value::as_str)
         {
-            for (_, id) in active_tools.drain() {
-                events.push(StreamEvent::ToolCallEnd { id });
+            for (_, tool) in std::mem::take(&mut active_tools) {
+                if tool.started {
+                    events.push(StreamEvent::ToolCallEnd { id: tool.id });
+                }
             }
             events.push(finish_event(finish_reason));
         }
@@ -1014,7 +1129,7 @@ impl ConfiguredRouter {
         }
     }
 
-    fn resolve_provider(
+    pub fn resolve_provider(
         &self,
         request: &StreamRequest,
     ) -> (String, String, Option<String>, StreamRequest) {
@@ -1050,9 +1165,23 @@ impl ConfiguredRouter {
             .and_then(|c| c.resolved_api_key())
             .or_else(|| self.config.api_key.as_ref().and_then(|s| s.resolve().ok()))
             .or_else(|| match p_name.as_str() {
-                "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok(),
-                "openai" => std::env::var("OPENAI_API_KEY").ok(),
-                "openrouter" => std::env::var("OPENROUTER_API_KEY").ok(),
+                "anthropic" => std::env::var("ANTHROPIC_API_KEY")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                "openai" => std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                "openrouter" => std::env::var("OPENROUTER_API_KEY")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                "gemini" | "google" => std::env::var("GEMINI_API_KEY")
+                    .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
                 _ => None,
             });
 
@@ -1354,5 +1483,209 @@ data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}
         assert_eq!(tools[0]["name"], "edit_file");
         assert_eq!(tools[0]["description"], "Edits file");
         assert!(tools[0]["input_schema"].is_object());
+    }
+
+    #[test]
+    fn openai_streaming_parallel_tool_calls_drain_ascending() {
+        let mut parser = openai_parser();
+        let chunk1 = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [
+                        { "index": 0, "id": "call_0", "function": { "name": "func_0", "arguments": "" } },
+                        { "index": 1, "id": "call_1", "function": { "name": "func_1", "arguments": "" } }
+                    ]
+                }
+            }]
+        });
+        let chunk2 = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [
+                        { "index": 1, "function": { "arguments": "{\"b\": 2}" } },
+                        { "index": 0, "function": { "arguments": "{\"a\": 1}" } }
+                    ]
+                }
+            }]
+        });
+        let chunk3 = serde_json::json!({
+            "choices": [{
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let ev1 = parser(chunk1).unwrap();
+        let ev2 = parser(chunk2).unwrap();
+        let ev3 = parser(chunk3).unwrap();
+
+        let starts: Vec<_> = ev1
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::ToolCallStart { .. }))
+            .collect();
+        assert_eq!(starts.len(), 2);
+
+        let deltas_c2: Vec<_> = ev2
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::ToolCallDelta { .. }))
+            .collect();
+        assert_eq!(deltas_c2.len(), 2);
+
+        let ends: Vec<&str> = ev3
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ToolCallEnd { id } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends, vec!["call_0", "call_1"]);
+    }
+
+    #[test]
+    fn openai_streaming_unclosed_tool_call_emits_end_on_done() {
+        let mut parser = openai_parser();
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [
+                        { "index": 0, "id": "call_pending", "function": { "name": "work", "arguments": "{\"ok\":true}" } }
+                    ]
+                }
+            }]
+        });
+        let ev_chunk = parser(chunk).unwrap();
+        assert!(
+            ev_chunk.iter().any(
+                |e| matches!(e, StreamEvent::ToolCallStart { id, .. } if id == "call_pending")
+            )
+        );
+
+        let ev_done = parser(serde_json::json!("[DONE]")).unwrap();
+        assert_eq!(ev_done.len(), 1);
+        assert!(matches!(&ev_done[0], StreamEvent::ToolCallEnd { id } if id == "call_pending"));
+    }
+
+    #[test]
+    fn openai_streaming_usage_in_final_chunk_emits_immediately() {
+        let mut parser = openai_parser();
+        let chunk_finish = serde_json::json!({
+            "choices": [{
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        });
+        let ev_finish = parser(chunk_finish).unwrap();
+        assert!(
+            ev_finish
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Finish { .. }))
+        );
+
+        let chunk_usage = serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 15,
+                "completion_tokens": 25
+            }
+        });
+        let ev_usage = parser(chunk_usage).unwrap();
+        assert_eq!(ev_usage.len(), 1);
+        assert_eq!(
+            ev_usage[0],
+            StreamEvent::Usage(crate::provider::Usage {
+                input_tokens: 15,
+                output_tokens: 25,
+            })
+        );
+    }
+
+    #[test]
+    fn build_payload_anthropic_merges_consecutive_messages_and_converts_user_string() {
+        let provider = JsonProvider::new(
+            "anthropic",
+            "https://api.anthropic.com/v1/messages",
+            MockTransport("".into()),
+        );
+        let request = StreamRequest::new("claude-3-5-sonnet", "", 100).with_messages(vec![
+            crate::provider::ChatMessage {
+                role: "user".into(),
+                content: "question 1".into(),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            },
+            crate::provider::ChatMessage {
+                role: "user".into(),
+                content: "question 2".into(),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            },
+            crate::provider::ChatMessage {
+                role: "tool".into(),
+                content: "tool output".into(),
+                tool_call_id: Some("call_tool_1".into()),
+                tool_calls: None,
+                name: Some("tool_fn".into()),
+            },
+            crate::provider::ChatMessage {
+                role: "assistant".into(),
+                content: "answer part 1".into(),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            },
+            crate::provider::ChatMessage {
+                role: "assistant".into(),
+                content: "answer part 2".into(),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            },
+        ]);
+        let (body, _) = provider.build_payload(&request);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let msgs = parsed["messages"].as_array().unwrap();
+
+        // Strictly alternating user then assistant
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "assistant");
+
+        // User message contains text block then tool_result block
+        let user_blocks = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(user_blocks.len(), 2);
+        assert_eq!(user_blocks[0]["type"], "text");
+        assert_eq!(user_blocks[0]["text"], "question 1\n\nquestion 2");
+        assert_eq!(user_blocks[1]["type"], "tool_result");
+        assert_eq!(user_blocks[1]["tool_use_id"], "call_tool_1");
+        assert_eq!(user_blocks[1]["content"], "tool output");
+
+        // Assistant messages merged into single string
+        assert_eq!(msgs[1]["content"], "answer part 1\n\nanswer part 2");
+    }
+
+    #[test]
+    fn build_payload_anthropic_fallback_id_when_tool_call_id_empty() {
+        let provider = JsonProvider::new(
+            "anthropic",
+            "https://api.anthropic.com/v1/messages",
+            MockTransport("".into()),
+        );
+        let request = StreamRequest::new("claude-3-5-sonnet", "", 100).with_messages(vec![
+            crate::provider::ChatMessage {
+                role: "tool".into(),
+                content: "result".into(),
+                tool_call_id: Some("".into()),
+                tool_calls: None,
+                name: None,
+            },
+        ]);
+        let (body, _) = provider.build_payload(&request);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let msgs = parsed["messages"].as_array().unwrap();
+        let content = msgs[0]["content"].as_array().unwrap();
+        let id = content[0]["tool_use_id"].as_str().unwrap();
+        assert!(!id.is_empty());
     }
 }

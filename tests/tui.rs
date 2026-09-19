@@ -4604,3 +4604,112 @@ fn previous_response_and_plan_persist_when_user_chats_again() {
     assert!(app.transcript().contains("Second question"));
     assert_eq!(app.current_plan().len(), 2);
 }
+
+#[test]
+fn test_resize_event_handled_with_open_dialogs() {
+    let mut app = App::default();
+    assert_eq!(app.terminal_size(), (100, 30));
+
+    // 1. Resize with permission_dialog open
+    app.open_permission_dialog("bash", "echo hi", "test");
+    assert!(app.permission_dialog().is_some());
+    app.apply(UiEvent::Resize {
+        width: 120,
+        height: 40,
+    });
+    assert_eq!(app.terminal_size(), (120, 40));
+    assert!(app.permission_dialog().is_some());
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.permission_dialog().is_none());
+
+    // 2. Resize with question_dialog open
+    app.open_question_dialog("Proceed?", vec!["Yes".to_string(), "No".to_string()]);
+    assert!(app.question_dialog().is_some());
+    app.apply(UiEvent::Resize {
+        width: 140,
+        height: 50,
+    });
+    assert_eq!(app.terminal_size(), (140, 50));
+    assert!(app.question_dialog().is_some());
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.question_dialog().is_none());
+
+    // 3. Resize with status_dialog open
+    app.open_status_dialog();
+    assert!(app.status_dialog().is_some());
+    app.apply(UiEvent::Resize {
+        width: 80,
+        height: 24,
+    });
+    assert_eq!(app.terminal_size(), (80, 24));
+    assert!(app.status_dialog().is_some());
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.status_dialog().is_none());
+
+    // 4. Resize with which_key open
+    app.apply(UiEvent::Input(Input::WhichKey));
+    assert!(app.which_key().visible);
+    app.apply(UiEvent::Resize {
+        width: 90,
+        height: 35,
+    });
+    assert_eq!(app.terminal_size(), (90, 35));
+    assert!(app.which_key().visible);
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(!app.which_key().visible);
+}
+
+#[test]
+fn test_dialog_precedence_aligned_with_render() {
+    let mut app = App::default();
+
+    // Open status dialog
+    app.open_status_dialog();
+    assert!(app.status_dialog().is_some());
+
+    // Submit should close status dialog
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.status_dialog().is_none());
+}
+
+#[test]
+fn test_chat_rendering_handles_large_content_without_overflow() {
+    let mut app = App::default();
+    let long_text = "line\n".repeat(1000);
+    app.apply(UiEvent::StreamDelta(long_text));
+
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let res = terminal.draw(|f| clawcode::tui::render(f, &app));
+    assert!(res.is_ok());
+}
+
+#[test]
+fn test_render_status_bar_uses_cached_git_branch() {
+    let mut app = App::default();
+    app.set_git_branch(Some("feature-xyz".into()));
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut rendered = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            rendered.push_str(buffer[(x, y)].symbol());
+        }
+    }
+    assert!(rendered.contains(":feature-xyz"));
+
+    app.set_git_branch(None);
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut rendered_none = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            rendered_none.push_str(buffer[(x, y)].symbol());
+        }
+    }
+    assert!(!rendered_none.contains(":feature-xyz"));
+}

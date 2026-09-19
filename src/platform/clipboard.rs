@@ -75,15 +75,33 @@ impl ClipboardBackend for SystemBackend {
     }
 }
 
+pub fn trim_clipboard_newlines(output: &str) -> &str {
+    output
+        .strip_suffix("\r\n")
+        .or_else(|| output.strip_suffix('\n'))
+        .unwrap_or(output)
+}
+
 #[cfg(windows)]
 fn command_read() -> Result<String, PlatformError> {
-    command_output(Command::new("powershell").args(["-NoProfile", "-Command", "Get-Clipboard"]))
+    let output = command_output(Command::new("powershell").args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-Clipboard",
+    ]))?;
+    Ok(trim_clipboard_newlines(&output).to_string())
 }
 
 #[cfg(windows)]
 fn command_write(text: &str) -> Result<(), PlatformError> {
     let mut command = Command::new("powershell");
-    command.args(["-NoProfile", "-Command", "Set-Clipboard"]);
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$input | Set-Clipboard",
+    ]);
     command.stdin(std::process::Stdio::piped());
     let mut child = command.spawn().map_err(io_error)?;
     use std::io::Write;
@@ -173,5 +191,17 @@ mod tests {
                 "clipboard payload exceeds limit".into()
             ))
         );
+    }
+
+    #[test]
+    fn trims_crlf_and_lf_from_clipboard_output() {
+        assert_eq!(trim_clipboard_newlines("hello\r\n"), "hello");
+        assert_eq!(trim_clipboard_newlines("hello\n"), "hello");
+        assert_eq!(trim_clipboard_newlines("hello"), "hello");
+        assert_eq!(
+            trim_clipboard_newlines("line1\r\nline2\r\n"),
+            "line1\r\nline2"
+        );
+        assert_eq!(trim_clipboard_newlines(""), "");
     }
 }

@@ -113,6 +113,20 @@ fn env_references_resolve_from_environment() {
 }
 
 #[test]
+fn env_references_trim_whitespace_and_reject_empty() {
+    const KEY: &str = "CLAWCODE_TEST_KEY_TRIM_7QF";
+    unsafe { std::env::set_var(KEY, "  trimmed-secret  \n") };
+    let secret = SecretRef::Env(KEY.into());
+    assert_eq!(secret.resolve().unwrap(), "trimmed-secret");
+
+    unsafe { std::env::set_var(KEY, "   \t\n  ") };
+    assert!(matches!(
+        secret.resolve().unwrap_err(),
+        ConfigDiagnostic::MissingSecret { .. }
+    ));
+}
+
+#[test]
 fn missing_env_reference_is_diagnostic() {
     let config = ConfigLoader
         .parse_str(

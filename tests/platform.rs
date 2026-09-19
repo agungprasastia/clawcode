@@ -2,7 +2,9 @@ use clawcode::platform::{
     Clipboard, CredentialStore, MAX_CLIPBOARD_BYTES, PlatformError, ShellDiscovery,
     UnsupportedCredentialStore, get_branch_for_path, get_current_branch, is_git_repo,
 };
-use clawcode::platform::{ClipboardBackend, PathShellDiscovery, SystemClipboard};
+use clawcode::platform::{
+    ClipboardBackend, PathShellDiscovery, SystemClipboard, trim_clipboard_newlines,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -193,6 +195,18 @@ fn git_branch_for_non_git_directory_returns_none() {
     assert!(!is_git_repo(&directory));
     assert_eq!(get_branch_for_path(&directory), None);
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn clipboard_newlines_trimmed_properly() {
+    assert_eq!(trim_clipboard_newlines("hello\r\n"), "hello");
+    assert_eq!(trim_clipboard_newlines("hello\n"), "hello");
+    assert_eq!(trim_clipboard_newlines("hello"), "hello");
+    assert_eq!(
+        trim_clipboard_newlines("line1\r\nline2\r\n"),
+        "line1\r\nline2"
+    );
+    assert_eq!(trim_clipboard_newlines(""), "");
 }
 
 fn temp_directory(label: &str) -> PathBuf {

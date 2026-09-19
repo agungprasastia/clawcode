@@ -819,6 +819,13 @@ impl App {
     }
 
     pub fn apply(&mut self, event: UiEvent) {
+        if let UiEvent::Resize { width, height } = event {
+            self.terminal_size.set((width, height));
+            self.last_popup_area.set(None);
+            self.last_quick_actions_area.set(None);
+            return;
+        }
+
         if self.permission_dialog.is_some() {
             match event {
                 UiEvent::Input(Input::Left)
@@ -965,6 +972,102 @@ impl App {
             return;
         }
 
+        if self.status_dialog.is_some() {
+            match event {
+                UiEvent::Input(Input::Quit)
+                | UiEvent::Input(Input::Cancel)
+                | UiEvent::Input(Input::Submit)
+                | UiEvent::Input(Input::Clear) => {
+                    self.status_dialog = None;
+                }
+                UiEvent::Resize { .. } => {}
+                UiEvent::StreamDelta(delta) => {
+                    self.transcript.push_str(&delta);
+                    self.truncate_transcript();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.sessions_dialog.is_some() {
+            match event {
+                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
+                    self.sessions_dialog = None;
+                    self.session_listings.clear();
+                }
+                UiEvent::Input(Input::Character(character)) => {
+                    if let Some(dialog) = &mut self.sessions_dialog {
+                        if dialog.filter.is_empty() && character == '/' {
+                            self.sessions_dialog = None;
+                            self.session_listings.clear();
+                            self.history_index = None;
+                            self.prompt.push('/');
+                            self.cursor_position = 1;
+                            self.selected_suggestion = 0;
+                            return;
+                        }
+                        if dialog.filter.is_empty() && character == 'd' {
+                            if let Some(session) = dialog.selected_session().cloned() {
+                                let title = session.title.clone();
+                                let id = session.id;
+                                let _ = self.command_service.delete_session(id);
+                                dialog.remove_item(id);
+                                self.session_listings.retain(|s| s.id != id);
+                                self.diagnostic = format!("session deleted: {title}");
+                            }
+                            return;
+                        }
+                        dialog.push_char(character);
+                    }
+                }
+                UiEvent::Input(Input::Backspace) => {
+                    if let Some(dialog) = &mut self.sessions_dialog {
+                        dialog.pop_char();
+                    }
+                }
+                UiEvent::Input(Input::Up)
+                | UiEvent::Input(Input::ScrollUp)
+                | UiEvent::Input(Input::PageUp) => {
+                    if let Some(dialog) = &mut self.sessions_dialog {
+                        dialog.previous();
+                    }
+                }
+                UiEvent::Input(Input::Down)
+                | UiEvent::Input(Input::ScrollDown)
+                | UiEvent::Input(Input::PageDown) => {
+                    if let Some(dialog) = &mut self.sessions_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Input(Input::Submit) => {
+                    let chosen_session = self
+                        .sessions_dialog
+                        .as_ref()
+                        .and_then(|d| d.selected_session().cloned());
+                    if let Some(chosen) = chosen_session {
+                        self.switch_session(chosen.id);
+                        self.diagnostic =
+                            format!("switched to session #{} ({})", chosen.id, chosen.title);
+                    }
+                    self.sessions_dialog = None;
+                    self.session_listings.clear();
+                }
+                UiEvent::Input(Input::ToggleMode) => {
+                    if let Some(dialog) = &mut self.sessions_dialog {
+                        dialog.next();
+                    }
+                }
+                UiEvent::Resize { .. } => {}
+                UiEvent::StreamDelta(delta) => {
+                    self.transcript.push_str(&delta);
+                    self.truncate_transcript();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.agents_dialog.is_some() {
             match event {
                 UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
@@ -1073,84 +1176,6 @@ impl App {
             return;
         }
 
-        if self.sessions_dialog.is_some() {
-            match event {
-                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
-                    self.sessions_dialog = None;
-                    self.session_listings.clear();
-                }
-                UiEvent::Input(Input::Character(character)) => {
-                    if let Some(dialog) = &mut self.sessions_dialog {
-                        if dialog.filter.is_empty() && character == '/' {
-                            self.sessions_dialog = None;
-                            self.session_listings.clear();
-                            self.history_index = None;
-                            self.prompt.push('/');
-                            self.cursor_position = 1;
-                            self.selected_suggestion = 0;
-                            return;
-                        }
-                        if dialog.filter.is_empty() && character == 'd' {
-                            if let Some(session) = dialog.selected_session().cloned() {
-                                let title = session.title.clone();
-                                let id = session.id;
-                                let _ = self.command_service.delete_session(id);
-                                dialog.remove_item(id);
-                                self.session_listings.retain(|s| s.id != id);
-                                self.diagnostic = format!("session deleted: {title}");
-                            }
-                            return;
-                        }
-                        dialog.push_char(character);
-                    }
-                }
-                UiEvent::Input(Input::Backspace) => {
-                    if let Some(dialog) = &mut self.sessions_dialog {
-                        dialog.pop_char();
-                    }
-                }
-                UiEvent::Input(Input::Up)
-                | UiEvent::Input(Input::ScrollUp)
-                | UiEvent::Input(Input::PageUp) => {
-                    if let Some(dialog) = &mut self.sessions_dialog {
-                        dialog.previous();
-                    }
-                }
-                UiEvent::Input(Input::Down)
-                | UiEvent::Input(Input::ScrollDown)
-                | UiEvent::Input(Input::PageDown) => {
-                    if let Some(dialog) = &mut self.sessions_dialog {
-                        dialog.next();
-                    }
-                }
-                UiEvent::Input(Input::Submit) => {
-                    let chosen_session = self
-                        .sessions_dialog
-                        .as_ref()
-                        .and_then(|d| d.selected_session().cloned());
-                    if let Some(chosen) = chosen_session {
-                        self.switch_session(chosen.id);
-                        self.diagnostic =
-                            format!("switched to session #{} ({})", chosen.id, chosen.title);
-                    }
-                    self.sessions_dialog = None;
-                    self.session_listings.clear();
-                }
-                UiEvent::Input(Input::ToggleMode) => {
-                    if let Some(dialog) = &mut self.sessions_dialog {
-                        dialog.next();
-                    }
-                }
-                UiEvent::Resize { .. } => {}
-                UiEvent::StreamDelta(delta) => {
-                    self.transcript.push_str(&delta);
-                    self.truncate_transcript();
-                }
-                _ => {}
-            }
-            return;
-        }
-
         if self.models_dialog.is_some() {
             match event {
                 UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
@@ -1199,24 +1224,6 @@ impl App {
                     if let Some(dialog) = &mut self.models_dialog {
                         dialog.next();
                     }
-                }
-                UiEvent::Resize { .. } => {}
-                UiEvent::StreamDelta(delta) => {
-                    self.transcript.push_str(&delta);
-                    self.truncate_transcript();
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        if self.status_dialog.is_some() {
-            match event {
-                UiEvent::Input(Input::Quit)
-                | UiEvent::Input(Input::Cancel)
-                | UiEvent::Input(Input::Submit)
-                | UiEvent::Input(Input::Clear) => {
-                    self.status_dialog = None;
                 }
                 UiEvent::Resize { .. } => {}
                 UiEvent::StreamDelta(delta) => {
@@ -1343,11 +1350,7 @@ impl App {
                     self.toggle_mode();
                 }
             }
-            UiEvent::Resize { width, height } => {
-                self.terminal_size.set((width, height));
-                self.last_popup_area.set(None);
-                self.last_quick_actions_area.set(None);
-            }
+            UiEvent::Resize { .. } => {}
             UiEvent::MouseClick { .. } => {}
             UiEvent::Input(Input::Click { .. }) => {}
             UiEvent::StreamDelta(delta) => {
@@ -2019,6 +2022,9 @@ impl App {
         } else {
             self.selected_suggestion.min(count - 1)
         }
+    }
+    pub fn terminal_size(&self) -> (u16, u16) {
+        self.terminal_size.get()
     }
 
     pub fn set_terminal_size(&self, width: u16, height: u16) {

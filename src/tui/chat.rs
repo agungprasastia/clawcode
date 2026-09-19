@@ -228,7 +228,7 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
     let transcript_area = chunks[1];
 
     let content_width = transcript_area.width;
-    let total_visual_lines = visual_line_count(&lines, content_width) as u16;
+    let total_visual_lines = visual_line_count(&lines, content_width).min(u16::MAX as usize) as u16;
     let visible_height = transcript_area.height;
     let max_scroll = total_visual_lines.saturating_sub(visible_height);
     let scroll_offset = app.chat_scroll().min(max_scroll);
@@ -238,8 +238,10 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
     prefix_visual_lines.push(0u16);
     let mut running = 0u16;
     for line in &lines {
-        running = running
-            .saturating_add(visual_line_count(std::slice::from_ref(line), content_width) as u16);
+        running = running.saturating_add(
+            visual_line_count(std::slice::from_ref(line), content_width).min(u16::MAX as usize)
+                as u16,
+        );
         prefix_visual_lines.push(running);
     }
 
@@ -251,15 +253,16 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
                 .y
                 .saturating_add(before)
                 .saturating_sub(scroll_y);
-            (y >= transcript_area.y && y < transcript_area.y + transcript_area.height).then_some((
-                call_id,
-                Rect {
-                    x: transcript_area.x,
-                    y,
-                    width: transcript_area.width,
-                    height: 1,
-                },
-            ))
+            (y >= transcript_area.y && y < transcript_area.y.saturating_add(transcript_area.height))
+                .then_some((
+                    call_id,
+                    Rect {
+                        x: transcript_area.x,
+                        y,
+                        width: transcript_area.width,
+                        height: 1,
+                    },
+                ))
         })
         .collect();
     app.set_tool_row_clicks(clicks);

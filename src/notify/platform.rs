@@ -12,14 +12,16 @@ pub fn terminal_bell() -> Result<(), String> {
 pub fn desktop(notification: &Notification) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let script = format!(
-            "$ErrorActionPreference='Stop'; [Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]$xml=New-Object Windows.Data.Xml.Dom.XmlDocument; $xml.LoadXml(\"<toast><visual><binding template='ToastGeneric'><text>{}</text><text>{}</text></binding></visual></toast>\"); $toast=[Windows.UI.Notifications.ToastNotification,Windows,ContentType=WindowsRuntime]::new($xml); [Windows.UI.Notifications.ToastNotificationManager,Windows,ContentType=WindowsRuntime]::CreateToastNotifier('Clawcode').Show($toast)",
-            xml_escape(&notification.title),
-            xml_escape(&notification.body)
-        );
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .spawn()
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference='Stop'; [Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]$xml=New-Object Windows.Data.Xml.Dom.XmlDocument; $xml.LoadXml(\"<toast><visual><binding template='ToastGeneric'><text>$env:CLAWCODE_TOAST_TITLE</text><text>$env:CLAWCODE_TOAST_BODY</text></binding></visual></toast>\"); $toast=[Windows.UI.Notifications.ToastNotification,Windows,ContentType=WindowsRuntime]::new($xml); [Windows.UI.Notifications.ToastNotificationManager,Windows,ContentType=WindowsRuntime]::CreateToastNotifier('Clawcode').Show($toast)",
+        ]);
+        cmd.env("CLAWCODE_TOAST_TITLE", xml_escape(&notification.title));
+        cmd.env("CLAWCODE_TOAST_BODY", xml_escape(&notification.body));
+        cmd.spawn()
             .map(|_| ())
             .map_err(|error| format!("desktop notification unavailable: {error}"))
     }
@@ -88,5 +90,19 @@ pub fn sound() -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
         Err("sound notification unavailable on this platform".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn xml_escape_escapes_xml_special_characters() {
+        assert_eq!(
+            xml_escape("test <tag> & 'quote' \"double\""),
+            "test &lt;tag&gt; &amp; &apos;quote&apos; &quot;double&quot;"
+        );
     }
 }
