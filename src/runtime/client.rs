@@ -5,6 +5,7 @@
 //! worker thread never blocks on the network; SQLite is shared behind a
 //! `Mutex` with short-lived accesses.
 
+use super::coordinator::{SessionConfig, SessionCoordinator, WakeOutcome};
 use super::{EventBus, RuntimeEvent};
 use crate::persistence::{
     Db, GenerationStatus, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, ToolCallStatus, WriterHandle,
@@ -48,6 +49,7 @@ pub enum ClientCommand {
 pub struct RuntimeClient {
     sender: Option<mpsc::SyncSender<ClientCommand>>,
     worker: Option<thread::JoinHandle<Arc<Mutex<Db>>>>,
+    coordinator: Arc<SessionCoordinator>,
 }
 
 impl RuntimeClient {
@@ -61,13 +63,16 @@ impl RuntimeClient {
     ) -> Self {
         db.set_busy_timeout(DB_BUSY_TIMEOUT);
         let db = Arc::new(Mutex::new(db));
+        let coordinator = Arc::new(SessionCoordinator::new());
         let (sender, receiver) = mpsc::sync_channel::<ClientCommand>(CLIENT_CHANNEL_CAPACITY);
+        let worker_coordinator = Arc::clone(&coordinator);
         let worker = thread::spawn(move || {
             worker_loop(
                 SharedDb::new(db.clone()),
                 writer,
                 Arc::from(provider),
                 bus,
+                worker_coordinator,
                 receiver,
             );
             db
@@ -75,6 +80,7 @@ impl RuntimeClient {
         Self {
             sender: Some(sender),
             worker: Some(worker),
+            coordinator,
         }
     }
 
@@ -121,6 +127,15 @@ impl RuntimeClient {
         self.send(ClientCommand::CancelGeneration { session_id })
     }
 
+    /// Check if a session has an active drain running.
+    pub fn is_active(&self, session_id: i64) -> bool {
+        self.coordinator.is_active(session_id)
+    }
+
+    /// Access the session coordinator.
+    pub fn coordinator(&self) -> &Arc<SessionCoordinator> {
+        &self.coordinator
+    }
     /// Stop the worker, wait for in-flight generations, take back the `Db`.
     pub fn shutdown(self) -> Db {
         drop(self.sender);
@@ -183,13 +198,13 @@ fn worker_loop(
     writer: WriterHandle,
     provider: Arc<dyn Provider + Send + Sync>,
     bus: EventBus,
+    coordinator: Arc<SessionCoordinator>,
     receiver: mpsc::Receiver<ClientCommand>,
 ) {
-    // (session_id, generation_id) per in-flight generation thread.
-    let active: Arc<Mutex<Vec<(i64, i64)>>> = Default::default();
-    let mut handles: Vec<(SharedGenerationCtx, thread::JoinHandle<()>)> = Vec::new();
+    let mut handles: Vec<thread::JoinHandle<()>> = Vec::new();
 
     while let Ok(command) = receiver.recv() {
+        handles.retain(|h| !h.is_finished());
         match command {
             ClientCommand::CreateSession {
                 workspace_id,
@@ -209,20 +224,6 @@ fn worker_loop(
                 model,
                 prompt,
             } => {
-                if active
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .iter()
-                    .any(|(s, _)| *s == session_id)
-                {
-                    publish_error(
-                        &bus,
-                        session_id,
-                        None,
-                        "generation already in progress for this session",
-                    );
-                    continue;
-                }
                 let (input, admit_seq) = match writer.admit_input(
                     session_id,
                     &prompt,
@@ -246,121 +247,196 @@ fn worker_loop(
                     })
                     .to_string(),
                 });
-                let (promoted_input, user_message, promo_seq) = match writer.promote_input(input.id)
-                {
-                    Ok(result) => result,
-                    Err(error) => {
-                        publish_error(&bus, session_id, None, &error);
-                        continue;
-                    }
-                };
-                bus.publish(RuntimeEvent {
-                    seq: promo_seq,
+
+                coordinator.set_session_config(
                     session_id,
-                    generation_id: None,
-                    kind: "prompt_promoted".to_string(),
-                    payload_json: serde_json::json!({
-                        "input_id": promoted_input.id,
-                        "session_id": session_id,
-                        "user_message_id": user_message.id,
-                    })
-                    .to_string(),
-                });
-                let generation = match db
-                    .with(|db| db.start_generation(session_id, &agent_mode, &provider_name, &model))
-                {
-                    Ok(generation) => generation,
-                    Err(error) => {
-                        publish_error(&bus, session_id, None, &error.to_string());
-                        continue;
-                    }
-                };
-                active
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push((session_id, generation.id));
-                let ctx = SharedGenerationCtx {
-                    db: db.clone(),
-                    writer: writer.clone(),
-                    bus: bus.clone(),
-                    active: Arc::clone(&active),
-                    active_tool_call: Arc::new(Mutex::new(None)),
-                    session_id,
-                    generation_id: generation.id,
-                };
-                let generation_provider = provider.clone();
-                let ctx_for_handle = ctx.clone();
-                handles.push((
-                    ctx_for_handle,
-                    thread::spawn(move || {
-                        // A panic must not leave the session stuck as "running":
-                        // finalise the row, notify subscribers, then deactivate.
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            run_generation(
-                                &ctx,
-                                generation_provider.as_ref(),
-                                &model,
-                                &prompt,
-                                &agent_mode,
-                                &provider_name,
-                            );
+                    SessionConfig {
+                        agent_mode,
+                        provider: provider_name,
+                        model,
+                    },
+                );
+
+                match coordinator.wake(session_id) {
+                    WakeOutcome::Scheduled => {
+                        let drain_db = db.clone();
+                        let drain_writer = writer.clone();
+                        let drain_bus = bus.clone();
+                        let drain_coordinator = Arc::clone(&coordinator);
+                        let drain_provider = Arc::clone(&provider);
+                        handles.push(thread::spawn(move || {
+                            let res =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    drain_session_loop(
+                                        drain_db,
+                                        drain_writer,
+                                        drain_bus,
+                                        drain_coordinator.clone(),
+                                        drain_provider,
+                                        session_id,
+                                    );
+                                }));
+                            if res.is_err() {
+                                tracing::error!(session_id, "drain thread panicked");
+                                drain_coordinator.finish_drain(session_id);
+                            }
                         }));
-                        if result.is_err() {
-                            tracing::error!(
-                                session_id,
-                                generation_id = ctx.generation_id,
-                                "generation thread panicked"
-                            );
-                            let message = match ctx.fail_active_tool("generation thread panicked") {
-                                Ok(()) => "generation thread panicked".to_string(),
-                                Err(error) => format!(
-                                    "generation thread panicked; durable call may remain running: {error}"
-                                ),
-                            };
-                            ctx.fail_generation_state(&message);
-                        }
-                        ctx.deactivate();
-                    }),
-                ));
+                    }
+                    WakeOutcome::Coalesced | WakeOutcome::Ignored => {}
+                }
             }
             ClientCommand::CancelGeneration { session_id } => {
-                let generation_ids: Vec<i64> = active
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .iter()
-                    .filter(|(active_session, _)| *active_session == session_id)
-                    .map(|(_, generation_id)| *generation_id)
-                    .collect();
-                if generation_ids.is_empty() {
-                    publish_status(&bus, session_id, None, "cancel_rejected");
-                } else {
-                    for generation_id in generation_ids {
-                        match db.with(|db| db.request_cancel(generation_id)) {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                publish_status(&bus, session_id, Some(generation_id), "cancel_noop")
-                            }
-                            Err(error) => publish_error(
-                                &bus,
-                                session_id,
-                                Some(generation_id),
-                                &error.to_string(),
-                            ),
+                let active_gen_id = coordinator.interrupt(session_id);
+                if let Some(generation_id) = active_gen_id {
+                    match db.with(|db| db.request_cancel(generation_id)) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            publish_status(&bus, session_id, Some(generation_id), "cancel_noop")
+                        }
+                        Err(error) => {
+                            publish_error(&bus, session_id, Some(generation_id), &error.to_string())
                         }
                     }
+                } else if coordinator.is_cleaning_up(session_id) {
+                    // Interrupted before generation started; drain loop will observe cleaning_up and exit.
+                } else {
+                    publish_status(&bus, session_id, None, "cancel_rejected");
                 }
             }
         }
     }
-    for (ctx, handle) in handles {
-        if let Err(panic) = handle.join() {
-            tracing::error!(?panic, "generation thread panicked");
-            let _ = ctx.fail_active_tool("generation thread panicked");
-            ctx.fail_generation_state("generation thread panicked");
-            ctx.deactivate();
-        }
+    for handle in handles {
+        let _ = handle.join();
     }
     let _ = writer.shutdown();
+}
+
+fn drain_session_loop(
+    db: SharedDb,
+    writer: WriterHandle,
+    bus: EventBus,
+    coordinator: Arc<SessionCoordinator>,
+    provider: Arc<dyn Provider + Send + Sync>,
+    session_id: i64,
+) {
+    loop {
+        let next_input = match db.with(|db| db.next_pending_input(session_id)) {
+            Ok(Some(input)) => input,
+            Ok(None) => {
+                coordinator.finish_drain(session_id);
+                break;
+            }
+            Err(error) => {
+                publish_error(&bus, session_id, None, &error.to_string());
+                coordinator.finish_drain(session_id);
+                break;
+            }
+        };
+
+        let (promoted_input, user_message, promo_seq) = match writer.promote_input(next_input.id) {
+            Ok(result) => result,
+            Err(error) => {
+                publish_error(&bus, session_id, None, &error);
+                coordinator.finish_drain(session_id);
+                break;
+            }
+        };
+        bus.publish(RuntimeEvent {
+            seq: promo_seq,
+            session_id,
+            generation_id: None,
+            kind: "prompt_promoted".to_string(),
+            payload_json: serde_json::json!({
+                "input_id": promoted_input.id,
+                "session_id": session_id,
+                "user_message_id": user_message.id,
+            })
+            .to_string(),
+        });
+
+        let config = coordinator
+            .session_config(session_id)
+            .unwrap_or_else(|| SessionConfig {
+                agent_mode: "plan".to_string(),
+                provider: "default".to_string(),
+                model: "default".to_string(),
+            });
+
+        let generation = match db.with(|db| {
+            db.start_generation(
+                session_id,
+                &config.agent_mode,
+                &config.provider,
+                &config.model,
+            )
+        }) {
+            Ok(generation) => generation,
+            Err(error) => {
+                publish_error(&bus, session_id, None, &error.to_string());
+                coordinator.finish_drain(session_id);
+                break;
+            }
+        };
+
+        coordinator.set_active_generation(session_id, generation.id);
+        if coordinator.is_cleaning_up(session_id) {
+            let _ = db.with(|db| db.request_cancel(generation.id));
+        }
+
+        let ctx = SharedGenerationCtx {
+            db: db.clone(),
+            writer: writer.clone(),
+            bus: bus.clone(),
+            coordinator: Arc::clone(&coordinator),
+            active_tool_call: Arc::new(Mutex::new(None)),
+            session_id,
+            generation_id: generation.id,
+        };
+
+        let gen_provider = Arc::clone(&provider);
+        let gen_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_generation(
+                &ctx,
+                gen_provider.as_ref(),
+                &config.model,
+                &promoted_input.content,
+                &config.agent_mode,
+                &config.provider,
+            );
+        }));
+
+        if gen_result.is_err() {
+            tracing::error!(
+                session_id,
+                generation_id = ctx.generation_id,
+                "generation thread panicked"
+            );
+            let message = match ctx.fail_active_tool("generation thread panicked") {
+                Ok(()) => "generation thread panicked".to_string(),
+                Err(error) => {
+                    format!("generation thread panicked; durable call may remain running: {error}")
+                }
+            };
+            ctx.fail_generation_state(&message);
+        }
+
+        ctx.deactivate();
+
+        if coordinator.is_cleaning_up(session_id) {
+            coordinator.finish_interrupt(session_id);
+            break;
+        }
+
+        let should_continue = coordinator.complete_turn(session_id);
+        let has_more = db
+            .with(|db| db.has_pending_inputs(session_id))
+            .unwrap_or(false);
+
+        if !should_continue || !has_more {
+            coordinator.finish_drain(session_id);
+            break;
+        }
+    }
 }
 
 /// Shared per-generation context: log-persisted emits with committed seqs.
@@ -369,7 +445,7 @@ struct SharedGenerationCtx {
     db: SharedDb,
     writer: WriterHandle,
     bus: EventBus,
-    active: Arc<Mutex<Vec<(i64, i64)>>>,
+    coordinator: Arc<SessionCoordinator>,
     active_tool_call: Arc<Mutex<Option<i64>>>,
     session_id: i64,
     generation_id: i64,
@@ -456,14 +532,10 @@ impl SharedGenerationCtx {
         self.emit("error", &serde_json::json!({ "message": message }));
     }
 
-    /// Remove this generation from the active set.
+    /// Clear the active generation from the coordinator.
     fn deactivate(&self) {
-        self.active
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .retain(|&(session_id, generation_id)| {
-                session_id != self.session_id || generation_id != self.generation_id
-            });
+        self.coordinator
+            .clear_active_generation(self.session_id, self.generation_id);
     }
 }
 
@@ -1251,13 +1323,19 @@ mod tests {
 
     #[test]
     fn cancel_generation_marks_cancelled_not_completed() {
-        let db = Db::open_in_memory().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "clawcode-test-client-cancel-{}.db",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
         let session = db.create_session("cancel_test").unwrap();
         let session_id = session.id;
         let bus = EventBus::new();
         let (_sub_id, rx) = bus.subscribe(Some(session_id));
-        let writer_db = Db::open_in_memory().unwrap();
-        writer_db.create_session("cancel_test").unwrap();
+        let writer_db = Db::open(&path).unwrap();
         let writer = WriterHandle::spawn(writer_db);
         let client = RuntimeClient::spawn(db, writer, Box::new(SlowProvider), bus);
 
@@ -1297,17 +1375,24 @@ mod tests {
             db.generation_status(gid).unwrap(),
             Some(GenerationStatus::Cancelled)
         );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn concurrent_generation_on_same_session_is_rejected() {
-        let db = Db::open_in_memory().unwrap();
+    fn concurrent_generation_on_same_session_is_coalesced_and_serialized() {
+        let path = std::env::temp_dir().join(format!(
+            "clawcode-test-client-concurrent-{}.db",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
         let session = db.create_session("concurrent_test").unwrap();
         let session_id = session.id;
         let bus = EventBus::new();
         let (_sub_id, rx) = bus.subscribe(Some(session_id));
-        let writer_db = Db::open_in_memory().unwrap();
-        writer_db.create_session("concurrent_test").unwrap();
+        let writer_db = Db::open(&path).unwrap();
         let writer = WriterHandle::spawn(writer_db);
         let client = RuntimeClient::spawn(db, writer, Box::new(SlowProvider), bus);
 
@@ -1318,22 +1403,26 @@ mod tests {
             .start_generation(session_id, "plan", "fake", "slow", "turn 2")
             .unwrap();
 
-        let mut error_seen = false;
+        let mut finished_count = 0;
         let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_secs(1) {
+        while start.elapsed() < std::time::Duration::from_secs(5) {
             if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
-                && event.kind == "error"
-                && event.payload_json.contains("already in progress")
+                && event.kind == "generation_finished"
             {
-                error_seen = true;
-                break;
+                finished_count += 1;
+                if finished_count >= 2 {
+                    break;
+                }
             }
         }
-        assert!(
-            error_seen,
-            "concurrent generation on same session must be rejected"
-        );
-        let _ = client.shutdown();
+        assert_eq!(finished_count, 2, "both turns should finish sequentially");
+        let db = client.shutdown();
+        let messages = db.messages(session_id).unwrap();
+        let user_messages: Vec<_> = messages.iter().filter(|m| m.role == "user").collect();
+        assert_eq!(user_messages.len(), 2);
+        assert_eq!(user_messages[0].content, "turn 1");
+        assert_eq!(user_messages[1].content, "turn 2");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1341,6 +1430,7 @@ mod tests {
         let client = RuntimeClient {
             sender: None,
             worker: None,
+            coordinator: Arc::new(SessionCoordinator::new()),
         };
         let res = client.create_session(1, "test");
         assert!(res.is_err());
@@ -1370,13 +1460,15 @@ mod tests {
 
         let bus = EventBus::new();
         let (_sub, rx) = bus.subscribe(Some(session.id));
-        let active = Arc::new(Mutex::new(vec![(session.id, generation.id)]));
+        let coordinator = Arc::new(SessionCoordinator::new());
+        coordinator.wake(session.id);
+        coordinator.set_active_generation(session.id, generation.id);
         let dummy_db = Db::open_in_memory().unwrap();
         let ctx = SharedGenerationCtx {
             db: SharedDb::new(Arc::new(Mutex::new(dummy_db))),
             writer: writer.clone(),
             bus,
-            active,
+            coordinator,
             active_tool_call: Arc::new(Mutex::new(Some(running.id))),
             session_id: session.id,
             generation_id: generation.id,

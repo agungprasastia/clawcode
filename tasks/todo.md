@@ -97,31 +97,31 @@
 
 ### Task 7: Add process-local per-session coordinator and wake
 
-- [ ] Description: Add session-keyed coordinator; serialize one local drain, allow different sessions concurrently, coalesce wakes, and schedule admitted inputs at safe boundaries.
-- [ ] Acceptance: One session has at most one active drain and one follow-up wake.
-- [ ] Acceptance: Different sessions can run concurrently.
-- [ ] Acceptance: Repeated wakes do not duplicate promotions or provider calls.
-- [ ] Focused verification: Deterministic fake-provider tests for serialization, cross-session overlap, wake coalescing, and active cleanup.
+- [x] Description: Add session-keyed coordinator; serialize one local drain, allow different sessions concurrently, coalesce wakes, and schedule admitted inputs at safe boundaries.
+- [x] Acceptance: One session has at most one active drain and one follow-up wake.
+- [x] Acceptance: Different sessions can run concurrently.
+- [x] Acceptance: Repeated wakes do not duplicate promotions or provider calls.
+- [x] Focused verification: Deterministic fake-provider tests for serialization, cross-session overlap, wake coalescing, and active cleanup.
 - [ ] Dependencies: Checkpoint 2.
 - [ ] Likely files: `src/runtime/coordinator.rs`, `src/runtime/client.rs`, `src/runtime/mod.rs`, `src/persistence/db.rs`, `tests/runtime.rs`.
 - [ ] Scope: 5 files, medium.
 
 ### Task 8: Add process-local interrupt cleanup
 
-- [ ] Description: Cancel current provider stream, join and unregister drain, clear coalesced wake, and preserve pending input.
-- [ ] Acceptance: Active interrupt emits one terminal cancellation and leaves coordinator idle.
-- [ ] Acceptance: Idle or unknown interrupt is idempotent and preserves pending input.
-- [ ] Acceptance: Wake during cleanup cannot start a second drain.
-- [ ] Focused verification: Blocking fake-provider cancellation test for cleanup, pending input, stale registry, and duplicate prevention.
+- [x] Description: Cancel current provider stream, join and unregister drain, clear coalesced wake, and preserve pending input.
+- [x] Acceptance: Active interrupt emits one terminal cancellation and leaves coordinator idle.
+- [x] Acceptance: Idle or unknown interrupt is idempotent and preserves pending input.
+- [x] Acceptance: Wake during cleanup cannot start a second drain.
+- [x] Focused verification: Blocking fake-provider cancellation test for cleanup, pending input, stale registry, and duplicate prevention.
 - [ ] Dependencies: Task 7.
 - [ ] Likely files: `src/runtime/coordinator.rs`, `src/runtime/client.rs`, `src/persistence/db.rs`, `tests/runtime.rs`.
 - [ ] Scope: 4 files, medium.
 
 ### Checkpoint 3: Local session control
 
-- [ ] Per-session serialization, cross-session concurrency, wake coalescing, and interrupt cleanup pass focused checks.
-- [ ] `active()` remains process-local.
-- [ ] Crash recovery, retry, and clustered ownership remain absent.
+- [x] Per-session serialization, cross-session concurrency, wake coalescing, and interrupt cleanup pass focused checks.
+- [x] `active()` remains process-local.
+- [x] Crash recovery, retry, and clustered ownership remain absent.
 
 ## Phase 4: Durable event replay cursor
 

@@ -703,3 +703,516 @@ fn runtime_backed_oversized_prompt_rejected_without_transcript_or_db_write() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn per_session_serialization_drains_sequentially_without_overlap() {
+    let path = temp_db_path("session_serialization");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("serial").unwrap();
+    let session_id = session.id;
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let (_sub, rx) = bus.subscribe(Some(session_id));
+
+    let events_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log_clone = Arc::clone(&events_log);
+
+    #[derive(Debug)]
+    struct SerialProvider {
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Provider for SerialProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("serial-fake"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        fn send(&self, _request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            Ok(StreamResponse { events: vec![] })
+        }
+        fn stream(
+            &self,
+            request: &StreamRequest,
+        ) -> Result<clawcode::provider::ProviderStream, ProviderError> {
+            let prompt = request.prompt.clone();
+            let log = Arc::clone(&self.log);
+            let (sender, stream) = clawcode::provider::ProviderStream::channel(16);
+            std::thread::spawn(move || {
+                log.lock().unwrap().push(format!("start:{prompt}"));
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                let _ = sender.send(StreamEvent::TextDelta(format!("reply:{prompt}")));
+                let _ = sender.flush();
+                let _ = sender.send(StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                });
+                let _ = sender.flush();
+                log.lock().unwrap().push(format!("finish:{prompt}"));
+            });
+            Ok(stream)
+        }
+    }
+
+    let client = RuntimeClient::spawn(db, writer, Box::new(SerialProvider { log: log_clone }), bus);
+
+    client
+        .start_generation(session_id, "plan", "fake", "serial", "prompt 1")
+        .unwrap();
+    client
+        .start_generation(session_id, "plan", "fake", "serial", "prompt 2")
+        .unwrap();
+
+    let mut finished_count = 0;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(5) {
+        if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+            && event.kind == "generation_finished"
+        {
+            finished_count += 1;
+            if finished_count >= 2 {
+                break;
+            }
+        }
+    }
+    assert_eq!(finished_count, 2, "both turns must finish");
+
+    let log = events_log.lock().unwrap().clone();
+    assert_eq!(
+        log,
+        vec![
+            "start:prompt 1",
+            "finish:prompt 1",
+            "start:prompt 2",
+            "finish:prompt 2"
+        ],
+        "turns must run sequentially in order without overlapping"
+    );
+
+    let db = client.shutdown();
+    let messages = db.messages(session_id).unwrap();
+    let user_msgs: Vec<_> = messages.iter().filter(|m| m.role == "user").collect();
+    assert_eq!(user_msgs.len(), 2);
+    assert_eq!(user_msgs[0].content, "prompt 1");
+    assert_eq!(user_msgs[1].content, "prompt 2");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn cross_session_concurrency_runs_in_parallel() {
+    let path = temp_db_path("cross_session_parallel");
+    let db = Db::open(&path).expect("runtime db");
+    let session_a = db.create_session("session A").unwrap();
+    let session_b = db.create_session("session B").unwrap();
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let (_sub_a, rx_a) = bus.subscribe(Some(session_a.id));
+    let (_sub_b, rx_b) = bus.subscribe(Some(session_b.id));
+
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let barrier_clone = Arc::clone(&barrier);
+
+    #[derive(Debug)]
+    struct BarrierProvider {
+        barrier: Arc<std::sync::Barrier>,
+    }
+
+    impl Provider for BarrierProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("barrier-fake"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        fn send(&self, _request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            Ok(StreamResponse { events: vec![] })
+        }
+        fn stream(
+            &self,
+            request: &StreamRequest,
+        ) -> Result<clawcode::provider::ProviderStream, ProviderError> {
+            let barrier = Arc::clone(&self.barrier);
+            let prompt = request.prompt.clone();
+            let (sender, stream) = clawcode::provider::ProviderStream::channel(16);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let _ = sender.send(StreamEvent::TextDelta(format!("done:{prompt}")));
+                let _ = sender.flush();
+                let _ = sender.send(StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                });
+                let _ = sender.flush();
+            });
+            Ok(stream)
+        }
+    }
+
+    let client = RuntimeClient::spawn(
+        db,
+        writer,
+        Box::new(BarrierProvider {
+            barrier: barrier_clone,
+        }),
+        bus,
+    );
+
+    client
+        .start_generation(session_a.id, "plan", "fake", "barrier", "hello A")
+        .unwrap();
+    client
+        .start_generation(session_b.id, "plan", "fake", "barrier", "hello B")
+        .unwrap();
+
+    let start = std::time::Instant::now();
+    let mut a_done = false;
+    let mut b_done = false;
+
+    while start.elapsed() < std::time::Duration::from_secs(5) && (!a_done || !b_done) {
+        while let Ok(event) = rx_a.try_recv() {
+            if event.kind == "generation_finished" {
+                a_done = true;
+                break;
+            }
+        }
+        while let Ok(event) = rx_b.try_recv() {
+            if event.kind == "generation_finished" {
+                b_done = true;
+                break;
+            }
+        }
+        if a_done && b_done {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(a_done, "session A generation must finish");
+    assert!(b_done, "session B generation must finish");
+
+    let _db = client.shutdown();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn wake_coalescing_without_duplicate_promotions_or_provider_turns() {
+    let path = temp_db_path("wake_coalescing");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("coalesce").unwrap();
+    let session_id = session.id;
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let (_sub, rx) = bus.subscribe(Some(session_id));
+
+    let started_p1 = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let release_p1 = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let turn_calls = Arc::new(AtomicUsize::new(0));
+
+    let started_clone = Arc::clone(&started_p1);
+    let release_clone = Arc::clone(&release_p1);
+    let calls_clone = Arc::clone(&turn_calls);
+
+    #[derive(Debug)]
+    struct CoalescingProvider {
+        started: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Provider for CoalescingProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("coalesce-fake"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        fn send(&self, _request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            Ok(StreamResponse { events: vec![] })
+        }
+        fn stream(
+            &self,
+            request: &StreamRequest,
+        ) -> Result<clawcode::provider::ProviderStream, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (sender, stream) = clawcode::provider::ProviderStream::channel(16);
+            let is_p1 = request.prompt == "P1";
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+
+            std::thread::spawn(move || {
+                if is_p1 {
+                    *started.0.lock().unwrap() = true;
+                    started.1.notify_all();
+
+                    let mut lock = release.0.lock().unwrap();
+                    while !*lock {
+                        lock = release.1.wait(lock).unwrap();
+                    }
+                }
+                let _ = sender.send(StreamEvent::TextDelta("ok".into()));
+                let _ = sender.flush();
+                let _ = sender.send(StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                });
+                let _ = sender.flush();
+            });
+            Ok(stream)
+        }
+    }
+
+    let client = RuntimeClient::spawn(
+        db,
+        writer,
+        Box::new(CoalescingProvider {
+            started: started_clone,
+            release: release_clone,
+            calls: calls_clone,
+        }),
+        bus,
+    );
+
+    client
+        .start_generation(session_id, "plan", "fake", "coalesce", "P1")
+        .unwrap();
+
+    let mut lock = started_p1.0.lock().unwrap();
+    while !*lock {
+        lock = started_p1.1.wait(lock).unwrap();
+    }
+    drop(lock);
+
+    client
+        .start_generation(session_id, "plan", "fake", "coalesce", "P2")
+        .unwrap();
+    client
+        .start_generation(session_id, "plan", "fake", "coalesce", "P3")
+        .unwrap();
+
+    *release_p1.0.lock().unwrap() = true;
+    release_p1.1.notify_all();
+
+    let start = std::time::Instant::now();
+    let mut finished = 0;
+    while start.elapsed() < std::time::Duration::from_secs(5) {
+        if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+            && event.kind == "generation_finished"
+        {
+            finished += 1;
+            if finished >= 2 {
+                break;
+            }
+        }
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    assert_eq!(finished, 2, "must finish exactly 2 generations");
+    assert_eq!(
+        turn_calls.load(Ordering::SeqCst),
+        2,
+        "coalesced wakes must produce at most one follow-up turn"
+    );
+
+    let db = client.shutdown();
+    let messages = db.messages(session_id).unwrap();
+    let user_msgs: Vec<_> = messages.iter().filter(|m| m.role == "user").collect();
+    assert_eq!(user_msgs.len(), 2);
+    assert_eq!(user_msgs[0].content, "P1");
+    assert_eq!(user_msgs[1].content, "P2");
+
+    let inputs = db.session_inputs(session_id).unwrap();
+    assert_eq!(inputs.len(), 3);
+    assert_eq!(inputs[0].status, InputStatus::Promoted);
+    assert_eq!(inputs[1].status, InputStatus::Promoted);
+    assert_eq!(inputs[2].status, InputStatus::Pending);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn interrupt_cleanup_cancels_active_session_and_preserves_pending_input() {
+    let path = temp_db_path("interrupt_cleanup");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("interrupt").unwrap();
+    let session_id = session.id;
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let (_sub, rx) = bus.subscribe(Some(session_id));
+
+    let started = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let started_clone = Arc::clone(&started);
+
+    #[derive(Debug)]
+    struct BlockUntilCancelledProvider {
+        started: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl Provider for BlockUntilCancelledProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("cancel-fake"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        fn send(&self, _request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            Ok(StreamResponse { events: vec![] })
+        }
+        fn stream(
+            &self,
+            _request: &StreamRequest,
+        ) -> Result<clawcode::provider::ProviderStream, ProviderError> {
+            let started = Arc::clone(&self.started);
+            let (sender, stream) = clawcode::provider::ProviderStream::channel(16);
+            std::thread::spawn(move || {
+                *started.0.lock().unwrap() = true;
+                started.1.notify_all();
+
+                for _ in 0..100 {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    if sender
+                        .send(StreamEvent::TextDelta("streaming...".into()))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let _ = sender.flush();
+                }
+            });
+            Ok(stream)
+        }
+    }
+
+    let client = RuntimeClient::spawn(
+        db,
+        writer,
+        Box::new(BlockUntilCancelledProvider {
+            started: started_clone,
+        }),
+        bus,
+    );
+
+    client
+        .start_generation(session_id, "plan", "fake", "cancel", "P1")
+        .unwrap();
+
+    let mut lock = started.0.lock().unwrap();
+    while !*lock {
+        lock = started.1.wait(lock).unwrap();
+    }
+    drop(lock);
+
+    client
+        .start_generation(session_id, "plan", "fake", "cancel", "P2")
+        .unwrap();
+
+    client.cancel_generation(session_id).unwrap();
+
+    let start = std::time::Instant::now();
+    let mut got_cancelled = false;
+    while start.elapsed() < std::time::Duration::from_secs(4) {
+        if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+            && event.kind == "generation_finished"
+            && event.payload_json.contains("cancelled")
+        {
+            got_cancelled = true;
+            break;
+        }
+    }
+    assert!(got_cancelled, "active turn must emit cancelled event");
+
+    let drain_start = std::time::Instant::now();
+    while drain_start.elapsed() < std::time::Duration::from_secs(2) {
+        if !client.is_active(session_id) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !client.is_active(session_id),
+        "coordinator must be idle after interrupt cleanup"
+    );
+
+    let db = client.shutdown();
+    let inputs = db.session_inputs(session_id).unwrap();
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0].content, "P1");
+    assert_eq!(inputs[0].status, InputStatus::Promoted);
+    assert_eq!(inputs[1].content, "P2");
+    assert_eq!(inputs[1].status, InputStatus::Pending);
+
+    let messages = db.messages(session_id).unwrap();
+    let user_messages: Vec<_> = messages.iter().filter(|m| m.role == "user").collect();
+    assert_eq!(
+        user_messages.len(),
+        1,
+        "only P1 should have been promoted to a message"
+    );
+    assert_eq!(user_messages[0].content, "P1");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn idle_or_unknown_interrupt_is_safe_noop() {
+    let path = temp_db_path("idle_interrupt");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("idle_session").unwrap();
+    let session_id = session.id;
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let (_sub, rx) = bus.subscribe(Some(session_id));
+
+    let client = RuntimeClient::spawn(db, writer, Box::new(EchoProvider), bus);
+
+    assert!(client.cancel_generation(session_id).is_ok());
+    assert!(client.cancel_generation(999_999).is_ok());
+
+    let mut got_rejected = false;
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(2) {
+        if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+            && event.kind == "generation_status"
+            && event.payload_json.contains("cancel_rejected")
+        {
+            got_rejected = true;
+            break;
+        }
+    }
+    assert!(got_rejected, "idle cancel must emit cancel_rejected");
+    assert!(!client.is_active(session_id));
+
+    let _db = client.shutdown();
+    let _ = std::fs::remove_file(&path);
+}

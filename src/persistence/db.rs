@@ -435,6 +435,30 @@ impl Db {
         rows.collect()
     }
 
+    /// Fetch the next pending input for a session in admission order.
+    pub fn next_pending_input(
+        &self,
+        session_id: i64,
+    ) -> Result<Option<SessionInput>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT id, session_id, content, delivery, status, created_at, promoted_at, user_message_id
+                 FROM session_inputs WHERE session_id = ?1 AND status = 'pending' ORDER BY id LIMIT 1",
+                params![session_id],
+                session_input_from_row,
+            )
+            .optional()
+    }
+
+    /// Check if there are any pending inputs for a session.
+    pub fn has_pending_inputs(&self, session_id: i64) -> Result<bool, rusqlite::Error> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_inputs WHERE session_id = ?1 AND status = 'pending')",
+            params![session_id],
+            |row| row.get(0),
+        )
+    }
+
     /// Atomically admit an input to the inbox and record prompt_admitted event.
     pub fn admit_input(
         &self,

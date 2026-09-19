@@ -215,9 +215,9 @@ No source work starts until plan review approval is recorded. The first implemen
 **Description:** Add a small `SessionCoordinator` keyed by session ID. Serialize one local drain, allow different sessions concurrently, coalesce repeated wakes, and schedule admitted inputs at safe boundaries. Keep execution ownership process-local and non-durable.
 
 **Acceptance criteria:**
-- [ ] One session has at most one active drain and one follow-up wake.
-- [ ] Different sessions can run concurrently.
-- [ ] Repeated wakes do not duplicate promotions or provider calls.
+- [x] One session has at most one active drain and one follow-up wake.
+- [x] Different sessions can run concurrently.
+- [x] Repeated wakes do not duplicate promotions or provider calls.
 
 **Focused verification:** Deterministic fake-provider tests for serialization, cross-session overlap, wake coalescing, and active registry cleanup.
 
@@ -237,9 +237,9 @@ No source work starts until plan review approval is recorded. The first implemen
 **Description:** Route interrupt through the coordinator. Cancel current provider stream, join and unregister local drain, clear coalesced follow-up wake, and preserve pending durable inputs. Do not infer crash recovery or retry safety.
 
 **Acceptance criteria:**
-- [ ] Active interrupt emits one terminal cancellation and leaves coordinator idle.
-- [ ] Idle or unknown interrupt is idempotent and preserves pending input.
-- [ ] Wake during cleanup cannot start a second drain.
+- [x] Active interrupt emits one terminal cancellation and leaves coordinator idle.
+- [x] Idle or unknown interrupt is idempotent and preserves pending input.
+- [x] Wake during cleanup cannot start a second drain.
 
 **Focused verification:** Blocking fake-provider cancellation test covering cleanup, pending input, stale registry, and duplicate prevention.
 
@@ -255,9 +255,9 @@ No source work starts until plan review approval is recorded. The first implemen
 
 ### Checkpoint 3: Local session control
 
-- [ ] Per-session serialization, cross-session concurrency, wake coalescing, and interrupt cleanup pass focused checks.
-- [ ] `active()` remains process-local.
-- [ ] Crash recovery, retry, and clustered ownership remain absent.
+- [x] Per-session serialization, cross-session concurrency, wake coalescing, and interrupt cleanup pass focused checks.
+- [x] `active()` remains process-local.
+- [x] Crash recovery, retry, and clustered ownership remain absent.
 
 ### Phase 4: Durable event replay cursor
 

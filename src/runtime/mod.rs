@@ -7,6 +7,9 @@
 //! live events are pushed through the bus with the committed seq.
 
 pub mod client;
+pub mod coordinator;
+
+pub use coordinator::{SessionConfig, SessionCoordinator, SessionState, WakeOutcome};
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
