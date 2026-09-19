@@ -172,6 +172,17 @@ pub struct ToolCall {
     pub error: Option<String>,
 }
 
+/// Durable Context Epoch boundary stored in `context_epochs`.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ContextEpoch {
+    pub id: i64,
+    pub session_id: i64,
+    pub epoch_id: String,
+    pub baseline_system_text: String,
+    pub source_snapshot_json: String,
+    pub created_at: String,
+}
+
 /// A workspace root registered in the database.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Workspace {
@@ -308,6 +319,18 @@ impl Db {
             params![session_id, message],
         )?;
         Ok(())
+    }
+
+    /// Fetch a session's last error message, if any.
+    pub fn session_last_error(&self, session_id: i64) -> Result<Option<String>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT last_error FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|opt| opt.flatten())
     }
 
     /// Mark generations left active by a previous runtime death as
@@ -1044,6 +1067,101 @@ impl Db {
         )?;
         Ok(())
     }
+
+    /// Fetch the active (latest) context epoch for a session.
+    pub fn get_active_context_epoch(
+        &self,
+        session_id: i64,
+    ) -> Result<Option<ContextEpoch>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT id, session_id, epoch_id, baseline_system_text, source_snapshot_json, created_at
+                 FROM context_epochs
+                 WHERE session_id = ?1
+                 ORDER BY id DESC
+                 LIMIT 1",
+                params![session_id],
+                context_epoch_from_row,
+            )
+            .optional()
+    }
+
+    /// Insert a new context epoch boundary for a session.
+    pub fn insert_context_epoch(
+        &self,
+        session_id: i64,
+        epoch_id: &str,
+        baseline_system_text: &str,
+        source_snapshot_json: &str,
+    ) -> Result<ContextEpoch, rusqlite::Error> {
+        if baseline_system_text.len() > MAX_MESSAGE_BYTES {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                MessageTooLarge(baseline_system_text.len()),
+            )));
+        }
+        self.connection.query_row(
+            "INSERT INTO context_epochs (session_id, epoch_id, baseline_system_text, source_snapshot_json)
+             VALUES (?1, ?2, ?3, ?4)
+             RETURNING id, session_id, epoch_id, baseline_system_text, source_snapshot_json, created_at",
+            params![session_id, epoch_id, baseline_system_text, source_snapshot_json],
+            context_epoch_from_row,
+        )
+    }
+
+    /// Update the snapshot JSON for an active context epoch.
+    pub fn update_context_epoch_snapshot(
+        &self,
+        session_id: i64,
+        epoch_id: &str,
+        new_snapshot_json: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows = self.connection.execute(
+            "UPDATE context_epochs
+             SET source_snapshot_json = ?1
+             WHERE session_id = ?2 AND epoch_id = ?3",
+            params![new_snapshot_json, session_id, epoch_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Atomically update epoch snapshot and append a system delta message.
+    pub fn reconcile_epoch_change(
+        &self,
+        session_id: i64,
+        epoch_id: &str,
+        new_snapshot_json: &str,
+        delta_system_message: &str,
+    ) -> Result<Message, rusqlite::Error> {
+        if delta_system_message.len() > MAX_MESSAGE_BYTES {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                MessageTooLarge(delta_system_message.len()),
+            )));
+        }
+        let tx = self.connection.unchecked_transaction()?;
+        let rows = tx.execute(
+            "UPDATE context_epochs
+             SET source_snapshot_json = ?1
+             WHERE session_id = ?2 AND epoch_id = ?3",
+            params![new_snapshot_json, session_id, epoch_id],
+        )?;
+        if rows == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let message = tx.query_row(
+            "INSERT INTO messages (session_id, role, content) VALUES (?1, 'system', ?2)
+             RETURNING id, role, content",
+            params![session_id, delta_system_message],
+            |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    role: row.get(1)?,
+                    content: row.get(2)?,
+                })
+            },
+        )?;
+        tx.commit()?;
+        Ok(message)
+    }
 }
 
 fn ensure_tool_text_size(value: &str) -> Result<(), rusqlite::Error> {
@@ -1080,6 +1198,17 @@ fn session_input_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionIn
         created_at: row.get(5)?,
         promoted_at: row.get(6)?,
         user_message_id: row.get(7)?,
+    })
+}
+
+fn context_epoch_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextEpoch> {
+    Ok(ContextEpoch {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        epoch_id: row.get(2)?,
+        baseline_system_text: row.get(3)?,
+        source_snapshot_json: row.get(4)?,
+        created_at: row.get(5)?,
     })
 }
 fn tool_call_payload(tool_call: &ToolCall, result: Option<&str>, error: Option<&str>) -> String {

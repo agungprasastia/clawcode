@@ -1422,3 +1422,451 @@ fn replay_subscription_reconnect_recovery_no_loss() {
     let _db = client.shutdown();
     let _ = std::fs::remove_file(&path);
 }
+
+#[derive(Debug, Clone)]
+struct CapturingProvider {
+    requests: Arc<std::sync::Mutex<Vec<StreamRequest>>>,
+}
+
+impl CapturingProvider {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl Provider for CapturingProvider {
+    fn id(&self) -> &ProviderId {
+        static ID: std::sync::LazyLock<ProviderId> =
+            std::sync::LazyLock::new(|| ProviderId::new("capturing"));
+        &ID
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tools: false,
+        }
+    }
+    fn models(&self) -> Vec<ModelInfo> {
+        Vec::new()
+    }
+    fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(StreamResponse {
+            events: vec![
+                StreamEvent::TextDelta(format!("ack:{}", request.prompt)),
+                StreamEvent::Usage(Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                }),
+                StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                },
+            ],
+        })
+    }
+}
+
+#[cfg(windows)]
+fn lock_file_exclusive(path: &Path) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(path)
+        .expect("exclusive lock")
+}
+
+#[cfg(not(windows))]
+fn lock_file_exclusive(path: &Path) -> std::fs::File {
+    use std::os::unix::fs::PermissionsExt;
+    let file = std::fs::File::open(path).expect("open file");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    file
+}
+
+#[cfg(windows)]
+fn unlock_file(_file: std::fs::File, _path: &Path) {}
+
+#[cfg(not(windows))]
+fn unlock_file(_file: std::fs::File, path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+}
+
+fn wait_for_finish_or_error(
+    rx: &std::sync::mpsc::Receiver<clawcode::runtime::RuntimeEvent>,
+) -> String {
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(5) {
+        if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+            && (event.kind == "generation_finished" || event.kind == "error")
+        {
+            return event.kind;
+        }
+    }
+    panic!("timed out waiting for finish or error");
+}
+
+fn setup_session_with_workspace(path: &Path, ws_path: &Path) -> (Db, WriterHandle, i64) {
+    let db = Db::open(path).expect("db open");
+    let ws = db
+        .create_workspace(&ws_path.to_string_lossy(), "test ws")
+        .unwrap();
+    let session = db
+        .create_session_in_workspace(ws.id, "test session")
+        .unwrap();
+    let writer = WriterHandle::spawn(Db::open(path).expect("writer db"));
+    (db, writer, session.id)
+}
+
+#[test]
+fn context_epoch_baseline_exact_and_reusable_after_restart() {
+    let db_path = temp_db_path("epoch_restart");
+    let ws_dir = std::env::temp_dir().join(format!("clawcode-test-ws-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&ws_dir);
+    std::fs::write(ws_dir.join("AGENTS.md"), "initial baseline instructions").unwrap();
+
+    let (db, writer, session_id) = setup_session_with_workspace(&db_path, &ws_dir);
+    let provider = CapturingProvider::new();
+    let captured = provider.requests.clone();
+    let bus = EventBus::new();
+    let (_sub_id, rx) = bus.subscribe(None);
+    let client = RuntimeClient::spawn(db, writer, Box::new(provider), bus);
+
+    client
+        .start_generation(
+            session_id,
+            "plan",
+            "capturing",
+            "test-model",
+            "turn 1 prompt",
+        )
+        .unwrap();
+    assert_eq!(wait_for_finish_or_error(&rx), "generation_finished");
+
+    let reqs = captured.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 1);
+    assert!(
+        reqs[0].messages[0]
+            .content
+            .contains("initial baseline instructions")
+    );
+
+    // Restart: shutdown client
+    let db = client.shutdown();
+    let epoch = db.get_active_context_epoch(session_id).unwrap().unwrap();
+    assert!(
+        epoch
+            .baseline_system_text
+            .contains("initial baseline instructions")
+    );
+
+    // Now update AGENTS.md on disk
+    std::fs::write(ws_dir.join("AGENTS.md"), "updated baseline instructions").unwrap();
+
+    // Spawn new client with same db file
+    drop(db);
+    let db2 = Db::open(&db_path).unwrap();
+    let writer2 = WriterHandle::spawn(Db::open(&db_path).unwrap());
+    let provider2 = CapturingProvider::new();
+    let captured2 = provider2.requests.clone();
+    let bus2 = EventBus::new();
+    let (_sub_id2, rx2) = bus2.subscribe(None);
+    let client2 = RuntimeClient::spawn(db2, writer2, Box::new(provider2), bus2);
+
+    client2
+        .start_generation(
+            session_id,
+            "plan",
+            "capturing",
+            "test-model",
+            "turn 2 prompt",
+        )
+        .unwrap();
+    assert_eq!(wait_for_finish_or_error(&rx2), "generation_finished");
+
+    let reqs2 = captured2.lock().unwrap().clone();
+    assert_eq!(reqs2.len(), 1);
+    // Exact baseline system prompt is preserved in messages[0]!
+    assert!(
+        reqs2[0].messages[0]
+            .content
+            .contains("initial baseline instructions")
+    );
+    assert!(
+        !reqs2[0].messages[0]
+            .content
+            .contains("updated baseline instructions")
+    );
+
+    // System delta message is present in request history before turn 2 prompt
+    let messages = &reqs2[0].messages;
+    let has_delta = messages
+        .iter()
+        .any(|m| m.role == "system" && m.content.contains("updated baseline instructions"));
+    assert!(
+        has_delta,
+        "system delta message must be included in conversation stream"
+    );
+    assert_eq!(messages.last().unwrap().role, "user");
+    assert_eq!(messages.last().unwrap().content, "turn 2 prompt");
+
+    let _db2 = client2.shutdown();
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&ws_dir);
+}
+
+#[test]
+fn unchanged_instruction_source_emits_no_system_message() {
+    let db_path = temp_db_path("epoch_unchanged");
+    let ws_dir =
+        std::env::temp_dir().join(format!("clawcode-test-ws-unchanged-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&ws_dir);
+    std::fs::write(ws_dir.join("AGENTS.md"), "static instructions").unwrap();
+
+    let (db, writer, session_id) = setup_session_with_workspace(&db_path, &ws_dir);
+    let bus = EventBus::new();
+    let (_sub_id, rx) = bus.subscribe(None);
+    let client = RuntimeClient::spawn(db, writer, Box::new(EchoProvider), bus);
+
+    client
+        .start_generation(session_id, "plan", "fake", "echo", "prompt 1")
+        .unwrap();
+    assert_eq!(wait_for_finish_or_error(&rx), "generation_finished");
+
+    // Turn 2 without touching AGENTS.md
+    client
+        .start_generation(session_id, "plan", "fake", "echo", "prompt 2")
+        .unwrap();
+    assert_eq!(wait_for_finish_or_error(&rx), "generation_finished");
+
+    let db = client.shutdown();
+    let messages = db.messages(session_id).unwrap();
+    let system_msgs: Vec<_> = messages.iter().filter(|m| m.role == "system").collect();
+    assert!(
+        system_msgs.is_empty(),
+        "unchanged source must emit no system message"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&ws_dir);
+}
+
+#[test]
+fn changed_instruction_source_emits_exactly_one_atomic_system_message_and_updates_snapshot() {
+    let db_path = temp_db_path("epoch_changed");
+    let ws_dir =
+        std::env::temp_dir().join(format!("clawcode-test-ws-changed-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&ws_dir);
+    std::fs::write(ws_dir.join("AGENTS.md"), "v1 instructions").unwrap();
+
+    let (db, writer, session_id) = setup_session_with_workspace(&db_path, &ws_dir);
+    let bus = EventBus::new();
+    let (_sub_id, rx) = bus.subscribe(None);
+    let client = RuntimeClient::spawn(db, writer, Box::new(EchoProvider), bus);
+
+    client
+        .start_generation(session_id, "plan", "fake", "echo", "prompt 1")
+        .unwrap();
+    assert_eq!(wait_for_finish_or_error(&rx), "generation_finished");
+
+    let reader_db = Db::open(&db_path).unwrap();
+    let snapshot_v1 = reader_db
+        .get_active_context_epoch(session_id)
+        .unwrap()
+        .unwrap()
+        .source_snapshot_json;
+    drop(reader_db);
+
+    // Update AGENTS.md
+    std::fs::write(ws_dir.join("AGENTS.md"), "v2 modified instructions").unwrap();
+
+    client
+        .start_generation(session_id, "plan", "fake", "echo", "prompt 2")
+        .unwrap();
+    assert_eq!(wait_for_finish_or_error(&rx), "generation_finished");
+
+    let db = client.shutdown();
+    let active_epoch = db.get_active_context_epoch(session_id).unwrap().unwrap();
+    assert_ne!(active_epoch.source_snapshot_json, snapshot_v1);
+    assert!(active_epoch.source_snapshot_json.contains("AGENTS.md"));
+
+    let messages = db.messages(session_id).unwrap();
+    let system_msgs: Vec<_> = messages.iter().filter(|m| m.role == "system").collect();
+    assert_eq!(
+        system_msgs.len(),
+        1,
+        "changed source must emit exactly one atomic system message"
+    );
+    assert!(system_msgs[0].content.contains("v2 modified instructions"));
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&ws_dir);
+}
+
+#[test]
+fn initial_unavailable_instruction_source_blocks_promotion_leaves_prompt_pending() {
+    let db_path = temp_db_path("epoch_unavailable");
+    let ws_dir =
+        std::env::temp_dir().join(format!("clawcode-test-ws-unavail-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&ws_dir);
+    let agents_path = ws_dir.join("AGENTS.md");
+    std::fs::write(&agents_path, "will be locked").unwrap();
+
+    // Lock file exclusively to simulate read failure (PermissionDenied/SharingViolation)
+    let lock = lock_file_exclusive(&agents_path);
+
+    let (db, writer, session_id) = setup_session_with_workspace(&db_path, &ws_dir);
+    let bus = EventBus::new();
+    let (_sub_id, rx) = bus.subscribe(None);
+    let client = RuntimeClient::spawn(db, writer, Box::new(EchoProvider), bus);
+
+    client
+        .start_generation(session_id, "plan", "fake", "echo", "retryable prompt")
+        .unwrap();
+    let res = wait_for_finish_or_error(&rx);
+    assert_eq!(res, "error");
+
+    let reader_db = Db::open(&db_path).unwrap();
+    // Prompt was admitted but NOT promoted!
+    let inputs = reader_db.session_inputs(session_id).unwrap();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].status, InputStatus::Pending);
+    // Messages must be empty: no user message was created!
+    assert!(reader_db.messages(session_id).unwrap().is_empty());
+    // Context epoch not created
+    assert!(
+        reader_db
+            .get_active_context_epoch(session_id)
+            .unwrap()
+            .is_none()
+    );
+    // Session error was recorded
+    let last_error = reader_db.session_last_error(session_id).unwrap();
+    assert!(
+        last_error
+            .as_deref()
+            .unwrap()
+            .contains("instruction source unavailable")
+    );
+    drop(reader_db);
+
+    // Now unlock the file
+    unlock_file(lock, &agents_path);
+
+    // Retry: start_generation will wake drain loop and find pending input
+    client
+        .start_generation(session_id, "plan", "fake", "echo", "retryable prompt")
+        .unwrap();
+    assert_eq!(wait_for_finish_or_error(&rx), "generation_finished");
+
+    let db = client.shutdown();
+    let inputs = db.session_inputs(session_id).unwrap();
+    assert_eq!(inputs[0].status, InputStatus::Promoted);
+    assert_eq!(db.messages(session_id).unwrap().len(), 2); // user + assistant
+    assert!(db.get_active_context_epoch(session_id).unwrap().is_some());
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&ws_dir);
+}
+
+#[test]
+fn subsequent_unavailable_instruction_source_keeps_prior_snapshot_and_emits_no_delta() {
+    let db_path = temp_db_path("epoch_subsequent_unavail");
+    let ws_dir =
+        std::env::temp_dir().join(format!("clawcode-test-ws-subseq-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&ws_dir);
+    let agents_path = ws_dir.join("AGENTS.md");
+    std::fs::write(&agents_path, "stable v1 rules").unwrap();
+
+    let (db, writer, session_id) = setup_session_with_workspace(&db_path, &ws_dir);
+    let bus = EventBus::new();
+    let (_sub_id, rx) = bus.subscribe(None);
+    let client = RuntimeClient::spawn(db, writer, Box::new(EchoProvider), bus);
+
+    // Turn 1 initializes epoch
+    client
+        .start_generation(session_id, "plan", "fake", "echo", "turn 1")
+        .unwrap();
+    assert_eq!(wait_for_finish_or_error(&rx), "generation_finished");
+
+    let reader_db = Db::open(&db_path).unwrap();
+    let initial_snapshot = reader_db
+        .get_active_context_epoch(session_id)
+        .unwrap()
+        .unwrap()
+        .source_snapshot_json;
+    drop(reader_db);
+
+    // Lock file exclusively so subsequent read fails
+    let lock = lock_file_exclusive(&agents_path);
+
+    // Turn 2 runs with locked file
+    client
+        .start_generation(session_id, "plan", "fake", "echo", "turn 2")
+        .unwrap();
+    assert_eq!(wait_for_finish_or_error(&rx), "generation_finished");
+
+    unlock_file(lock, &agents_path);
+
+    let db = client.shutdown();
+    let active_epoch = db.get_active_context_epoch(session_id).unwrap().unwrap();
+    assert_eq!(
+        active_epoch.source_snapshot_json, initial_snapshot,
+        "prior snapshot must not be erased on read failure"
+    );
+
+    let messages = db.messages(session_id).unwrap();
+    let system_msgs: Vec<_> = messages.iter().filter(|m| m.role == "system").collect();
+    assert!(
+        system_msgs.is_empty(),
+        "read failure must emit no delta message"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&ws_dir);
+}
+
+#[test]
+fn instruction_source_parent_chain_traversal_ordering() {
+    let db_path = temp_db_path("epoch_parent_chain");
+    let parent_dir =
+        std::env::temp_dir().join(format!("clawcode-test-parent-{}", std::process::id()));
+    let child_dir = parent_dir.join("child");
+    let _ = std::fs::create_dir_all(&child_dir);
+
+    std::fs::write(parent_dir.join("AGENTS.md"), "PARENT LEVEL INSTRUCTIONS").unwrap();
+    std::fs::write(child_dir.join("AGENTS.md"), "CHILD LEVEL INSTRUCTIONS").unwrap();
+
+    let (db, writer, session_id) = setup_session_with_workspace(&db_path, &child_dir);
+    let provider = CapturingProvider::new();
+    let captured = provider.requests.clone();
+    let bus = EventBus::new();
+    let (_sub_id, rx) = bus.subscribe(None);
+    let client = RuntimeClient::spawn(db, writer, Box::new(provider), bus);
+
+    client
+        .start_generation(session_id, "plan", "capturing", "model", "test prompt")
+        .unwrap();
+    assert_eq!(wait_for_finish_or_error(&rx), "generation_finished");
+
+    let reqs = captured.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 1);
+    let system_prompt = &reqs[0].messages[0].content;
+    assert!(system_prompt.contains("CHILD LEVEL INSTRUCTIONS"));
+    assert!(system_prompt.contains("PARENT LEVEL INSTRUCTIONS"));
+
+    let child_pos = system_prompt.find("CHILD LEVEL INSTRUCTIONS").unwrap();
+    let parent_pos = system_prompt.find("PARENT LEVEL INSTRUCTIONS").unwrap();
+    assert!(
+        child_pos < parent_pos,
+        "workspace child instructions must precede parent instructions"
+    );
+
+    let _db = client.shutdown();
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&parent_dir);
+}

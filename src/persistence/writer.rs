@@ -2,8 +2,8 @@
 //! only sends appends through a bounded channel and never blocks on SQLite.
 
 use crate::persistence::db::{
-    Db, InputDelivery, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, Message, SessionInput, ToolCall,
-    ToolCallStatus,
+    ContextEpoch, Db, InputDelivery, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, Message,
+    SessionInput, ToolCall, ToolCallStatus,
 };
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -73,6 +73,26 @@ enum Command {
     PromoteInput {
         input_id: i64,
         reply: mpsc::Sender<Result<(SessionInput, Message, i64), String>>,
+    },
+    InsertContextEpoch {
+        session_id: i64,
+        epoch_id: String,
+        baseline_system_text: String,
+        source_snapshot_json: String,
+        reply: mpsc::Sender<Result<ContextEpoch, String>>,
+    },
+    UpdateContextEpochSnapshot {
+        session_id: i64,
+        epoch_id: String,
+        new_snapshot_json: String,
+        reply: mpsc::Sender<Result<bool, String>>,
+    },
+    ReconcileEpochChange {
+        session_id: i64,
+        epoch_id: String,
+        new_snapshot_json: String,
+        delta_system_message: String,
+        reply: mpsc::Sender<Result<Message, String>>,
     },
     Flush(mpsc::Sender<()>),
 }
@@ -187,6 +207,61 @@ impl WriterHandle {
                                 .map_err(|error| error.to_string()),
                         );
                     }
+                    Command::InsertContextEpoch {
+                        session_id,
+                        epoch_id,
+                        baseline_system_text,
+                        source_snapshot_json,
+                        reply,
+                    } => {
+                        flush_batch(&db, &mut pending);
+                        flush_events(&db, &mut pending_events);
+                        let _ = reply.send(
+                            db.insert_context_epoch(
+                                session_id,
+                                &epoch_id,
+                                &baseline_system_text,
+                                &source_snapshot_json,
+                            )
+                            .map_err(|error| error.to_string()),
+                        );
+                    }
+                    Command::UpdateContextEpochSnapshot {
+                        session_id,
+                        epoch_id,
+                        new_snapshot_json,
+                        reply,
+                    } => {
+                        flush_batch(&db, &mut pending);
+                        flush_events(&db, &mut pending_events);
+                        let _ = reply.send(
+                            db.update_context_epoch_snapshot(
+                                session_id,
+                                &epoch_id,
+                                &new_snapshot_json,
+                            )
+                            .map_err(|error| error.to_string()),
+                        );
+                    }
+                    Command::ReconcileEpochChange {
+                        session_id,
+                        epoch_id,
+                        new_snapshot_json,
+                        delta_system_message,
+                        reply,
+                    } => {
+                        flush_batch(&db, &mut pending);
+                        flush_events(&db, &mut pending_events);
+                        let _ = reply.send(
+                            db.reconcile_epoch_change(
+                                session_id,
+                                &epoch_id,
+                                &new_snapshot_json,
+                                &delta_system_message,
+                            )
+                            .map_err(|error| error.to_string()),
+                        );
+                    }
                     Command::Flush(ack) => {
                         flush_batch(&db, &mut pending);
                         flush_events(&db, &mut pending_events);
@@ -295,6 +370,61 @@ impl WriterHandle {
                             let _ = reply.send(
                                 db.promote_input(input_id)
                                     .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::InsertContextEpoch {
+                            session_id,
+                            epoch_id,
+                            baseline_system_text,
+                            source_snapshot_json,
+                            reply,
+                        } => {
+                            flush_batch(&db, &mut pending);
+                            flush_events(&db, &mut pending_events);
+                            let _ = reply.send(
+                                db.insert_context_epoch(
+                                    session_id,
+                                    &epoch_id,
+                                    &baseline_system_text,
+                                    &source_snapshot_json,
+                                )
+                                .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::UpdateContextEpochSnapshot {
+                            session_id,
+                            epoch_id,
+                            new_snapshot_json,
+                            reply,
+                        } => {
+                            flush_batch(&db, &mut pending);
+                            flush_events(&db, &mut pending_events);
+                            let _ = reply.send(
+                                db.update_context_epoch_snapshot(
+                                    session_id,
+                                    &epoch_id,
+                                    &new_snapshot_json,
+                                )
+                                .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::ReconcileEpochChange {
+                            session_id,
+                            epoch_id,
+                            new_snapshot_json,
+                            delta_system_message,
+                            reply,
+                        } => {
+                            flush_batch(&db, &mut pending);
+                            flush_events(&db, &mut pending_events);
+                            let _ = reply.send(
+                                db.reconcile_epoch_change(
+                                    session_id,
+                                    &epoch_id,
+                                    &new_snapshot_json,
+                                    &delta_system_message,
+                                )
+                                .map_err(|error| error.to_string()),
                             );
                         }
                         Command::Flush(ack) => {
@@ -477,6 +607,76 @@ impl WriterHandle {
         self.sender()?
             .try_send(Command::PromoteInput {
                 input_id,
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn insert_context_epoch(
+        &self,
+        session_id: i64,
+        epoch_id: &str,
+        baseline_system_text: &str,
+        source_snapshot_json: &str,
+    ) -> Result<ContextEpoch, String> {
+        if baseline_system_text.len() > MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
+                baseline_system_text.len()
+            ));
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::InsertContextEpoch {
+                session_id,
+                epoch_id: epoch_id.to_string(),
+                baseline_system_text: baseline_system_text.to_string(),
+                source_snapshot_json: source_snapshot_json.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn update_context_epoch_snapshot(
+        &self,
+        session_id: i64,
+        epoch_id: &str,
+        new_snapshot_json: &str,
+    ) -> Result<bool, String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::UpdateContextEpochSnapshot {
+                session_id,
+                epoch_id: epoch_id.to_string(),
+                new_snapshot_json: new_snapshot_json.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn reconcile_epoch_change(
+        &self,
+        session_id: i64,
+        epoch_id: &str,
+        new_snapshot_json: &str,
+        delta_system_message: &str,
+    ) -> Result<Message, String> {
+        if delta_system_message.len() > MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
+                delta_system_message.len()
+            ));
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::ReconcileEpochChange {
+                session_id,
+                epoch_id: epoch_id.to_string(),
+                new_snapshot_json: new_snapshot_json.to_string(),
+                delta_system_message: delta_system_message.to_string(),
                 reply: reply_tx,
             })
             .map_err(|error| error.to_string())?;

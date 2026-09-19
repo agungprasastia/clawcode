@@ -6,6 +6,7 @@ use crate::provider::{
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+pub mod context;
 pub mod prompt;
 pub mod tools;
 

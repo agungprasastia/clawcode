@@ -102,9 +102,9 @@
 - [x] Acceptance: Different sessions can run concurrently.
 - [x] Acceptance: Repeated wakes do not duplicate promotions or provider calls.
 - [x] Focused verification: Deterministic fake-provider tests for serialization, cross-session overlap, wake coalescing, and active cleanup.
-- [ ] Dependencies: Checkpoint 2.
-- [ ] Likely files: `src/runtime/coordinator.rs`, `src/runtime/client.rs`, `src/runtime/mod.rs`, `src/persistence/db.rs`, `tests/runtime.rs`.
-- [ ] Scope: 5 files, medium.
+- [x] Dependencies: Checkpoint 2.
+- [x] Likely files: `src/runtime/coordinator.rs`, `src/runtime/client.rs`, `src/runtime/mod.rs`, `src/persistence/db.rs`, `tests/runtime.rs`.
+- [x] Scope: 5 files, medium.
 
 ### Task 8: Add process-local interrupt cleanup
 
@@ -113,9 +113,9 @@
 - [x] Acceptance: Idle or unknown interrupt is idempotent and preserves pending input.
 - [x] Acceptance: Wake during cleanup cannot start a second drain.
 - [x] Focused verification: Blocking fake-provider cancellation test for cleanup, pending input, stale registry, and duplicate prevention.
-- [ ] Dependencies: Task 7.
-- [ ] Likely files: `src/runtime/coordinator.rs`, `src/runtime/client.rs`, `src/persistence/db.rs`, `tests/runtime.rs`.
-- [ ] Scope: 4 files, medium.
+- [x] Dependencies: Task 7.
+- [x] Likely files: `src/runtime/coordinator.rs`, `src/runtime/client.rs`, `src/persistence/db.rs`, `tests/runtime.rs`.
+- [x] Scope: 4 files, medium.
 
 ### Checkpoint 3: Local session control
 
@@ -157,33 +157,33 @@
 
 ### Task 11: Add durable Context Epoch boundary
 
-- [ ] Description: Persist epoch ID, exact baseline system text, and JSON source snapshot; initialize and reconcile at safe boundaries.
-- [ ] Acceptance: Baseline is exact and reusable after restart.
-- [ ] Acceptance: Unavailable initial context blocks future promotion; unchanged source emits none; changed source advances snapshot atomically with one system message.
-- [ ] Acceptance: Epoch replacement remains out of scope.
-- [ ] Focused verification: In-memory tests for initialization, source states, atomic update, restart reuse, and request assembly.
-- [ ] Dependencies: Checkpoint 4.
-- [ ] Likely files: `src/persistence/schema.rs`, `src/persistence/db.rs`, `src/runtime/client.rs`, `src/conversation/context.rs`, `tests/runtime.rs`.
-- [ ] Scope: 5 files, medium.
+- [x] Description: Persist epoch ID, exact baseline system text, and JSON source snapshot; initialize and reconcile at safe boundaries.
+- [x] Acceptance: Baseline is exact and reusable after restart.
+- [x] Acceptance: Unavailable initial context blocks future promotion; unchanged source emits none; changed source advances snapshot atomically with one system message.
+- [x] Acceptance: Epoch replacement remains out of scope.
+- [x] Focused verification: In-memory tests for initialization, source states, atomic update, restart reuse, and request assembly.
+- [x] Dependencies: Checkpoint 4.
+- [x] Likely files: `src/persistence/schema.rs`, `src/persistence/db.rs`, `src/runtime/client.rs`, `src/conversation/context.rs`, `tests/runtime.rs`.
+- [x] Scope: 5 files, medium.
 
 ### Task 12: Add first `InstructionSource`
 
-- [ ] Description: Read bounded `AGENTS.md` files from workspace root and parent chain; feed one deterministic aggregate into existing `SystemPromptComposer` and Context Epoch.
-- [ ] Acceptance: Same files produce stable source key, snapshot, and baseline bytes.
-- [ ] Acceptance: Missing file is valid absence; read failure is unavailable and does not erase prior value.
-- [ ] Acceptance: Changes appear only at next safe boundary as one aggregate update.
-- [ ] Focused verification: Temporary-workspace tests for ordering, missing files, size limits, read failure, changes, and provider messages.
-- [ ] Dependencies: Task 11.
-- [ ] Likely files: `src/conversation/context.rs`, `src/conversation/prompt.rs`, `src/runtime/client.rs`, `src/persistence/db.rs`, `tests/runtime.rs`.
-- [ ] Scope: 5 files, medium.
+- [x] Description: Read bounded `AGENTS.md` files from workspace root and parent chain; feed one deterministic aggregate into existing `SystemPromptComposer` and Context Epoch.
+- [x] Acceptance: Same files produce stable source key, snapshot, and baseline bytes.
+- [x] Acceptance: Missing file is valid absence; read failure is unavailable and does not erase prior value.
+- [x] Acceptance: Changes appear only at next safe boundary as one aggregate update.
+- [x] Focused verification: Temporary-workspace tests for ordering, missing files, size limits, read failure, changes, and provider messages.
+- [x] Dependencies: Task 11.
+- [x] Likely files: `src/conversation/context.rs`, `src/conversation/prompt.rs`, `src/runtime/client.rs`, `src/persistence/db.rs`, `tests/runtime.rs`.
+- [x] Scope: 5 files, medium.
 
 ### Checkpoint 5: Context boundary
 
-- [ ] Context baseline and snapshot survive restart exactly.
-- [ ] Instruction changes reconcile only at safe boundaries.
-- [ ] Initial unavailable instruction context leaves future admitted prompt retryable.
-- [ ] No Effect, Bun, plugin boot, watcher, or remote-source architecture entered root crate.
-- [ ] Final review checkpoint passes.
+- [x] Context baseline and snapshot survive restart exactly.
+- [x] Instruction changes reconcile only at safe boundaries.
+- [x] Initial unavailable instruction context leaves future admitted prompt retryable.
+- [x] No Effect, Bun, plugin boot, watcher, or remote-source architecture entered root crate.
+- [x] Final review checkpoint passes.
 
 ## Deferred scope
 

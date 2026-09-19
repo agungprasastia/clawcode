@@ -920,3 +920,175 @@ fn v4_database_migrates_to_v5_session_inputs() {
     assert_eq!(promoted.status, InputStatus::Promoted);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn context_epoch_crud_and_restart_recovery() {
+    let path = temp_db_path("epoch_crud");
+    let session_id = {
+        let db = Db::open(&path).unwrap();
+        let session = db.create_session("epoch_session").unwrap();
+        assert!(db.get_active_context_epoch(session.id).unwrap().is_none());
+
+        let epoch = db
+            .insert_context_epoch(
+                session.id,
+                "epoch-1",
+                "exact baseline system prompt v1",
+                r#"{"source_key":"agents_md","files":[]}"#,
+            )
+            .unwrap();
+        assert_eq!(epoch.session_id, session.id);
+        assert_eq!(epoch.epoch_id, "epoch-1");
+        assert_eq!(
+            epoch.baseline_system_text,
+            "exact baseline system prompt v1"
+        );
+
+        let active = db.get_active_context_epoch(session.id).unwrap().unwrap();
+        assert_eq!(active.epoch_id, "epoch-1");
+        assert_eq!(
+            active.baseline_system_text,
+            "exact baseline system prompt v1"
+        );
+
+        session.id
+    };
+
+    // Restart simulation: fresh Db handle over same file
+    let db = Db::open(&path).unwrap();
+    let active = db.get_active_context_epoch(session_id).unwrap().unwrap();
+    assert_eq!(active.epoch_id, "epoch-1");
+    assert_eq!(
+        active.baseline_system_text,
+        "exact baseline system prompt v1"
+    );
+    assert_eq!(
+        active.source_snapshot_json,
+        r#"{"source_key":"agents_md","files":[]}"#
+    );
+
+    // Update snapshot
+    let updated = db
+        .update_context_epoch_snapshot(
+            session_id,
+            "epoch-1",
+            r#"{"source_key":"agents_md","files":[{"path":"AGENTS.md","hash":"h1","size":10}]}"#,
+        )
+        .unwrap();
+    assert!(updated);
+
+    let active2 = db.get_active_context_epoch(session_id).unwrap().unwrap();
+    assert_eq!(
+        active2.source_snapshot_json,
+        r#"{"source_key":"agents_md","files":[{"path":"AGENTS.md","hash":"h1","size":10}]}"#
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn reconcile_epoch_change_atomic_update_and_system_message() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("reconcile_epoch").unwrap();
+    let session_id = session.id;
+
+    db.insert_context_epoch(
+        session_id,
+        "epoch-1",
+        "baseline prompt",
+        r#"{"source_key":"agents_md","files":[]}"#,
+    )
+    .unwrap();
+
+    let new_snapshot =
+        r#"{"source_key":"agents_md","files":[{"path":"AGENTS.md","hash":"h2","size":20}]}"#;
+    let delta = "# Updated Project Instructions\n\nnew instructions";
+
+    let msg = db
+        .reconcile_epoch_change(session_id, "epoch-1", new_snapshot, delta)
+        .unwrap();
+    assert_eq!(msg.role, "system");
+    assert_eq!(msg.content, delta);
+
+    let active = db.get_active_context_epoch(session_id).unwrap().unwrap();
+    assert_eq!(active.source_snapshot_json, new_snapshot);
+
+    let msgs = db.messages(session_id).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].role, "system");
+    assert_eq!(msgs[0].content, delta);
+}
+
+#[test]
+fn writer_handles_context_epoch_ops() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("writer_epochs").unwrap();
+    let session_id = session.id;
+    let writer = WriterHandle::spawn(db);
+
+    let epoch = writer
+        .insert_context_epoch(
+            session_id,
+            "epoch-1",
+            "writer baseline",
+            r#"{"source_key":"agents_md","files":[]}"#,
+        )
+        .unwrap();
+    assert_eq!(epoch.epoch_id, "epoch-1");
+    assert_eq!(epoch.baseline_system_text, "writer baseline");
+
+    let updated = writer
+        .update_context_epoch_snapshot(
+            session_id,
+            "epoch-1",
+            r#"{"source_key":"agents_md","files":[{"path":"a","hash":"b","size":1}]}"#,
+        )
+        .unwrap();
+    assert!(updated);
+
+    let msg = writer
+        .reconcile_epoch_change(
+            session_id,
+            "epoch-1",
+            r#"{"source_key":"agents_md","files":[{"path":"a","hash":"c","size":2}]}"#,
+            "delta update",
+        )
+        .unwrap();
+    assert_eq!(msg.role, "system");
+    assert_eq!(msg.content, "delta update");
+
+    let db = writer.shutdown().unwrap();
+    let active = db.get_active_context_epoch(session_id).unwrap().unwrap();
+    assert_eq!(
+        active.source_snapshot_json,
+        r#"{"source_key":"agents_md","files":[{"path":"a","hash":"c","size":2}]}"#
+    );
+    assert_eq!(db.messages(session_id).unwrap().len(), 1);
+}
+
+#[test]
+fn v5_database_migrates_to_v6_context_epochs() {
+    let path = temp_db_path("v5_to_v6_migration");
+    {
+        let _db = Db::open(&path).unwrap();
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE IF EXISTS context_epochs; PRAGMA user_version = 5;")
+            .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.schema_version(), clawcode::persistence::SCHEMA_VERSION);
+    let session = db.create_session("migrated_v6").unwrap();
+    let epoch = db
+        .insert_context_epoch(
+            session.id,
+            "epoch-1",
+            "migrated baseline",
+            r#"{"source_key":"agents_md","files":[]}"#,
+        )
+        .unwrap();
+    assert_eq!(epoch.epoch_id, "epoch-1");
+    let _ = std::fs::remove_file(&path);
+}

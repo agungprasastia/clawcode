@@ -6,7 +6,7 @@ pub mod schema;
 pub mod writer;
 
 pub use db::{
-    Db, Generation, GenerationEvent, GenerationStatus, InputDelivery, InputStatus,
+    ContextEpoch, Db, Generation, GenerationEvent, GenerationStatus, InputDelivery, InputStatus,
     MAX_MESSAGE_BYTES, MAX_MESSAGES_PER_SESSION, MAX_SESSIONS, MAX_TOOL_OUTPUT_BYTES, Message,
     MessageTooLarge, Session, SessionInput, SessionStatus, ToolCall, ToolCallStatus, Workspace,
 };

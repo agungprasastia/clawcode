@@ -38,6 +38,7 @@ pub struct SystemPromptComposer {
     pub is_git_repo: bool,
     pub mode: Mode,
     pub custom_instructions: Option<String>,
+    pub project_instructions: Option<String>,
 }
 
 impl SystemPromptComposer {
@@ -55,11 +56,17 @@ impl SystemPromptComposer {
             is_git_repo: is_git,
             mode,
             custom_instructions: None,
+            project_instructions: None,
         }
     }
 
     pub fn with_custom_instructions(mut self, instructions: String) -> Self {
         self.custom_instructions = Some(instructions);
+        self
+    }
+
+    pub fn with_project_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.project_instructions = Some(instructions.into());
         self
     }
 
@@ -75,7 +82,11 @@ impl SystemPromptComposer {
             self.get_tools_guidance(),
         ];
         // 5. Local project rules (AGENTS.md, CLAUDE.md)
-        if let Some((path, content)) = self.resolve_local_rules() {
+        if let Some(instructions) = &self.project_instructions {
+            if !instructions.trim().is_empty() {
+                sections.push(instructions.clone());
+            }
+        } else if let Some((path, content)) = self.resolve_local_rules() {
             sections.push(format!(
                 "# Project Instructions ({})\n{}",
                 path.display(),
@@ -84,7 +95,7 @@ impl SystemPromptComposer {
         }
 
         // 6. Custom extra instructions if any
-        if let Some(ref extra) = self.custom_instructions
+        if let Some(extra) = &self.custom_instructions
             && !extra.trim().is_empty()
         {
             sections.push(format!("# Additional Instructions\n{}", extra.trim()));

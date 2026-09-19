@@ -521,6 +521,92 @@ fn drain_session_loop(
             }
         };
 
+        let workspace_dir = db
+            .with(|db| {
+                let session = db.session(session_id).ok().flatten();
+                let ws = session.and_then(|s| db.workspace(s.workspace_id).ok().flatten());
+                if let Some(ws) = ws {
+                    if !ws.root_path.trim().is_empty()
+                        && std::path::Path::new(&ws.root_path).is_dir()
+                    {
+                        Some(std::path::PathBuf::from(ws.root_path))
+                    } else if let Ok(cwd) = std::env::current_dir() {
+                        let _ = db.update_workspace_root_path(ws.id, &cwd.to_string_lossy());
+                        Some(cwd)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            });
+
+        let active_epoch = match db.with(|db| db.get_active_context_epoch(session_id)) {
+            Ok(epoch) => epoch,
+            Err(error) => {
+                publish_error(&bus, session_id, None, &error.to_string());
+                coordinator.finish_drain(session_id);
+                break;
+            }
+        };
+
+        let epoch = match active_epoch {
+            Some(epoch) => epoch,
+            None => {
+                let source = crate::conversation::context::InstructionSource::new(&workspace_dir);
+                let payload = match source.load() {
+                    Ok(payload) => payload,
+                    Err(crate::conversation::context::InstructionError::Unavailable(error)) => {
+                        let msg = format!("instruction source unavailable: {error}");
+                        let _ = db.with(|db| db.set_session_last_error(session_id, Some(&msg)));
+                        publish_error(&bus, session_id, None, &msg);
+                        coordinator.finish_drain(session_id);
+                        break;
+                    }
+                };
+
+                let config =
+                    coordinator
+                        .session_config(session_id)
+                        .unwrap_or_else(|| SessionConfig {
+                            agent_mode: "plan".to_string(),
+                            provider: "default".to_string(),
+                            model: "default".to_string(),
+                        });
+                let mode = if config.agent_mode.eq_ignore_ascii_case("build") {
+                    crate::workspace::Mode::Build
+                } else {
+                    crate::workspace::Mode::Plan
+                };
+                let composer = crate::conversation::prompt::SystemPromptComposer::new(
+                    &config.model,
+                    &config.provider,
+                    workspace_dir.clone(),
+                    mode,
+                )
+                .with_project_instructions(&payload.aggregate_text);
+                let baseline_system_text = composer.compose();
+                let epoch_id = "epoch-1";
+
+                match writer.insert_context_epoch(
+                    session_id,
+                    epoch_id,
+                    &baseline_system_text,
+                    &payload.snapshot_json,
+                ) {
+                    Ok(epoch) => epoch,
+                    Err(error) => {
+                        publish_error(&bus, session_id, None, &error);
+                        coordinator.finish_drain(session_id);
+                        break;
+                    }
+                }
+            }
+        };
+
         let (promoted_input, user_message, promo_seq) = match writer.promote_input(next_input.id) {
             Ok(result) => result,
             Err(error) => {
@@ -541,6 +627,29 @@ fn drain_session_loop(
             })
             .to_string(),
         });
+
+        // Reconcile instruction source changes at safe boundary before generation request.
+        let source = crate::conversation::context::InstructionSource::new(&workspace_dir);
+        if let Ok(current_payload) = source.load()
+            && current_payload.snapshot_json != epoch.source_snapshot_json
+        {
+            let delta_message = if current_payload.aggregate_text.trim().is_empty() {
+                "# Updated Project Instructions\n\nProject instructions were removed.".to_string()
+            } else {
+                format!(
+                    "# Updated Project Instructions\n\n{}",
+                    current_payload.aggregate_text.trim()
+                )
+            };
+            if let Err(error) = writer.reconcile_epoch_change(
+                session_id,
+                &epoch.epoch_id,
+                &current_payload.snapshot_json,
+                &delta_message,
+            ) {
+                publish_error(&bus, session_id, None, &error);
+            }
+        }
 
         let config = coordinator
             .session_config(session_id)
@@ -791,20 +900,41 @@ fn run_generation(
         crate::workspace::Mode::Plan
     };
 
-    let composer = crate::conversation::prompt::SystemPromptComposer::new(
-        model,
-        provider_name,
-        workspace_dir.clone(),
-        mode,
-    );
-    let system_prompt = composer.compose();
+    let active_epoch = ctx
+        .db
+        .with(|db| db.get_active_context_epoch(ctx.session_id))
+        .ok()
+        .flatten();
 
-    let history: Vec<crate::provider::ChatMessage> = ctx
+    let system_prompt = if let Some(epoch) = active_epoch {
+        epoch.baseline_system_text
+    } else {
+        let composer = crate::conversation::prompt::SystemPromptComposer::new(
+            model,
+            provider_name,
+            workspace_dir.clone(),
+            mode,
+        );
+        composer.compose()
+    };
+
+    let mut raw_history = ctx
         .db
         .with(|db| db.messages(ctx.session_id))
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let n = raw_history.len();
+    if n >= 2
+        && raw_history[n - 1].role == "system"
+        && raw_history[n - 2].role == "user"
+        && raw_history[n - 2].content == prompt
+    {
+        raw_history.swap(n - 2, n - 1);
+    }
+
+    let history: Vec<crate::provider::ChatMessage> = raw_history
         .into_iter()
-        .filter(|m| m.role == "user" || m.role == "assistant")
+        .filter(|m| m.role == "user" || m.role == "assistant" || m.role == "system")
         .map(|m| crate::provider::ChatMessage {
             role: m.role,
             content: m.content,

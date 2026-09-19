@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 
 /// Current persistence schema version.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Apply all migrations up to [`SCHEMA_VERSION`]. Idempotent.
 pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
@@ -155,6 +155,23 @@ pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
              );
              CREATE INDEX IF NOT EXISTS idx_session_inputs_session ON session_inputs(session_id, id);
              PRAGMA user_version = 5;
+             COMMIT;",
+        )?;
+    }
+    if current < 6 {
+        connection.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS context_epochs (
+                 id INTEGER PRIMARY KEY,
+                 session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                 epoch_id TEXT NOT NULL,
+                 baseline_system_text TEXT NOT NULL,
+                 source_snapshot_json TEXT NOT NULL,
+                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                 UNIQUE (session_id, epoch_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_context_epochs_session ON context_epochs(session_id);
+             PRAGMA user_version = 6;
              COMMIT;",
         )?;
     }
