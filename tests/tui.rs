@@ -4338,3 +4338,206 @@ fn test_thought_expansion_mouse_click_toggle() {
     assert!(rendered_collapsed_again.contains("+ Thought for"));
     assert!(!rendered_collapsed_again.contains("Choosing iambic pentameter"));
 }
+
+#[test]
+fn test_session_switch_and_restore_no_duplicate_messages() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("clawcode-test-tui-switch-{nonce}.db"));
+    let db = clawcode::persistence::Db::open(&path).expect("runtime db");
+    let s1 = db.create_session("session 1").unwrap();
+    let s2 = db.create_session("session 2").unwrap();
+
+    let writer = clawcode::persistence::WriterHandle::spawn(
+        clawcode::persistence::Db::open(&path).expect("writer db"),
+    );
+
+    #[derive(Debug)]
+    struct DummyProvider;
+    impl clawcode::provider::Provider for DummyProvider {
+        fn id(&self) -> &clawcode::provider::ProviderId {
+            static ID: std::sync::LazyLock<clawcode::provider::ProviderId> =
+                std::sync::LazyLock::new(|| clawcode::provider::ProviderId::new("dummy"));
+            &ID
+        }
+        fn capabilities(&self) -> clawcode::provider::ProviderCapabilities {
+            clawcode::provider::ProviderCapabilities {
+                streaming: false,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<clawcode::provider::ModelInfo> {
+            Vec::new()
+        }
+        fn send(
+            &self,
+            _: &clawcode::provider::StreamRequest,
+        ) -> Result<clawcode::provider::StreamResponse, clawcode::provider::ProviderError> {
+            Ok(clawcode::provider::StreamResponse { events: Vec::new() })
+        }
+    }
+
+    let mut app = App::default();
+    app.attach_runtime(db, writer, Box::new(DummyProvider));
+
+    app.switch_session(s1.id);
+    assert_eq!(app.active_session_id(), Some(s1.id));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    tx.send(clawcode::runtime::RuntimeEvent {
+        seq: 1,
+        session_id: s1.id,
+        generation_id: Some(10),
+        kind: "assistant_message".into(),
+        payload_json: serde_json::json!({
+            "content": "Hello from assistant turn 1"
+        })
+        .to_string(),
+    })
+    .unwrap();
+    app.poll_runtime();
+
+    assert!(app.transcript().contains("Hello from assistant turn 1"));
+    assert_eq!(app.loaded_until_seq(), 1);
+
+    app.switch_session(s2.id);
+    assert_eq!(app.active_session_id(), Some(s2.id));
+    assert!(!app.transcript().contains("Hello from assistant turn 1"));
+
+    app.switch_session(s1.id);
+    assert_eq!(app.active_session_id(), Some(s1.id));
+
+    let count = app
+        .transcript()
+        .matches("Hello from assistant turn 1")
+        .count();
+    assert_eq!(
+        count,
+        1,
+        "message must not duplicate on switch and restore, transcript: {}",
+        app.transcript()
+    );
+    assert_eq!(app.loaded_until_seq(), 1);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn test_disconnected_durable_events_replay_into_transcript() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("clawcode-test-tui-replay-{nonce}.db"));
+    let db = clawcode::persistence::Db::open(&path).expect("runtime db");
+    let session = db.create_session("replay session").unwrap();
+    let session_id = session.id;
+
+    let _s0 = db
+        .append_event(
+            session_id,
+            None,
+            "tool_call_created",
+            &serde_json::json!({
+                "call_id": "call_abc",
+                "tool_name": "read_file",
+                "arguments": { "path": "src/main.rs" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+    let _s1 = db
+        .append_event(
+            session_id,
+            None,
+            "tool_call_settled",
+            &serde_json::json!({
+                "call_id": "call_abc",
+                "tool_name": "read_file",
+                "status": "completed",
+                "result": "fn main() {}"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+    let _s2 = db
+        .append_event(
+            session_id,
+            None,
+            "assistant_message",
+            &serde_json::json!({
+                "content": "I have read main.rs"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+    let s3 = db
+        .append_event(
+            session_id,
+            None,
+            "generation_finished",
+            &serde_json::json!({
+                "status": "finished",
+                "finish_reason": "stop"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+    let writer = clawcode::persistence::WriterHandle::spawn(
+        clawcode::persistence::Db::open(&path).expect("writer db"),
+    );
+
+    #[derive(Debug)]
+    struct DummyProvider;
+    impl clawcode::provider::Provider for DummyProvider {
+        fn id(&self) -> &clawcode::provider::ProviderId {
+            static ID: std::sync::LazyLock<clawcode::provider::ProviderId> =
+                std::sync::LazyLock::new(|| clawcode::provider::ProviderId::new("dummy"));
+            &ID
+        }
+        fn capabilities(&self) -> clawcode::provider::ProviderCapabilities {
+            clawcode::provider::ProviderCapabilities {
+                streaming: false,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<clawcode::provider::ModelInfo> {
+            Vec::new()
+        }
+        fn send(
+            &self,
+            _: &clawcode::provider::StreamRequest,
+        ) -> Result<clawcode::provider::StreamResponse, clawcode::provider::ProviderError> {
+            Ok(clawcode::provider::StreamResponse { events: Vec::new() })
+        }
+    }
+
+    let mut app = App::default();
+    app.attach_runtime(db, writer, Box::new(DummyProvider));
+
+    app.switch_session(session_id);
+
+    assert!(
+        app.transcript().contains("I have read main.rs"),
+        "replayed assistant message should appear in transcript, got: {}",
+        app.transcript()
+    );
+
+    assert!(
+        app.tool_rows()
+            .iter()
+            .any(|r| r.call_id == "call_abc" && r.state == clawcode::tui::ToolRowState::Completed),
+        "replayed tool call should be completed in tool rows"
+    );
+
+    assert_eq!(app.loaded_until_seq(), s3);
+
+    let _ = std::fs::remove_file(&path);
+}

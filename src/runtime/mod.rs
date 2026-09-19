@@ -9,8 +9,8 @@
 pub mod client;
 pub mod coordinator;
 
+pub use client::ReplaySubscription;
 pub use coordinator::{SessionConfig, SessionCoordinator, SessionState, WakeOutcome};
-
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -28,6 +28,18 @@ pub struct RuntimeEvent {
     pub generation_id: Option<i64>,
     pub kind: String,
     pub payload_json: String,
+}
+
+impl From<crate::persistence::GenerationEvent> for RuntimeEvent {
+    fn from(event: crate::persistence::GenerationEvent) -> Self {
+        Self {
+            seq: event.seq,
+            session_id: event.session_id,
+            generation_id: event.generation_id,
+            kind: event.kind,
+            payload_json: event.payload_json,
+        }
+    }
 }
 
 /// Fan-out hub. Subscribers filter by session (`None` = all sessions).

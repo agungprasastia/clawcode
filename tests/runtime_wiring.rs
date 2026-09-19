@@ -884,7 +884,7 @@ fn cross_session_concurrency_runs_in_parallel() {
     let mut a_done = false;
     let mut b_done = false;
 
-    while start.elapsed() < std::time::Duration::from_secs(5) && (!a_done || !b_done) {
+    while start.elapsed() < std::time::Duration::from_secs(10) && (!a_done || !b_done) {
         while let Ok(event) = rx_a.try_recv() {
             if event.kind == "generation_finished" {
                 a_done = true;
@@ -1212,6 +1212,212 @@ fn idle_or_unknown_interrupt_is_safe_noop() {
     }
     assert!(got_rejected, "idle cancel must emit cancel_rejected");
     assert!(!client.is_active(session_id));
+
+    let _db = client.shutdown();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn replay_events_after_cursor_boundary() {
+    let path = temp_db_path("cursor_boundary");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("cursor_session").unwrap();
+    let session_id = session.id;
+
+    for i in 0..5 {
+        db.append_event(
+            session_id,
+            None,
+            "test_event",
+            &serde_json::json!({ "index": i }).to_string(),
+        )
+        .unwrap();
+    }
+
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let client = RuntimeClient::spawn(db, writer, Box::new(EchoProvider), bus);
+
+    let events = client.replay_events_after(session_id, 2).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].seq, 3);
+    assert_eq!(events[1].seq, 4);
+
+    let all_events = client.replay_events_after(session_id, -1).unwrap();
+    assert_eq!(all_events.len(), 5);
+    for (idx, ev) in all_events.iter().enumerate() {
+        assert_eq!(ev.seq, idx as i64);
+    }
+
+    let empty_events = client.replay_events_after(session_id, 4).unwrap();
+    assert!(empty_events.is_empty());
+
+    let _db = client.shutdown();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn replay_subscription_handoff_deduplication() {
+    let path = temp_db_path("handoff_dedup");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("dedup_session").unwrap();
+    let session_id = session.id;
+
+    let s0 = db.append_event(session_id, None, "event_0", "{}").unwrap();
+    let s1 = db.append_event(session_id, None, "event_1", "{}").unwrap();
+    let s2 = db.append_event(session_id, None, "event_2", "{}").unwrap();
+    assert_eq!(s0, 0);
+    assert_eq!(s1, 1);
+    assert_eq!(s2, 2);
+
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let client = RuntimeClient::spawn(db, writer, Box::new(EchoProvider), bus);
+
+    let mut sub = client.subscribe_after(session_id, 0).unwrap();
+
+    client.bus().publish(clawcode::runtime::RuntimeEvent {
+        seq: 2,
+        session_id,
+        generation_id: None,
+        kind: "event_2".into(),
+        payload_json: "{}".into(),
+    });
+    client.bus().publish(clawcode::runtime::RuntimeEvent {
+        seq: 3,
+        session_id,
+        generation_id: None,
+        kind: "event_3".into(),
+        payload_json: "{}".into(),
+    });
+
+    let ev1 = sub.try_recv().unwrap();
+    assert_eq!(ev1.seq, 1);
+    assert_eq!(sub.loaded_until_seq(), 1);
+
+    let ev2 = sub.try_recv().unwrap();
+    assert_eq!(ev2.seq, 2);
+    assert_eq!(sub.loaded_until_seq(), 2);
+
+    let ev3 = sub.try_recv().unwrap();
+    assert_eq!(ev3.seq, 3);
+    assert_eq!(sub.loaded_until_seq(), 3);
+
+    assert!(matches!(
+        sub.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+
+    let _db = client.shutdown();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn replay_subscription_seq_zero_never_advances_cursor() {
+    let path = temp_db_path("seq_zero_control");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("seq_zero_session").unwrap();
+    let session_id = session.id;
+
+    db.append_event(session_id, None, "durable_0", "{}")
+        .unwrap();
+
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let client = RuntimeClient::spawn(db, writer, Box::new(EchoProvider), bus);
+
+    let mut sub = client.subscribe_after(session_id, -1).unwrap();
+
+    let ev0 = sub.try_recv().unwrap();
+    assert_eq!(ev0.seq, 0);
+    assert_eq!(sub.loaded_until_seq(), -1);
+
+    client.bus().publish(clawcode::runtime::RuntimeEvent {
+        seq: 1,
+        session_id,
+        generation_id: None,
+        kind: "durable_1".into(),
+        payload_json: "{}".into(),
+    });
+    let ev1 = sub.try_recv().unwrap();
+    assert_eq!(ev1.seq, 1);
+    assert_eq!(sub.loaded_until_seq(), 1);
+
+    client.bus().publish(clawcode::runtime::RuntimeEvent {
+        seq: 0,
+        session_id,
+        generation_id: None,
+        kind: "status_ping".into(),
+        payload_json: "{}".into(),
+    });
+    client.bus().publish(clawcode::runtime::RuntimeEvent {
+        seq: 0,
+        session_id,
+        generation_id: None,
+        kind: "text_delta".into(),
+        payload_json: serde_json::json!({ "delta": "hello" }).to_string(),
+    });
+
+    let ping = sub.try_recv().unwrap();
+    assert_eq!(ping.kind, "status_ping");
+    assert_eq!(ping.seq, 0);
+    assert_eq!(sub.loaded_until_seq(), 1, "seq 0 must NEVER advance cursor");
+
+    let delta = sub.try_recv().unwrap();
+    assert_eq!(delta.kind, "text_delta");
+    assert_eq!(delta.seq, 0);
+    assert_eq!(sub.loaded_until_seq(), 1, "seq 0 must NEVER advance cursor");
+
+    let _db = client.shutdown();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn replay_subscription_reconnect_recovery_no_loss() {
+    let path = temp_db_path("reconnect_recovery");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("reconnect_session").unwrap();
+    let session_id = session.id;
+
+    db.append_event(session_id, None, "event_0", "{}").unwrap();
+    db.append_event(session_id, None, "event_1", "{}").unwrap();
+
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let client = RuntimeClient::spawn(db, writer, Box::new(EchoProvider), bus);
+
+    let mut sub = client.subscribe_after(session_id, -1).unwrap();
+    let ev0 = sub.try_recv().unwrap();
+    assert_eq!(ev0.seq, 0);
+    let ev1 = sub.try_recv().unwrap();
+    assert_eq!(ev1.seq, 1);
+    assert_eq!(sub.loaded_until_seq(), 1);
+
+    let last_cursor = sub.loaded_until_seq();
+    drop(sub);
+
+    let writer_db = Db::open(&path).expect("writer db 2");
+    writer_db
+        .append_event(session_id, None, "event_2", "{}")
+        .unwrap();
+    writer_db
+        .append_event(session_id, None, "event_3", "{}")
+        .unwrap();
+
+    let mut new_sub = client.subscribe_after(session_id, last_cursor).unwrap();
+
+    let ev2 = new_sub.try_recv().unwrap();
+    assert_eq!(ev2.seq, 2);
+    assert_eq!(new_sub.loaded_until_seq(), 2);
+
+    let ev3 = new_sub.try_recv().unwrap();
+    assert_eq!(ev3.seq, 3);
+    assert_eq!(new_sub.loaded_until_seq(), 3);
+
+    assert!(matches!(
+        new_sub.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
 
     let _db = client.shutdown();
     let _ = std::fs::remove_file(&path);

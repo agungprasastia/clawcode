@@ -629,6 +629,7 @@ pub struct App {
     last_animation_tick: std::time::Instant,
     /// Vertical scroll offset from the bottom of chat transcript (0 = auto-follow bottom).
     chat_scroll: u16,
+    loaded_until_seq: i64,
     /// Smooth typewriter buffer and stream metrics.
     typewriter: crate::tui::TypewriterState,
     /// Animated wave spinner for streaming indicator.
@@ -667,7 +668,7 @@ pub struct App {
 
 /// View state isolated per session: switching sessions must not reset the
 /// draft, transcript, or scroll position of either side.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ClientSessionState {
     pub transcript: String,
     pub input_draft: String,
@@ -682,6 +683,26 @@ pub struct ClientSessionState {
     pub stream_parts: Vec<StreamPart>,
     pub stream_base_len: Option<usize>,
     pub expanded_tool_rows: HashSet<String>,
+}
+
+impl Default for ClientSessionState {
+    fn default() -> Self {
+        Self {
+            transcript: String::new(),
+            input_draft: String::new(),
+            scroll: 0,
+            loaded_until_seq: -1,
+            status: ConversationStatus::Idle,
+            active_generation_id: None,
+            text_stream_active: false,
+            loading: false,
+            current_plan: Vec::new(),
+            tool_rows: Vec::new(),
+            stream_parts: Vec::new(),
+            stream_base_len: None,
+            expanded_tool_rows: HashSet::new(),
+        }
+    }
 }
 
 impl Default for App {
@@ -731,6 +752,7 @@ impl App {
             home_state: HomeState::new(),
             last_animation_tick: std::time::Instant::now(),
             chat_scroll: 0,
+            loaded_until_seq: -1,
             typewriter: crate::tui::TypewriterState::new(),
             wave_spinner: crate::tui::WaveSpinner::new(ratatui::style::Color::Rgb(224, 159, 63)),
             runtime: None,
@@ -2883,6 +2905,17 @@ impl App {
             {
                 continue;
             }
+            if event.seq > 0 {
+                if event.seq <= self.loaded_until_seq {
+                    continue;
+                }
+                self.loaded_until_seq = event.seq;
+                if let Some(session_id) = self.active_session_id
+                    && let Some(state) = self.sessions.get_mut(&session_id)
+                {
+                    state.loaded_until_seq = event.seq;
+                }
+            }
             if event.kind == "generation_started" {
                 let Some(generation_id) = event.generation_id else {
                     continue;
@@ -3722,6 +3755,75 @@ impl App {
                         "prompt promoted"
                     );
                 }
+                "assistant_message" => {
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                        && let Some(content) = payload.get("content").and_then(|v| v.as_str())
+                    {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty()
+                            && !self.text_stream_active
+                            && !self.typewriter.is_typing()
+                            && self.stream_parts.is_empty()
+                            && !self.transcript.contains(trimmed)
+                        {
+                            self.flush_reasoning();
+                            self.flush_typewriter();
+                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                                if self.transcript.ends_with('\n') {
+                                    self.transcript.push('\n');
+                                } else {
+                                    self.transcript.push_str("\n\n");
+                                }
+                            }
+                            self.transcript.push_str(&format!("{trimmed}\n\n"));
+                            self.truncate_transcript();
+                            self.scroll_to_bottom();
+                        }
+                    }
+                }
+                "tool_call_settled" => {
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    {
+                        let call_id = payload
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let tool_name = payload
+                            .get("tool_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool");
+                        let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                        let success = status == "completed";
+                        let output = payload
+                            .get("result")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| payload.get("error").and_then(|v| v.as_str()))
+                            .unwrap_or("");
+                        if !self.complete_tool_row(call_id, tool_name, success, output) {
+                            let args = payload.get("arguments");
+                            let arguments =
+                                args.map(serde_json::Value::to_string).unwrap_or_default();
+                            let (_verb, _active_verb, desc) =
+                                tool_target_and_verbs(tool_name, args);
+                            self.upsert_tool_row(
+                                call_id,
+                                tool_name,
+                                if success {
+                                    ToolRowState::Completed
+                                } else {
+                                    ToolRowState::Failed
+                                },
+                                desc,
+                                arguments,
+                                None,
+                            );
+                            self.complete_tool_row(call_id, tool_name, success, output);
+                        }
+                        self.refresh_active_tool();
+                    }
+                }
                 _ => {}
             }
         }
@@ -3759,6 +3861,7 @@ impl App {
         state.transcript = std::mem::take(&mut self.transcript);
         state.input_draft = std::mem::take(&mut self.prompt);
         state.scroll = self.chat_scroll;
+        state.loaded_until_seq = self.loaded_until_seq;
         state.status = self.status;
         state.current_plan = self.current_plan.clone();
         state.text_stream_active = self.text_stream_active;
@@ -3776,6 +3879,7 @@ impl App {
         self.prompt = std::mem::take(&mut state.input_draft);
         self.cursor_position = self.prompt.chars().count();
         self.chat_scroll = state.scroll;
+        self.loaded_until_seq = state.loaded_until_seq;
         self.status = state.status;
         self.current_plan = state.current_plan.clone();
         self.text_stream_active = state.text_stream_active;
@@ -3816,6 +3920,203 @@ impl App {
             }
             self.truncate_transcript();
             self.scroll_to_bottom();
+        }
+
+        if let Some(runtime) = self.runtime.as_ref() {
+            if let Ok(events) = runtime.replay_events_after(session_id, self.loaded_until_seq) {
+                for event in events {
+                    if event.seq > 0 {
+                        self.apply_replayed_event(&event);
+                        self.loaded_until_seq = event.seq;
+                    }
+                }
+            }
+            if let Some(state) = self.sessions.get_mut(&session_id) {
+                state.loaded_until_seq = self.loaded_until_seq;
+            }
+        }
+    }
+
+    fn apply_replayed_event(&mut self, event: &RuntimeEvent) {
+        match event.kind.as_str() {
+            "assistant_message" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    && let Some(content) = payload.get("content").and_then(|v| v.as_str())
+                {
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() && !self.transcript.contains(trimmed) {
+                        if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                            if self.transcript.ends_with('\n') {
+                                self.transcript.push('\n');
+                            } else {
+                                self.transcript.push_str("\n\n");
+                            }
+                        }
+                        self.transcript.push_str(&format!("{trimmed}\n\n"));
+                        self.truncate_transcript();
+                        self.scroll_to_bottom();
+                    }
+                }
+            }
+            "tool_call_created" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                {
+                    let call_id = payload
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let tool_name = payload
+                        .get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool");
+                    let args = payload.get("arguments");
+                    let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
+                    let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
+                    self.upsert_tool_row(
+                        call_id,
+                        tool_name,
+                        ToolRowState::Pending,
+                        desc,
+                        arguments,
+                        None,
+                    );
+                }
+            }
+            "tool_call_started" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                {
+                    let call_id = payload
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let tool_name = payload
+                        .get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool");
+                    let args = payload.get("arguments");
+                    let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
+                    let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
+                    self.upsert_tool_row(
+                        call_id,
+                        tool_name,
+                        ToolRowState::Running,
+                        desc,
+                        arguments,
+                        None,
+                    );
+                }
+            }
+            "tool_call_settled" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                {
+                    let call_id = payload
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let tool_name = payload
+                        .get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool");
+                    let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let success = status == "completed";
+                    let output = payload
+                        .get("result")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| payload.get("error").and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    if !self.complete_tool_row(call_id, tool_name, success, output) {
+                        let args = payload.get("arguments");
+                        let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
+                        let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
+                        self.upsert_tool_row(
+                            call_id,
+                            tool_name,
+                            if success {
+                                ToolRowState::Completed
+                            } else {
+                                ToolRowState::Failed
+                            },
+                            desc,
+                            arguments,
+                            None,
+                        );
+                        self.complete_tool_row(call_id, tool_name, success, output);
+                    }
+                    self.refresh_active_tool();
+                }
+            }
+            "tool_executed" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                {
+                    let call_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let tool_name = payload
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool");
+                    let success = payload
+                        .get("success")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                    if !self.complete_tool_row(call_id, tool_name, success, output) {
+                        let args = payload.get("arguments");
+                        let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
+                        let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
+                        self.upsert_tool_row(
+                            call_id,
+                            tool_name,
+                            if success {
+                                ToolRowState::Completed
+                            } else {
+                                ToolRowState::Failed
+                            },
+                            desc,
+                            arguments,
+                            None,
+                        );
+                        self.complete_tool_row(call_id, tool_name, success, output);
+                    }
+                    self.refresh_active_tool();
+                }
+            }
+            "generation_finished" => {
+                for row in &mut self.tool_rows {
+                    if matches!(row.state, ToolRowState::Pending | ToolRowState::Running) {
+                        row.state = ToolRowState::Failed;
+                        row.output = "generation ended before tool completion".to_string();
+                    }
+                }
+                self.active_generation_id = None;
+                self.refresh_active_tool();
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    && let Some(status) = payload.get("status").and_then(|v| v.as_str())
+                {
+                    self.text_stream_active = false;
+                    let finish_reason = payload
+                        .get("finish_reason")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_finish_reason)
+                        .or_else(|| self.pending_finish_reason.take());
+                    let target_status = match status {
+                        "cancelled" => ConversationStatus::Cancelled,
+                        "failed" => ConversationStatus::Error,
+                        _ => ConversationStatus::Finished(
+                            finish_reason.unwrap_or(FinishReason::Stop),
+                        ),
+                    };
+                    self.typewriter.reset();
+                    self.status = target_status;
+                }
+            }
+            "error" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    && let Some(message) = payload.get("message").and_then(|v| v.as_str())
+                {
+                    self.diagnostic = bounded(message.to_string(), MAX_DIAGNOSTIC_BYTES);
+                    self.status = ConversationStatus::Error;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -3918,6 +4219,10 @@ impl App {
 
     pub fn transcript(&self) -> &str {
         &self.transcript
+    }
+
+    pub fn loaded_until_seq(&self) -> i64 {
+        self.loaded_until_seq
     }
     pub fn current_plan(&self) -> &[(String, String)] {
         &self.current_plan

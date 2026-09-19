@@ -11,6 +11,7 @@ use crate::persistence::{
     Db, GenerationStatus, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, ToolCallStatus, WriterHandle,
 };
 use crate::provider::{FinishReason, Provider, StreamEvent, StreamRequest};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -50,6 +51,8 @@ pub struct RuntimeClient {
     sender: Option<mpsc::SyncSender<ClientCommand>>,
     worker: Option<thread::JoinHandle<Arc<Mutex<Db>>>>,
     coordinator: Arc<SessionCoordinator>,
+    db: Option<Arc<Mutex<Db>>>,
+    bus: EventBus,
 }
 
 impl RuntimeClient {
@@ -63,15 +66,17 @@ impl RuntimeClient {
     ) -> Self {
         db.set_busy_timeout(DB_BUSY_TIMEOUT);
         let db = Arc::new(Mutex::new(db));
+        let client_db = Arc::clone(&db);
         let coordinator = Arc::new(SessionCoordinator::new());
         let (sender, receiver) = mpsc::sync_channel::<ClientCommand>(CLIENT_CHANNEL_CAPACITY);
         let worker_coordinator = Arc::clone(&coordinator);
+        let worker_bus = bus.clone();
         let worker = thread::spawn(move || {
             worker_loop(
                 SharedDb::new(db.clone()),
                 writer,
                 Arc::from(provider),
-                bus,
+                worker_bus,
                 worker_coordinator,
                 receiver,
             );
@@ -81,6 +86,8 @@ impl RuntimeClient {
             sender: Some(sender),
             worker: Some(worker),
             coordinator,
+            db: Some(client_db),
+            bus,
         }
     }
 
@@ -137,13 +144,70 @@ impl RuntimeClient {
         &self.coordinator
     }
     /// Stop the worker, wait for in-flight generations, take back the `Db`.
-    pub fn shutdown(self) -> Db {
-        drop(self.sender);
-        let worker = self.worker.expect("client shut down twice");
+    pub fn shutdown(mut self) -> Db {
+        drop(self.sender.take());
+        drop(self.db.take());
+        let worker = self.worker.take().expect("client shut down twice");
         let db_arc = worker.join().expect("runtime worker thread panicked");
         Arc::into_inner(db_arc)
             .and_then(|mutex| mutex.into_inner().ok())
             .expect("runtime worker sole owner of db")
+    }
+
+    /// Access the runtime event bus.
+    pub fn bus(&self) -> &EventBus {
+        &self.bus
+    }
+
+    /// Replay durable events for `session_id` after `after_seq` (exclusive).
+    pub fn replay_events_after(
+        &self,
+        session_id: i64,
+        after_seq: i64,
+    ) -> Result<Vec<RuntimeEvent>, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        let events = guard
+            .events_after(session_id, after_seq)
+            .map_err(|error| error.to_string())?;
+        Ok(events.into_iter().map(RuntimeEvent::from).collect())
+    }
+
+    /// Subscribe to events for `session_id` starting after `after_seq`.
+    /// Durable events are replayed from SQLite first, and subsequent live
+    /// events from the bus are deduplicated against the replay cursor.
+    pub fn subscribe_after(
+        &self,
+        session_id: i64,
+        after_seq: i64,
+    ) -> Result<ReplaySubscription, String> {
+        let (sub_id, rx) = self.bus.subscribe(Some(session_id));
+        let historical = match self.replay_events_after(session_id, after_seq) {
+            Ok(events) => events,
+            Err(err) => {
+                self.bus.unsubscribe(sub_id);
+                return Err(err);
+            }
+        };
+        let max_historical_seq = historical
+            .iter()
+            .map(|e| e.seq)
+            .max()
+            .unwrap_or(after_seq)
+            .max(after_seq);
+
+        Ok(ReplaySubscription {
+            sub_id,
+            session_id,
+            bus: self.bus.clone(),
+            rx,
+            historical: historical.into(),
+            loaded_until_seq: after_seq,
+            max_historical_seq,
+        })
     }
 
     fn send(&self, command: ClientCommand) -> Result<(), String> {
@@ -160,6 +224,130 @@ impl RuntimeClient {
             .ok_or_else(|| "client shut down".to_string())?
             .try_send(command)
             .map_err(|error| error.to_string())
+    }
+}
+
+/// Subscription that replays historical events after a cursor and tails live bus events.
+/// Drops and unsubscribe are handled automatically.
+pub struct ReplaySubscription {
+    sub_id: u64,
+    session_id: i64,
+    bus: EventBus,
+    rx: mpsc::Receiver<RuntimeEvent>,
+    historical: VecDeque<RuntimeEvent>,
+    loaded_until_seq: i64,
+    max_historical_seq: i64,
+}
+
+impl ReplaySubscription {
+    pub fn subscription_id(&self) -> u64 {
+        self.sub_id
+    }
+
+    pub fn session_id(&self) -> i64 {
+        self.session_id
+    }
+
+    /// Highest durable event seq (`seq > 0`) delivered by this subscription so far.
+    pub fn loaded_until_seq(&self) -> i64 {
+        self.loaded_until_seq
+    }
+
+    pub fn is_historical_drained(&self) -> bool {
+        self.historical.is_empty()
+    }
+
+    /// Try to receive the next event without blocking.
+    pub fn try_recv(&mut self) -> Result<RuntimeEvent, mpsc::TryRecvError> {
+        if let Some(event) = self.historical.pop_front() {
+            if event.seq > 0 && event.seq > self.loaded_until_seq {
+                self.loaded_until_seq = event.seq;
+            }
+            return Ok(event);
+        }
+
+        loop {
+            let event = self.rx.try_recv()?;
+            if event.seq > 0 && event.seq <= self.max_historical_seq {
+                continue;
+            }
+            if event.seq > 0 {
+                if event.seq > self.loaded_until_seq {
+                    self.loaded_until_seq = event.seq;
+                }
+                if event.seq > self.max_historical_seq {
+                    self.max_historical_seq = event.seq;
+                }
+            }
+            return Ok(event);
+        }
+    }
+
+    /// Block until the next event arrives.
+    pub fn recv(&mut self) -> Result<RuntimeEvent, mpsc::RecvError> {
+        if let Some(event) = self.historical.pop_front() {
+            if event.seq > 0 && event.seq > self.loaded_until_seq {
+                self.loaded_until_seq = event.seq;
+            }
+            return Ok(event);
+        }
+
+        loop {
+            let event = self.rx.recv()?;
+            if event.seq > 0 && event.seq <= self.max_historical_seq {
+                continue;
+            }
+            if event.seq > 0 {
+                if event.seq > self.loaded_until_seq {
+                    self.loaded_until_seq = event.seq;
+                }
+                if event.seq > self.max_historical_seq {
+                    self.max_historical_seq = event.seq;
+                }
+            }
+            return Ok(event);
+        }
+    }
+
+    /// Block with a timeout until the next event arrives.
+    pub fn recv_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<RuntimeEvent, mpsc::RecvTimeoutError> {
+        if let Some(event) = self.historical.pop_front() {
+            if event.seq > 0 && event.seq > self.loaded_until_seq {
+                self.loaded_until_seq = event.seq;
+            }
+            return Ok(event);
+        }
+
+        let start = std::time::Instant::now();
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(mpsc::RecvTimeoutError::Timeout);
+            }
+            let remaining = timeout - elapsed;
+            let event = self.rx.recv_timeout(remaining)?;
+            if event.seq > 0 && event.seq <= self.max_historical_seq {
+                continue;
+            }
+            if event.seq > 0 {
+                if event.seq > self.loaded_until_seq {
+                    self.loaded_until_seq = event.seq;
+                }
+                if event.seq > self.max_historical_seq {
+                    self.max_historical_seq = event.seq;
+                }
+            }
+            return Ok(event);
+        }
+    }
+}
+
+impl Drop for ReplaySubscription {
+    fn drop(&mut self) {
+        self.bus.unsubscribe(self.sub_id);
     }
 }
 
@@ -1431,6 +1619,8 @@ mod tests {
             sender: None,
             worker: None,
             coordinator: Arc::new(SessionCoordinator::new()),
+            db: None,
+            bus: EventBus::new(),
         };
         let res = client.create_session(1, "test");
         assert!(res.is_err());
