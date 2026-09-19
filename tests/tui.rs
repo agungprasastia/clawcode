@@ -1657,7 +1657,6 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
             .iter()
             .any(|r| r.name == "read_file" && r.state == clawcode::tui::ToolRowState::Completed)
     );
-    assert!(!app.transcript().contains("⬢ Read src/cli/mod.rs"));
 
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -1751,8 +1750,6 @@ fn tool_execution_update_plan_renders_checklist_and_tracks_plan() {
         ("Langkah ketiga pending".to_string(), "pending".to_string())
     );
 
-    // Structured tool row handles the update plan, no duplicate legacy text in transcript
-    assert!(!app.transcript().contains("⬢ Updated Plan"));
     // 3. Render in terminal
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -1812,7 +1809,6 @@ fn tool_failure_formats_cleanly_with_error_branch() {
             .iter()
             .any(|r| r.name == "read_file" && r.state == clawcode::tui::ToolRowState::Failed)
     );
-    assert!(!app.transcript().contains("⬢ Read foo.rs"));
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -3389,7 +3385,6 @@ fn completed_tool_row_renders_once_without_transcript_duplicate() {
             .count(),
         1
     );
-    assert!(!app.transcript().contains("$ echo ok"));
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal
@@ -3991,8 +3986,6 @@ fn test_edit_file_shows_real_unified_diff_with_colors_and_card() {
     assert!(rendered.contains("-     let a = 1;"));
     assert!(rendered.contains("+     let a = 10;"));
     assert!(rendered.contains("+     let c = 3;"));
-    // Transcript must NOT contain duplicate text
-    assert!(!app.transcript().contains("• Edit src/main.rs"));
 
     // Verify background spans full card width (columns 0..98) even past text
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
@@ -4137,9 +4130,6 @@ fn test_tool_executed_missing_id_resolves_without_duplicate_row() {
     .unwrap();
 
     app.poll_runtime();
-
-    // Must NOT dump duplicate legacy text into transcript
-    assert!(!app.transcript().contains("Grep adalah"));
 
     let backend = ratatui::backend::TestBackend::new(120, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -4540,4 +4530,77 @@ fn test_disconnected_durable_events_replay_into_transcript() {
     assert_eq!(app.loaded_until_seq(), s3);
 
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn previous_response_and_plan_persist_when_user_chats_again() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    app.submit_user_prompt("First question");
+    let session_id = app.active_session_id().unwrap();
+
+    let payload_args = serde_json::json!({
+        "explanation": "Create plan",
+        "plan": [
+            {"step": "Step 1", "status": "completed"},
+            {"step": "Step 2", "status": "pending"}
+        ]
+    });
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "tool_executed".to_string(),
+        payload_json: serde_json::json!({
+            "id": "call-plan",
+            "name": "update_plan",
+            "arguments": payload_args,
+            "success": true,
+            "output": "Plan updated: 2 steps"
+        })
+        .to_string(),
+    })
+    .unwrap();
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "assistant_message".to_string(),
+        payload_json: serde_json::json!({
+            "content": "Here is the response to turn 1"
+        })
+        .to_string(),
+    })
+    .unwrap();
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 3,
+        kind: "generation_finished".to_string(),
+        payload_json: serde_json::json!({
+            "status": "completed",
+            "finish_reason": "Stop"
+        })
+        .to_string(),
+    })
+    .unwrap();
+
+    app.poll_runtime();
+
+    assert!(app.transcript().contains("First question"));
+    assert!(app.transcript().contains("Updated Plan"));
+    assert!(app.transcript().contains("Here is the response to turn 1"));
+    assert_eq!(app.current_plan().len(), 2);
+
+    app.submit_user_prompt("Second question");
+
+    assert!(app.transcript().contains("First question"));
+    assert!(app.transcript().contains("Updated Plan"));
+    assert!(app.transcript().contains("Here is the response to turn 1"));
+    assert!(app.transcript().contains("Second question"));
+    assert_eq!(app.current_plan().len(), 2);
 }

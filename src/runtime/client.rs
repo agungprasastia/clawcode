@@ -1395,7 +1395,25 @@ fn run_generation(
                 "assistant_message_id": assistant_message.id,
             }),
         );
-        break;
+        messages.push(crate::provider::ChatMessage {
+            role: "assistant".to_string(),
+            content: text.clone(),
+            tool_call_id: None,
+            tool_calls: Some(vec![crate::provider::ToolCall {
+                id: call_id.clone(),
+                name: tool_name.clone(),
+                arguments: args_str.clone(),
+            }]),
+            name: None,
+        });
+        messages.push(crate::provider::ChatMessage {
+            role: "tool".to_string(),
+            content: projected_content.to_string(),
+            tool_call_id: Some(call_id.clone()),
+            tool_calls: None,
+            name: Some(tool_name.clone()),
+        });
+        continue;
     }
 
     if cancel_requested(&ctx.db, ctx.generation_id) {

@@ -15,4 +15,5 @@ pub use registry::{ModelInfo, ProviderId, ProviderRegistry};
 pub use stream::{MAX_COALESCED_DELTA_BYTES, ProviderStream, StreamSender};
 pub use traits::{
     ChatMessage, Provider, ProviderCapabilities, ProviderError, StreamRequest, StreamResponse,
+    ToolCall,
 };

@@ -323,7 +323,8 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                         obj["tool_call_id"] = serde_json::Value::String(tid.clone());
                     }
                     if let Some(tcalls) = &m.tool_calls {
-                        obj["tool_calls"] = serde_json::Value::Array(tcalls.clone());
+                        obj["tool_calls"] = serde_json::to_value(tcalls)
+                            .unwrap_or(serde_json::Value::Null);
                     }
                     obj
                 })
@@ -362,18 +363,10 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                         }
                         if let Some(tcalls) = &m.tool_calls {
                             for call in tcalls {
-                                let id = call.get("id").and_then(Value::as_str).unwrap_or("");
-                                let name = call
-                                    .pointer("/function/name")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("");
-                                let args_val: Value = call
-                                    .pointer("/function/arguments")
-                                    .and_then(|a| match a {
-                                        Value::String(s) => serde_json::from_str(s).ok(),
-                                        other => Some(other.clone()),
-                                    })
-                                    .unwrap_or_else(|| serde_json::json!({}));
+                                let id = &call.id;
+                                let name = &call.name;
+                                let args_val: Value = serde_json::from_str(&call.arguments)
+                                    .unwrap_or_else(|_| serde_json::json!({}));
                                 contents.push(serde_json::json!({
                                     "type": "tool_use",
                                     "id": id,
@@ -1166,11 +1159,11 @@ mod tests {
                 role: "assistant".into(),
                 content: "".into(),
                 tool_call_id: None,
-                tool_calls: Some(vec![serde_json::json!({
-                    "id": "call_123",
-                    "type": "function",
-                    "function": { "name": "read_file", "arguments": "{}" }
-                })]),
+                tool_calls: Some(vec![crate::provider::ToolCall {
+                    id: "call_123".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }]),
                 name: None,
             },
         ]);

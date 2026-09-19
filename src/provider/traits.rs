@@ -4,6 +4,74 @@
 use super::events::{FinishReason, StreamEvent, Usage};
 use std::fmt;
 use std::time::Duration;
+    
+/// A tool call made by the assistant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+impl serde::Serialize for ToolCall {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(5))?;
+        map.serialize_entry("id", &self.id)?;
+        map.serialize_entry("type", "function")?;
+        map.serialize_entry("name", &self.name)?;
+        map.serialize_entry("arguments", &self.arguments)?;
+        #[derive(serde::Serialize)]
+        struct Func<'a> {
+            name: &'a str,
+            arguments: &'a str,
+        }
+        map.serialize_entry(
+            "function",
+            &Func {
+                name: &self.name,
+                arguments: &self.arguments,
+            },
+        )?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ToolCall {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v = serde_json::Value::deserialize(deserializer)?;
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let name = v
+            .pointer("/function/name")
+            .or_else(|| v.get("name"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let arguments = v
+            .pointer("/function/arguments")
+            .or_else(|| v.get("arguments"))
+            .map(|x| match x {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .unwrap_or_default();
+        Ok(ToolCall {
+            id,
+            name,
+            arguments,
+        })
+    }
+}
 
 /// A single message in a chat conversation.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -13,7 +81,7 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<serde_json::Value>>,
+    pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }

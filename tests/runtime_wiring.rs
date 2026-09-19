@@ -191,25 +191,36 @@ impl Provider for SingleToolProvider {
     }
 
     fn send(&self, _request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(StreamResponse {
-            events: vec![
-                StreamEvent::ToolCallStart {
-                    id: "call-1".to_string(),
-                    name: "read_file".to_string(),
-                },
-                StreamEvent::ToolCallDelta {
-                    id: "call-1".to_string(),
-                    arguments: format!(r#"{{"path":"{}"}}"#, self.path),
-                },
-                StreamEvent::ToolCallEnd {
-                    id: "call-1".to_string(),
-                },
-                StreamEvent::Finish {
-                    reason: FinishReason::ToolCall,
-                },
-            ],
-        })
+        let call_count = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_count == 0 {
+            Ok(StreamResponse {
+                events: vec![
+                    StreamEvent::ToolCallStart {
+                        id: "call-1".to_string(),
+                        name: "read_file".to_string(),
+                    },
+                    StreamEvent::ToolCallDelta {
+                        id: "call-1".to_string(),
+                        arguments: format!(r#"{{"path":"{}"}}"#, self.path),
+                    },
+                    StreamEvent::ToolCallEnd {
+                        id: "call-1".to_string(),
+                    },
+                    StreamEvent::Finish {
+                        reason: FinishReason::ToolCall,
+                    },
+                ],
+            })
+        } else {
+            Ok(StreamResponse {
+                events: vec![
+                    StreamEvent::TextDelta("File read complete.".to_string()),
+                    StreamEvent::Finish {
+                        reason: FinishReason::Stop,
+                    },
+                ],
+            })
+        }
     }
 }
 
@@ -279,7 +290,7 @@ fn one_tool_call_is_joined_and_settled_before_generation_finishes() {
     }
     let finished = finished.expect("generation must finish after joined tool");
     assert!(finished.payload_json.contains("completed"));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     let db = client.shutdown();
     let messages = db.messages(session.id).unwrap();
@@ -288,7 +299,7 @@ fn one_tool_call_is_joined_and_settled_before_generation_finishes() {
             .iter()
             .map(|message| message.role.as_str())
             .collect::<Vec<_>>(),
-        vec!["user", "assistant", "tool"]
+        vec!["user", "assistant", "tool", "assistant"]
     );
     let assistant_id = messages[1].id;
     let tool_calls = db.tool_calls(session.id).unwrap();
@@ -481,121 +492,6 @@ fn incomplete_or_multiple_tool_calls_fail_before_execution() {
         let _ = std::fs::remove_file(&path);
     }
 }
-#[test]
-fn one_tool_call_does_not_start_provider_continuation() {
-    let calls = Arc::new(AtomicUsize::new(0));
-
-    #[derive(Debug)]
-    struct ToolThenEmptyThenSummaryProvider {
-        turn: Arc<AtomicUsize>,
-    }
-
-    impl Provider for ToolThenEmptyThenSummaryProvider {
-        fn id(&self) -> &ProviderId {
-            static ID: std::sync::LazyLock<ProviderId> =
-                std::sync::LazyLock::new(|| ProviderId::new("fake"));
-            &ID
-        }
-        fn capabilities(&self) -> ProviderCapabilities {
-            ProviderCapabilities {
-                streaming: true,
-                tools: true,
-            }
-        }
-        fn models(&self) -> Vec<ModelInfo> {
-            Vec::new()
-        }
-        fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
-            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
-            match turn {
-                0 => Ok(StreamResponse {
-                    events: vec![
-                        StreamEvent::ToolCallStart {
-                            id: "call_1".into(),
-                            name: "list_dir".into(),
-                        },
-                        StreamEvent::ToolCallDelta {
-                            id: "call_1".into(),
-                            arguments: r#"{"path":"."}"#.into(),
-                        },
-                        StreamEvent::ToolCallEnd {
-                            id: "call_1".into(),
-                        },
-                        StreamEvent::Finish {
-                            reason: FinishReason::ToolCall,
-                        },
-                    ],
-                }),
-                1 => {
-                    let last_msg = request.messages.last().expect("must have tool message");
-                    assert_eq!(last_msg.role, "tool");
-                    assert_eq!(last_msg.name.as_deref(), Some("list_dir"));
-
-                    Ok(StreamResponse {
-                        events: vec![StreamEvent::Finish {
-                            reason: FinishReason::Stop,
-                        }],
-                    })
-                }
-                _ => {
-                    let last_msg = request.messages.last().expect("must have recovery message");
-                    assert_eq!(last_msg.role, "user");
-                    assert!(last_msg.content.contains("summarize your findings"));
-
-                    Ok(StreamResponse {
-                        events: vec![
-                            StreamEvent::TextDelta("Here is the recovered summary.".into()),
-                            StreamEvent::Finish {
-                                reason: FinishReason::Stop,
-                            },
-                        ],
-                    })
-                }
-            }
-        }
-    }
-
-    let path = temp_db_path("one_call_no_continuation");
-    let mut app = App::default();
-    let db = Db::open(&path).expect("runtime db");
-    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
-    app.attach_runtime(
-        db,
-        writer,
-        Box::new(ToolThenEmptyThenSummaryProvider {
-            turn: Arc::clone(&calls),
-        }),
-    );
-
-    app.apply(UiEvent::Input(Input::Character('g')));
-    app.apply(UiEvent::Input(Input::Character('o')));
-    app.apply(UiEvent::Input(Input::Submit));
-
-    for _ in 0..500 {
-        app.poll_runtime();
-        if matches!(
-            app.conversation_status(),
-            clawcode::tui::ConversationStatus::Finished(_)
-        ) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    app.poll_runtime();
-
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(
-        !app.transcript().contains("Here is the recovered summary."),
-        "one-call tool path must not request continuation"
-    );
-    assert!(matches!(
-        app.conversation_status(),
-        clawcode::tui::ConversationStatus::Finished(_)
-    ));
-
-    let _ = std::fs::remove_file(&path);
-}
-
 #[test]
 fn runtime_backed_prompt_submission_admits_and_promotes_input() {
     let path = temp_db_path("admit_and_promote");
