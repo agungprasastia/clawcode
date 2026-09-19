@@ -18,8 +18,8 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 pub use app::{
-    App, ConversationMode, ConversationStatus, Input, ToolRow, ToolRowState, UiEvent, UiEventQueue,
-    format_tool_success_detail, is_sensitive_command, tool_target_and_verbs,
+    App, ConversationMode, ConversationStatus, Input, StreamPart, ToolRow, ToolRowState, UiEvent,
+    UiEventQueue, format_tool_success_detail, is_sensitive_command, tool_target_and_verbs,
 };
 pub use chat::{
     format_transcript_lines, format_transcript_lines_with_width, render_chat, strip_ansi_codes,

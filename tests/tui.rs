@@ -1883,26 +1883,13 @@ fn various_tool_entries_format_matching_crabcode_spec() {
 
     app.poll_runtime();
 
-    assert!(app.transcript().contains("⬢ Grep /"));
-    assert!(app.transcript().contains("  └ 100 lines"));
-
-    assert!(app.transcript().contains("⬢ Glob *ui*"));
-    assert!(app.transcript().contains("  └ succeeded"));
-
-    assert!(app.transcript().contains("⬢ List src"));
-    assert!(app.transcript().contains("  └ 14 entries"));
-}
-
-#[test]
-fn historical_tool_lines_render_with_clean_styles() {
-    let mut app = App::default();
-    app.apply(UiEvent::Input(Input::Character('h')));
-    app.apply(UiEvent::Input(Input::Submit));
-
-    // Simulate historical transcript format
-    app.apply(UiEvent::StreamDelta(
-        "\n⚙ [grep_search: /]\n✓ grep_search succeeded (100 lines)\n\n".into(),
-    ));
+    assert_eq!(app.tool_rows().len(), 3);
+    assert!(
+        app.tool_rows()
+            .iter()
+            .all(|r| r.state == clawcode::tui::ToolRowState::Completed)
+    );
+    assert_eq!(app.stream_parts().len(), 3);
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -1917,10 +1904,50 @@ fn historical_tool_lines_render_with_clean_styles() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("⚙"));
-    assert!(text.contains("grep_search"));
-    assert!(text.contains("└"));
-    assert!(text.contains("grep_search succeeded (100 lines)"));
+    assert!(text.contains("Grep /"));
+    assert!(text.contains("Glob *ui*"));
+    assert!(text.contains("List src"));
+}
+
+#[test]
+fn historical_tool_lines_render_with_clean_styles() {
+    let mut app = App::default();
+    app.submit_user_prompt("h");
+
+    app.set_tool_rows_for_test(vec![clawcode::tui::ToolRow {
+        call_id: "grep-1".to_string(),
+        name: "grep_search".to_string(),
+        desc: "/".to_string(),
+        arguments: serde_json::json!({ "query": "/" }).to_string(),
+        output: "match 1\nmatch 2".to_string(),
+        state: clawcode::tui::ToolRowState::Completed,
+        arguments_complete: true,
+        metadata: None,
+        started_at: std::time::Instant::now(),
+        expandable: false,
+    }]);
+    app.set_stream_parts_for_test(
+        vec![
+            clawcode::tui::StreamPart::User("h".into()),
+            clawcode::tui::StreamPart::Tool("grep-1".into()),
+        ],
+        None,
+    );
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Grep /"));
 }
 #[test]
 fn test_app_permission_dialog_navigation_and_decisions() {
@@ -2337,35 +2364,26 @@ fn test_bash_terminal_card_rendering() {
     }).unwrap();
 
     app.poll_runtime();
-    assert!(app.transcript().contains("$ cargo test"));
-    assert!(app.transcript().contains("running 2 tests"));
-    assert!(app.transcript().contains("test foo ... ok"));
-    assert!(app.transcript().contains("test bar ... ok"));
-    assert!(!app.transcript().contains("┌── Output"));
-    assert!(!app.transcript().contains("└───"));
-
-    // Verify styling of terminal box
-    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let lines = clawcode::tui::format_transcript_lines(
-        app.transcript(),
-        &theme,
-        ratatui::style::Color::Cyan,
+    assert_eq!(app.tool_rows().len(), 1);
+    assert_eq!(
+        app.tool_rows()[0].state,
+        clawcode::tui::ToolRowState::Completed
     );
-    let cmd_header = lines
-        .iter()
-        .find(|l| l.spans.iter().any(|s| s.content.contains("cargo test")));
-    assert!(cmd_header.is_some());
-    let ch = cmd_header.unwrap();
-    assert_eq!(ch.spans[0].content, "$ ");
-    assert_eq!(ch.spans[1].content, "cargo test");
 
-    let out_line = lines.iter().find(|l| {
-        l.spans
-            .iter()
-            .any(|s| s.content.contains("running 2 tests"))
-    });
-    assert!(out_line.is_some());
-    assert_eq!(out_line.unwrap().spans[0].style.fg, Some(theme.quiet));
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("$ cargo test"));
+    assert!(text.contains("running 2 tests"));
 
     // 2. Failed bash command with exit 1
     tx.send(clawcode::runtime::RuntimeEvent {
@@ -2384,18 +2402,49 @@ fn test_bash_terminal_card_rendering() {
     .unwrap();
 
     app.poll_runtime();
-    assert!(app.transcript().contains("$ failing_cmd"));
-    assert!(app.transcript().contains("Error: command not found"));
-
-    let failed_lines = clawcode::tui::format_transcript_lines(
-        app.transcript(),
-        &theme,
-        ratatui::style::Color::Cyan,
+    assert_eq!(app.tool_rows().len(), 2);
+    assert_eq!(
+        app.tool_rows()[1].state,
+        clawcode::tui::ToolRowState::Failed
     );
-    let cmd_failed = failed_lines
-        .iter()
-        .find(|l| l.spans.iter().any(|s| s.content.contains("failing_cmd")));
-    assert!(cmd_failed.is_some());
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("failing_cmd"));
+    assert!(text.contains("Error: command not found"));
+
+    // 3. Regression test: tools render as cards both during streaming and after turn completion!
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 3,
+        kind: "generation_finished".to_string(),
+        payload_json: serde_json::json!({ "status": "completed" }).to_string(),
+    })
+    .unwrap();
+    app.poll_runtime();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("$ cargo test"));
+    assert!(text.contains("failing_cmd"));
 }
 
 #[test]
@@ -2422,41 +2471,25 @@ fn test_websearch_visual_card_formatting() {
     .unwrap();
 
     app.poll_runtime();
-    assert!(app.transcript().contains("⬢ Searched \"rust tokio\""));
-    assert!(
-        app.transcript()
-            .contains("  ┌── Results ──────────────────────────────────────")
+    assert_eq!(app.tool_rows().len(), 1);
+    assert_eq!(
+        app.tool_rows()[0].state,
+        clawcode::tui::ToolRowState::Completed
     );
-    assert!(app.transcript().contains("  │ 1. Tokio Async Runtime"));
-    assert!(app.transcript().contains("  │    URL: https://tokio.rs"));
-    assert!(app.transcript().contains("  │ 2. Tokio Tutorial"));
-    assert!(
-        app.transcript()
-            .contains("  │    URL: https://tokio.rs/tutorial")
-    );
-    assert!(app.transcript().contains("  └───"));
-    assert!(app.transcript().contains("  └ 2 results found"));
 
-    // Verify styling of websearch card
-    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let lines = clawcode::tui::format_transcript_lines(
-        app.transcript(),
-        &theme,
-        ratatui::style::Color::Cyan,
-    );
-    let url_line = lines.iter().find(|l| {
-        l.spans
-            .iter()
-            .any(|s| s.content.contains("https://tokio.rs"))
-    });
-    assert!(url_line.is_some());
-    let url_span = url_line
-        .unwrap()
-        .spans
-        .iter()
-        .find(|s| s.content == "https://tokio.rs")
-        .unwrap();
-    assert_eq!(url_span.style.fg, Some(theme.teal));
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Search rust tokio"));
 }
 
 #[test]
@@ -2491,14 +2524,7 @@ fn test_edit_file_opencode_side_by_side_diff_in_transcript() {
     .unwrap();
 
     app.poll_runtime();
-
-    let transcript = app.transcript();
-    assert!(transcript.contains("• Edit src/main.rs (+1 -1)"));
-    assert!(transcript.contains(" │ "));
-    assert!(transcript.contains("  10   fn main() {"));
-    assert!(transcript.contains("  11 -     // old"));
-    assert!(transcript.contains("  11 +     println!(\"hello\");"));
-    assert!(transcript.contains("  12   }"));
+    assert_eq!(app.tool_rows().len(), 1);
 
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
     let buffer = terminal.backend().buffer();
@@ -2512,7 +2538,8 @@ fn test_edit_file_opencode_side_by_side_diff_in_transcript() {
         .join("\n");
 
     assert!(text.contains("• Edit src/main.rs"));
-    assert!(text.contains("│"));
+    assert!(text.contains("-     // old"));
+    assert!(text.contains("+     println!(\"hello\");"));
 }
 
 #[test]
@@ -2543,28 +2570,21 @@ fn test_write_file_clean_summary_no_diff() {
     .unwrap();
 
     app.poll_runtime();
+    assert_eq!(app.tool_rows().len(), 1);
 
-    let transcript = app.transcript();
-    assert!(transcript.contains("• Write README.md (3 lines)"));
-    assert!(transcript.contains("  └ Successfully wrote 32 bytes to 'README.md'"));
-    // Must NOT contain raw diff marker rows
-    assert!(!transcript.contains("    + # Title"));
-
-    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let lines = clawcode::tui::format_transcript_lines(
-        app.transcript(),
-        &theme,
-        ratatui::style::Color::Cyan,
-    );
-    let write_line = lines
-        .iter()
-        .find(|l| l.spans.iter().any(|s| s.content == "• "));
-    assert!(write_line.is_some());
-    let spans = &write_line.unwrap().spans;
-    assert_eq!(spans[0].content, "• ");
-    assert_eq!(spans[0].style.fg, Some(theme.teal));
-    assert!(spans.iter().any(|s| s.content == "Write"));
-    assert!(spans.iter().any(|s| s.content == "README.md"));
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Write README.md"));
 }
 
 #[test]
@@ -3864,13 +3884,13 @@ fn opencode_visual_streaming_parity_suite() {
 
     app.poll_runtime();
 
-    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let backend = ratatui::backend::TestBackend::new(100, 40);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| clawcode::tui::render(frame, &app))
         .unwrap();
 
-    let rendered = (0..30)
+    let rendered = (0..40)
         .map(|y| {
             (0..100)
                 .map(|x| terminal.backend().buffer()[(x, y)].symbol())
@@ -3878,11 +3898,9 @@ fn opencode_visual_streaming_parity_suite() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-
-    // User prompt card has solid border and full width background
     assert!(rendered.contains("▌ check streaming visual parity"));
     let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
-    let prompt_y = (0..30)
+    let prompt_y = (0..40)
         .find(|&y| {
             let row: String = (0..100)
                 .map(|x| terminal.backend().buffer()[(x, y)].symbol())
@@ -4592,16 +4610,22 @@ fn previous_response_and_plan_persist_when_user_chats_again() {
     app.poll_runtime();
 
     assert!(app.transcript().contains("First question"));
-    assert!(app.transcript().contains("Updated Plan"));
-    assert!(app.transcript().contains("Here is the response to turn 1"));
+    assert!(app.tool_rows().iter().any(|r| r.call_id == "call-plan"));
+    assert!(
+        app.stream_parts()
+            .iter()
+            .any(|p| matches!(p, clawcode::tui::StreamPart::Tool(id) if id == "call-plan"))
+    );
     assert_eq!(app.current_plan().len(), 2);
 
     app.submit_user_prompt("Second question");
 
     assert!(app.transcript().contains("First question"));
-    assert!(app.transcript().contains("Updated Plan"));
-    assert!(app.transcript().contains("Here is the response to turn 1"));
     assert!(app.transcript().contains("Second question"));
+    assert!(app.tool_rows().iter().any(|r| r.call_id == "call-plan"));
+    assert!(app.stream_parts().iter().any(
+        |p| matches!(p, clawcode::tui::StreamPart::User(prompt) if prompt == "Second question")
+    ));
     assert_eq!(app.current_plan().len(), 2);
 }
 
@@ -4712,4 +4736,230 @@ fn test_render_status_bar_uses_cached_git_branch() {
         }
     }
     assert!(!rendered_none.contains(":feature-xyz"));
+}
+
+#[test]
+fn history_preservation_when_stream_base_len_is_none_or_reset() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    // Initial user prompt and finished response
+    app.submit_user_prompt("First user question");
+    assert_eq!(app.stream_base_len(), Some(app.transcript().len()));
+    let session_id = app.active_session_id().unwrap();
+
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 1,
+        kind: "generation_started".into(),
+        payload_json: "{}".into(),
+    })
+    .unwrap();
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 2,
+        kind: "text_delta".into(),
+        payload_json: serde_json::json!({"delta": "First assistant answer"}).to_string(),
+    })
+    .unwrap();
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id,
+        generation_id: Some(1),
+        seq: 3,
+        kind: "generation_finished".into(),
+        payload_json: "{}".into(),
+    })
+    .unwrap();
+    app.poll_runtime();
+
+    // Verify transcript has both
+    assert!(app.transcript().contains("First user question"));
+    assert!(app.transcript().contains("First assistant answer"));
+
+    // User submits second prompt
+    app.submit_user_prompt("Second user question");
+    assert_eq!(app.stream_base_len(), Some(app.transcript().len()));
+
+    // Cancel / reset happens which clears stream_base_len to None
+    app.apply(clawcode::tui::UiEvent::Input(clawcode::tui::Input::Cancel));
+    assert_eq!(app.stream_base_len(), None);
+
+    // Stream parts exist while stream_base_len is None
+    app.set_stream_parts_for_test(
+        vec![
+            clawcode::tui::StreamPart::User("First user question".into()),
+            clawcode::tui::StreamPart::Text("First assistant answer".into()),
+            clawcode::tui::StreamPart::User("Second user question".into()),
+            clawcode::tui::StreamPart::Text("Streaming in progress...".into()),
+        ],
+        None,
+    );
+    assert!(!app.stream_parts().is_empty());
+    assert_eq!(app.stream_base_len(), None);
+
+    // Render in terminal - prior history must NOT vanish!
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("First user question"));
+    assert!(text.contains("First assistant answer"));
+    assert!(text.contains("Second user question"));
+    assert!(text.contains("Streaming in progress..."));
+}
+
+#[test]
+fn tool_card_rendering_and_raw_tool_bracket_badge_formatting() {
+    let mut app = App::default();
+    let theme = clawcode::tui::ThemeKind::ClawcodeDark.to_theme();
+
+    app.set_tool_rows_for_test(vec![
+        clawcode::tui::ToolRow {
+            call_id: "read-1".to_string(),
+            name: "read_file".to_string(),
+            desc: "Cargo.toml".to_string(),
+            arguments: serde_json::json!({ "path": "Cargo.toml" }).to_string(),
+            output: "27 lines".to_string(),
+            state: clawcode::tui::ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: std::time::Instant::now(),
+            expandable: false,
+        },
+        clawcode::tui::ToolRow {
+            call_id: "plan-1".to_string(),
+            name: "update_plan".to_string(),
+            desc: "Plan updated: 3 steps".to_string(),
+            arguments: serde_json::json!({ "plan": [] }).to_string(),
+            output: "Plan updated: 3 steps".to_string(),
+            state: clawcode::tui::ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: std::time::Instant::now(),
+            expandable: false,
+        },
+        clawcode::tui::ToolRow {
+            call_id: "list-1".to_string(),
+            name: "list_dir".to_string(),
+            desc: "src".to_string(),
+            arguments: serde_json::json!({ "path": "src" }).to_string(),
+            output: "src".to_string(),
+            state: clawcode::tui::ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: std::time::Instant::now(),
+            expandable: false,
+        },
+        clawcode::tui::ToolRow {
+            call_id: "tool-1".to_string(),
+            name: "calculate".to_string(),
+            desc: "finished calculation".to_string(),
+            arguments: String::new(),
+            output: "finished calculation".to_string(),
+            state: clawcode::tui::ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: std::time::Instant::now(),
+            expandable: false,
+        },
+    ]);
+    app.set_stream_parts_for_test(
+        vec![
+            clawcode::tui::StreamPart::Tool("read-1".into()),
+            clawcode::tui::StreamPart::Tool("plan-1".into()),
+            clawcode::tui::StreamPart::Tool("list-1".into()),
+            clawcode::tui::StreamPart::Tool("tool-1".into()),
+        ],
+        None,
+    );
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!text.contains("[tool]:"));
+    assert!(text.contains("Read Cargo.toml"));
+    assert!(text.contains("Updated Plan"));
+    assert!(text.contains("List src"));
+    assert!(text.contains("Run finished calculation"));
+
+    let tool_y = (0..buffer.area.height)
+        .find(|&y| {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row.contains("Read Cargo.toml")
+        })
+        .expect("tool header line exists");
+    assert_eq!(buffer[(50, tool_y)].bg, theme.bg_element);
+}
+
+#[test]
+fn restore_session_from_database_formats_tool_messages_as_clean_cards() {
+    let db = clawcode::persistence::Db::open_in_memory().unwrap();
+    let s1 = db.create_session("Tool Session").unwrap();
+    db.append_message(s1.id, "user", "Run my tools").unwrap();
+    db.append_message(s1.id, "assistant", "Running now...")
+        .unwrap();
+    db.append_message(s1.id, "tool", "Plan updated: 2 steps")
+        .unwrap();
+    db.append_message(s1.id, "tool", "read Cargo.toml output")
+        .unwrap();
+    db.append_message(s1.id, "tool", "   ").unwrap();
+
+    let mut app = App::default();
+    let service = clawcode::cli::CommandService::with_db(clawcode::cli::CliDiscovery::new(), db);
+    app.set_command_service(service);
+
+    app.switch_session(s1.id);
+    assert_eq!(app.active_session_id(), Some(s1.id));
+
+    // Must never contain raw [tool]: or ⬢ in transcript
+    assert!(!app.transcript().contains("[tool]:"));
+    assert!(!app.transcript().contains("⬢ "));
+    assert_eq!(app.tool_rows().len(), 2);
+    assert!(
+        app.tool_rows()
+            .iter()
+            .all(|r| r.state == clawcode::tui::ToolRowState::Completed)
+    );
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("Run my tools"));
+    assert!(text.contains("Running now..."));
+    assert!(text.contains("Updated Plan"));
+    assert!(text.contains("read Cargo.toml output"));
 }

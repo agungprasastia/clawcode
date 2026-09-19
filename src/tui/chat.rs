@@ -90,20 +90,7 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
 
     let mut tool_row_lines = Vec::new();
     let mut lines = if !app.stream_parts().is_empty() {
-        let raw_base = app
-            .stream_base_len()
-            .unwrap_or(0)
-            .min(app.transcript().len());
-        let base = crate::tui::app::floor_char_boundary(app.transcript(), raw_base);
-        let mut ordered = format_transcript_lines_with_width(
-            &app.transcript()[..base],
-            theme,
-            mode_color,
-            Some(chunks[1].width),
-        );
-        for line in &mut ordered {
-            indent_assistant_line(line);
-        }
+        let mut ordered = Vec::new();
         append_stream_parts(
             &mut ordered,
             app.stream_parts(),
@@ -151,28 +138,6 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
             last_line
                 .spans
                 .push(Span::styled("▋", Style::default().fg(mode_color)));
-        }
-    }
-
-    if app.stream_parts().is_empty() {
-        let tool_rows = app.tool_rows();
-        if !tool_rows.is_empty() {
-            for row in tool_rows {
-                if row.call_id.is_empty()
-                    && matches!(row.state, ToolRowState::Completed | ToolRowState::Failed)
-                {
-                    continue;
-                }
-                render_tool_card_or_row(
-                    &mut lines,
-                    row,
-                    app,
-                    theme,
-                    mode_color,
-                    chunks[1].width,
-                    &mut tool_row_lines,
-                );
-            }
         }
     }
 
@@ -356,6 +321,43 @@ fn append_stream_parts(
 ) {
     for part in parts {
         match part {
+            StreamPart::User(prompt) => {
+                let card_width = if width > 2 {
+                    (width.saturating_sub(2) as usize).max(20)
+                } else {
+                    width as usize
+                };
+                let p_lines: Vec<&str> = prompt.lines().collect();
+                if p_lines.is_empty() {
+                    let content_line = Line::from(vec![
+                        Span::styled(
+                            "▌ ",
+                            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            String::new(),
+                            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                        ),
+                    ]);
+                    lines.push(pad_card_line(content_line, card_width, theme.bg_element));
+                } else {
+                    for (idx, pline) in p_lines.iter().enumerate() {
+                        let prefix = if idx == 0 { "▌ " } else { "  " };
+                        let content_line = Line::from(vec![
+                            Span::styled(
+                                prefix,
+                                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                (*pline).to_string(),
+                                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                            ),
+                        ]);
+                        lines.push(pad_card_line(content_line, card_width, theme.bg_element));
+                    }
+                }
+                lines.push(Line::from(""));
+            }
             StreamPart::Text(text) => {
                 let mut rendered =
                     format_transcript_lines_with_width(text, theme, mode_color, Some(width));
@@ -902,13 +904,49 @@ fn render_tool_card_or_row(
     ) {
         render_diff_card(lines, row, app, theme, mode_color, width, tool_row_lines);
     } else {
-        tool_row_lines.push((row.call_id.clone(), lines.len()));
-        lines.push(compact_tool_line(row, app, theme, mode_color, width));
-        append_specialized_detail(lines, row, theme);
+        render_generic_tool_card(lines, row, app, theme, mode_color, width, tool_row_lines);
     }
 }
 
-fn append_specialized_detail(lines: &mut Vec<Line<'static>>, row: &ToolRow, theme: &Theme) {
+fn render_generic_tool_card(
+    lines: &mut Vec<Line<'static>>,
+    row: &ToolRow,
+    app: &App,
+    theme: &Theme,
+    mode_color: Color,
+    width: u16,
+    tool_row_lines: &mut Vec<(String, usize)>,
+) {
+    let card_width = (width as usize).saturating_sub(2).max(20);
+    if !lines.is_empty()
+        && !lines
+            .last()
+            .map(|l| l.spans.is_empty() || (l.spans.len() == 1 && l.spans[0].content.is_empty()))
+            .unwrap_or(false)
+    {
+        lines.push(Line::from(""));
+    }
+
+    lines.push(empty_card_line(card_width, theme.bg_element));
+    tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+
+    lines.push(compact_tool_line(row, app, theme, mode_color, width));
+    tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+
+    append_specialized_detail(lines, row, theme, card_width, tool_row_lines);
+
+    lines.push(empty_card_line(card_width, theme.bg_element));
+    tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+
+    lines.push(Line::from(""));
+}
+fn append_specialized_detail(
+    lines: &mut Vec<Line<'static>>,
+    row: &ToolRow,
+    theme: &Theme,
+    card_width: usize,
+    tool_row_lines: &mut Vec<(String, usize)>,
+) {
     let terminal = row.state == ToolRowState::Completed || row.state == ToolRowState::Failed;
     if !terminal && !matches!(row.name.as_str(), "task" | "execute") {
         return;
@@ -933,20 +971,30 @@ fn append_specialized_detail(lines: &mut Vec<Line<'static>>, row: &ToolRow, them
             } else {
                 format!(": {description}")
             };
-            lines.push(Line::from(Span::styled(
-                format!("      ↳ {agent}{suffix}"),
-                Style::default().fg(theme.quiet),
-            )));
+            let line = Line::from(vec![
+                Span::raw("      "),
+                Span::styled(
+                    format!("↳ {agent}{suffix}"),
+                    Style::default().fg(theme.quiet),
+                ),
+            ]);
+            lines.push(pad_card_line(line, card_width, theme.bg_element));
+            tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
             if let Some(session_id) = row
                 .metadata
                 .as_ref()
                 .and_then(|metadata| metadata.get("sessionId"))
                 .and_then(|value| value.as_str())
             {
-                lines.push(Line::from(Span::styled(
-                    format!("      ↳ child session {session_id}"),
-                    Style::default().fg(theme.dim),
-                )));
+                let session_line = Line::from(vec![
+                    Span::raw("      "),
+                    Span::styled(
+                        format!("↳ child session {session_id}"),
+                        Style::default().fg(theme.dim),
+                    ),
+                ]);
+                lines.push(pad_card_line(session_line, card_width, theme.bg_element));
+                tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
             }
         }
         "execute" => {
@@ -956,10 +1004,12 @@ fn append_specialized_detail(lines: &mut Vec<Line<'static>>, row: &ToolRow, them
                         continue;
                     };
                     let Some(status) = call.get("status").and_then(|value| value.as_str()) else {
-                        lines.push(Line::from(Span::styled(
-                            format!("      {tool}"),
-                            Style::default().fg(theme.quiet),
-                        )));
+                        let line = Line::from(vec![
+                            Span::raw("      "),
+                            Span::styled(tool.to_string(), Style::default().fg(theme.quiet)),
+                        ]);
+                        lines.push(pad_card_line(line, card_width, theme.bg_element));
+                        tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
                         continue;
                     };
                     let (marker, color) = match status {
@@ -968,10 +1018,12 @@ fn append_specialized_detail(lines: &mut Vec<Line<'static>>, row: &ToolRow, them
                         "running" | "pending" | "in_progress" | "in-progress" => ("⠋", theme.quiet),
                         _ => ("·", theme.quiet),
                     };
-                    lines.push(Line::from(Span::styled(
-                        format!("      {marker} {tool}"),
-                        Style::default().fg(color),
-                    )));
+                    let line = Line::from(vec![
+                        Span::raw("      "),
+                        Span::styled(format!("{marker} {tool}"), Style::default().fg(color)),
+                    ]);
+                    lines.push(pad_card_line(line, card_width, theme.bg_element));
+                    tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
                 }
             }
         }
@@ -988,13 +1040,15 @@ fn append_specialized_detail(lines: &mut Vec<Line<'static>>, row: &ToolRow, them
                 else {
                     continue;
                 };
-                lines.push(Line::from(vec![
+                let line = Line::from(vec![
                     Span::styled("      │ ", Style::default().fg(theme.dim)),
                     Span::styled(
                         format!("{}. {}", index + 1, step),
                         Style::default().fg(theme.quiet),
                     ),
-                ]));
+                ]);
+                lines.push(pad_card_line(line, card_width, theme.bg_element));
+                tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
             }
         }
         _ => {}
@@ -1006,11 +1060,13 @@ fn tool_icon(name: &str) -> &'static str {
         "read_file" | "read" => "→ ",
         "write_file" | "write" => "← ",
         "edit_file" | "edit" | "patch" | "apply_patch" => "• ",
+        "list_dir" => "☰ ",
         "glob_search" | "glob" => "✱ ",
         "grep_search" | "grep" => "✱ ",
         "bash" | "sh" => "$ ",
         "webfetch" | "fetch" => "% ",
         "websearch" | "search" => "◈ ",
+        "update_plan" => "⬢ ",
         "task" => "✓ ",
         _ => "⚙ ",
     }
@@ -1024,11 +1080,6 @@ fn compact_tool_line(
     width: u16,
 ) -> Line<'static> {
     let is_bash = matches!(row.name.as_str(), "bash" | "sh");
-    let is_diff_tool = matches!(
-        row.name.as_str(),
-        "edit_file" | "edit" | "patch" | "apply_patch"
-    );
-    let is_block_tool = is_bash || is_diff_tool;
     let (marker, marker_color) = match row.state {
         ToolRowState::Pending => {
             if row.name == "task" {
@@ -1054,7 +1105,7 @@ fn compact_tool_line(
             if is_bash {
                 ("$ ".to_string(), theme.amber)
             } else {
-                (tool_icon(&row.name).to_string(), theme.quiet)
+                (tool_icon(&row.name).to_string(), theme.success)
             }
         }
         ToolRowState::Failed => {
@@ -1081,14 +1132,13 @@ fn compact_tool_line(
     let max_chars = width.saturating_sub(6).max(8) as usize;
     let text_color = if row.state == ToolRowState::Failed {
         theme.error
-    } else if matches!(row.state, ToolRowState::Running) || is_block_tool {
-        theme.ink
     } else {
-        theme.quiet
+        theme.ink
     };
 
+    let card_width = (width as usize).saturating_sub(2).max(20);
     let line = Line::from(vec![
-        Span::raw(if is_block_tool { "  " } else { "   " }),
+        Span::raw("  "),
         Span::styled(
             marker,
             Style::default()
@@ -1100,11 +1150,7 @@ fn compact_tool_line(
             Style::default().fg(text_color),
         ),
     ]);
-    if is_block_tool {
-        line.style(Style::default().bg(theme.bg_element))
-    } else {
-        line
-    }
+    pad_card_line(line, card_width, theme.bg_element)
 }
 
 pub(crate) fn visual_line_count(lines: &[Line], width: u16) -> usize {
@@ -1124,19 +1170,6 @@ pub(crate) fn visual_line_count(lines: &[Line], width: u16) -> usize {
     count
 }
 
-fn parse_diff_badge(s: &str) -> Option<(&str, &str, &str)> {
-    let open_idx = s.rfind("(+")?;
-    let close_idx = s[open_idx..].find(')')? + open_idx;
-    let badge_content = &s[open_idx + 2..close_idx];
-    let (add_part, rem_part) = badge_content.split_once(" -")?;
-    if !add_part.chars().all(|c| c.is_ascii_digit())
-        || !rem_part.chars().all(|c| c.is_ascii_digit())
-    {
-        return None;
-    }
-    let before = s[..open_idx].trim_end();
-    Some((before, add_part, rem_part))
-}
 fn tool_row_detail(row: &ToolRow) -> String {
     if row.desc == "preparing arguments..." {
         return format!("Preparing {}...", row.name);
@@ -1335,147 +1368,6 @@ fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     spans
 }
 
-pub fn split_numbered_result(text: &str) -> Option<(&str, &str)> {
-    let trimmed = text.trim_start();
-    let (num, rest) = trimmed.split_once(". ")?;
-    if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
-        Some((num, rest))
-    } else {
-        None
-    }
-}
-
-fn is_side_by_side_col(col: &str) -> bool {
-    if col.contains('⋯') {
-        return true;
-    }
-    let trimmed = col.trim_start();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if trimmed.starts_with('-') || trimmed.starts_with('+') {
-        return true;
-    }
-    let first_word = trimmed.split_whitespace().next().unwrap_or("");
-    first_word.chars().all(|c| c.is_ascii_digit()) && !first_word.is_empty()
-}
-
-fn parse_side_by_side_diff_line(line: &str) -> Option<(&str, &str, &str)> {
-    if !line.starts_with("  ") && !line.starts_with('\t') {
-        return None;
-    }
-    let trimmed = line.trim_start();
-    if trimmed.starts_with('│') || trimmed.starts_with('┌') || trimmed.starts_with('└') {
-        return None;
-    }
-    let (left_part, right_col) = line.split_once(" │ ")?;
-    let indent_len = if left_part.starts_with("    ") {
-        4
-    } else {
-        left_part.chars().take_while(|c| *c == ' ').count().min(4)
-    };
-    let indent = &left_part[..indent_len];
-    let left_col = &left_part[indent_len..];
-
-    let left_valid = is_side_by_side_col(left_col);
-    let right_valid = is_side_by_side_col(right_col);
-    if left_valid || right_valid {
-        Some((indent, left_col, right_col))
-    } else {
-        None
-    }
-}
-
-fn render_side_by_side_col(col: &str, theme: &Theme) -> Vec<Span<'static>> {
-    let diff_remove_bg = Color::Rgb(55, 18, 25);
-    let diff_add_bg = Color::Rgb(18, 50, 45);
-
-    if col.trim().is_empty() {
-        return vec![Span::raw(col.to_string())];
-    }
-    if col.contains('⋯') {
-        return vec![Span::styled(
-            col.to_string(),
-            Style::default().fg(theme.dim),
-        )];
-    }
-
-    let trimmed = col.trim_start();
-    let first_word = trimmed.split_whitespace().next().unwrap_or("");
-    if first_word.chars().all(|c| c.is_ascii_digit()) && !first_word.is_empty() {
-        let num = first_word;
-        let after_num = &trimmed[first_word.len()..];
-
-        if let Some(content) = after_num.strip_prefix(" - ") {
-            let bg = diff_remove_bg;
-            return vec![
-                Span::styled(format!("{num:>4} "), Style::default().fg(theme.dim).bg(bg)),
-                Span::styled(
-                    "- ",
-                    Style::default()
-                        .fg(theme.error)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
-            ];
-        } else if let Some(content) = after_num.strip_prefix(" + ") {
-            let bg = diff_add_bg;
-            return vec![
-                Span::styled(format!("{num:>4} "), Style::default().fg(theme.dim).bg(bg)),
-                Span::styled(
-                    "+ ",
-                    Style::default()
-                        .fg(theme.success)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
-            ];
-        } else if let Some(content) = after_num
-            .strip_prefix("   ")
-            .or_else(|| after_num.strip_prefix("  "))
-        {
-            return vec![
-                Span::styled(format!("{num:>4} "), Style::default().fg(theme.dim)),
-                Span::raw("  "),
-                Span::styled(content.to_string(), Style::default().fg(theme.ink)),
-            ];
-        }
-    } else if let Some(content) = trimmed.strip_prefix("- ") {
-        let bg = diff_remove_bg;
-        return vec![
-            Span::styled("     ", Style::default().bg(bg)),
-            Span::styled(
-                "- ",
-                Style::default()
-                    .fg(theme.error)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
-        ];
-    } else if let Some(content) = trimmed.strip_prefix("+ ") {
-        let bg = diff_add_bg;
-        return vec![
-            Span::styled("     ", Style::default().bg(bg)),
-            Span::styled(
-                "+ ",
-                Style::default()
-                    .fg(theme.success)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(content.to_string(), Style::default().fg(theme.ink).bg(bg)),
-        ];
-    }
-
-    vec![Span::styled(
-        col.to_string(),
-        Style::default().fg(theme.ink),
-    )]
-}
-
 pub fn format_transcript_lines(
     transcript: &str,
     theme: &Theme,
@@ -1501,10 +1393,6 @@ pub fn format_transcript_lines_with_width(
         .unwrap_or_else(|| transcript_width.max(20));
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(raw_lines.len());
     let mut in_code_block = false;
-    let mut in_thought = false;
-    let mut in_box = false;
-    let mut is_output_box = false;
-    let mut in_shell_output = false;
     let mut compaction_marker_seen = false;
     let mut orphan_fence = false;
     for (i, line) in raw_lines.iter().enumerate() {
@@ -1512,10 +1400,6 @@ pub fn format_transcript_lines_with_width(
             compaction_marker_seen = true;
             orphan_fence = false;
             in_code_block = false;
-            in_thought = false;
-            in_box = false;
-            is_output_box = false;
-            in_shell_output = false;
             lines.push(Line::from(Span::styled(
                 (*line).to_string(),
                 Style::default().fg(theme.dim),
@@ -1564,8 +1448,6 @@ pub fn format_transcript_lines_with_width(
             continue;
         }
         if line.trim().is_empty() {
-            in_thought = false;
-            in_shell_output = false;
             let is_last_empty = lines
                 .last()
                 .map(|l| {
@@ -1578,8 +1460,6 @@ pub fn format_transcript_lines_with_width(
             continue;
         }
         if let Some(prompt) = line.strip_prefix("> ") {
-            in_thought = false;
-            in_box = false;
             let content_line = Line::from(vec![
                 Span::styled(
                     "▌ ",
@@ -1598,8 +1478,6 @@ pub fn format_transcript_lines_with_width(
             .strip_prefix("+ Thought for ")
             .or_else(|| line.trim_start().strip_prefix("+ Thought for "))
         {
-            in_thought = true;
-            in_box = false;
             let spans = vec![Span::styled(
                 format!("+ Thought for {rest}"),
                 Style::default().fg(theme.amber),
@@ -1609,8 +1487,6 @@ pub fn format_transcript_lines_with_width(
             .strip_prefix("- Thought for ")
             .or_else(|| line.trim_start().strip_prefix("- Thought for "))
         {
-            in_thought = false;
-            in_box = false;
             let spans = vec![Span::styled(
                 format!("- Thought for {rest}"),
                 Style::default().fg(theme.amber),
@@ -1622,622 +1498,17 @@ pub fn format_transcript_lines_with_width(
             .or_else(|| line.trim_start().strip_prefix("Thought for "))
             .or_else(|| line.trim_start().strip_prefix("💭 Thought for "))
         {
-            in_thought = true;
-            in_box = false;
             let spans = vec![Span::styled(
                 format!("Thought for {rest}"),
                 Style::default().fg(theme.amber),
             )];
             lines.push(Line::from(spans));
         } else if let Some(rest) = line.strip_prefix("💭 ") {
-            in_thought = true;
-            in_box = false;
             let spans = vec![Span::styled(
                 rest.to_string(),
                 Style::default().fg(theme.amber),
             )];
             lines.push(Line::from(spans));
-        } else if line.trim_start().starts_with("┌──") {
-            in_box = true;
-            in_thought = false;
-            let trimmed = line.trim_start();
-            let indent = &line[..line.len() - trimmed.len()];
-            let after_prefix = trimmed.strip_prefix("┌── ").unwrap_or(trimmed);
-            let mut spans = vec![Span::styled(
-                format!("{indent}┌── "),
-                Style::default().fg(theme.dim),
-            )];
-            if let Some((title, border_tail)) = after_prefix.split_once(' ') {
-                is_output_box = title == "Output";
-                spans.push(Span::styled(
-                    title.to_string(),
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    format!(" {border_tail}"),
-                    Style::default().fg(theme.dim),
-                ));
-            } else {
-                is_output_box = after_prefix == "Output";
-                spans.push(Span::styled(
-                    after_prefix.to_string(),
-                    Style::default().fg(theme.dim),
-                ));
-            }
-            lines.push(Line::from(spans));
-        } else if line.trim_start().starts_with("└───") {
-            in_box = false;
-            is_output_box = false;
-            let trimmed = line.trim_start();
-            let indent = &line[..line.len() - trimmed.len()];
-            lines.push(Line::from(vec![Span::styled(
-                format!("{indent}{trimmed}"),
-                Style::default().fg(theme.dim),
-            )]));
-        } else if let Some(cmd_line) = line.strip_prefix("$ ") {
-            in_thought = false;
-            in_box = false;
-            in_shell_output = true;
-            let clean_cmd = if let Some((cmd, _)) = cmd_line.rsplit_once(" (exit ") {
-                cmd
-            } else {
-                cmd_line
-            };
-            let spans = vec![
-                Span::styled(
-                    "$ ",
-                    Style::default()
-                        .fg(theme.amber)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    clean_cmd.to_string(),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ),
-            ];
-            lines.push(Line::from(spans).style(Style::default().bg(theme.bg_element)));
-        } else if let Some(rest) = line
-            .strip_prefix("⬢ Ran ")
-            .or_else(|| line.strip_prefix("• Ran "))
-        {
-            in_thought = false;
-            in_box = false;
-            in_shell_output = true;
-            let clean_cmd = if let Some((cmd, _)) = rest.rsplit_once(" (exit ") {
-                cmd.strip_prefix("$ ").unwrap_or(cmd)
-            } else {
-                rest.strip_prefix("$ ").unwrap_or(rest)
-            };
-            let spans = vec![
-                Span::styled(
-                    "$ ",
-                    Style::default()
-                        .fg(theme.amber)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    clean_cmd.to_string(),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ),
-            ];
-            lines.push(Line::from(spans).style(Style::default().bg(theme.bg_element)));
-        } else if line.starts_with("⬢ ")
-            || line.starts_with("• Edit")
-            || line.starts_with("• Write")
-            || line.starts_with("• Patch")
-            || line.starts_with("• Applied patch")
-            || (line.starts_with("• ")
-                && parse_diff_badge(line.strip_prefix("• ").unwrap_or("")).is_some())
-        {
-            in_thought = false;
-            in_box = false;
-            let (bullet, rest) = if let Some(r) = line.strip_prefix("⬢ ") {
-                ("⬢ ", r)
-            } else {
-                ("• ", line.strip_prefix("• ").unwrap_or(""))
-            };
-            let is_failed = {
-                let mut failed = false;
-                if rest.contains("(exit ") && !rest.contains("(exit 0)") {
-                    failed = true;
-                } else {
-                    for next_line in raw_lines.iter().skip(i + 1).take(25) {
-                        let trimmed = next_line.trim_start();
-                        if next_line.starts_with("⬢ ")
-                            || next_line.starts_with("• ")
-                            || next_line.is_empty()
-                        {
-                            break;
-                        }
-                        if trimmed.starts_with("└ failed:") || trimmed.starts_with("failed:") {
-                            failed = true;
-                            break;
-                        }
-                    }
-                }
-                failed
-            };
-
-            let marker_color = if is_failed {
-                theme.error
-            } else if bullet == "• " {
-                theme.teal
-            } else {
-                theme.success
-            };
-            let mut spans = vec![Span::styled(
-                bullet.to_string(),
-                Style::default()
-                    .fg(marker_color)
-                    .add_modifier(Modifier::BOLD),
-            )];
-            let rest_trimmed = rest.trim();
-            if let Some((before, add_part, rem_part)) = parse_diff_badge(rest_trimmed) {
-                if let Some(target) = before.strip_prefix("Applied patch ") {
-                    spans.push(Span::styled(
-                        "Applied patch".to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::raw(" "));
-                    spans.push(Span::styled(
-                        target.to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                    ));
-                } else if let Some((verb, target)) = before.split_once(' ') {
-                    spans.push(Span::styled(
-                        verb.to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::raw(" "));
-                    spans.push(Span::styled(
-                        target.to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                    ));
-                } else {
-                    spans.push(Span::styled(
-                        before.to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                    ));
-                }
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled("(", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(
-                    format!("+{add_part}"),
-                    Style::default()
-                        .fg(theme.success)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    format!("-{rem_part}"),
-                    Style::default()
-                        .fg(theme.error)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(")", Style::default().fg(theme.dim)));
-            } else if let Some(target) = rest_trimmed.strip_prefix("Updated Plan") {
-                spans.push(Span::styled(
-                    "Updated Plan".to_string(),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ));
-                let target_trimmed = target.trim();
-                if !target_trimmed.is_empty() {
-                    spans.push(Span::raw(" "));
-                    spans.push(Span::styled(
-                        target_trimmed.to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                    ));
-                }
-            } else if let Some((verb, target)) = rest_trimmed.split_once(' ') {
-                if verb == "Ran" {
-                    spans.push(Span::styled(
-                        "$ ",
-                        Style::default()
-                            .fg(if is_failed { theme.error } else { theme.amber })
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    let clean_cmd = if let Some((cmd, _)) = target.rsplit_once(" (exit ") {
-                        cmd.strip_prefix("$ ").unwrap_or(cmd)
-                    } else {
-                        target.strip_prefix("$ ").unwrap_or(target)
-                    };
-                    spans.push(Span::styled(
-                        clean_cmd.to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                    ));
-                } else {
-                    spans.push(Span::styled(
-                        verb.to_string(),
-                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::raw(" "));
-                    if let Some((cmd, exit_part)) = target.rsplit_once(" (exit ") {
-                        let code_str = exit_part.strip_suffix(')').unwrap_or(exit_part);
-                        spans.push(Span::styled(
-                            cmd.to_string(),
-                            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                        ));
-                        spans.push(Span::raw(" "));
-                        spans.push(Span::styled("(", Style::default().fg(theme.dim)));
-                        let exit_color = if code_str == "0" {
-                            theme.success
-                        } else {
-                            theme.error
-                        };
-                        spans.push(Span::styled(
-                            format!("exit {code_str}"),
-                            Style::default().fg(exit_color).add_modifier(Modifier::BOLD),
-                        ));
-                        spans.push(Span::styled(")", Style::default().fg(theme.dim)));
-                    } else if let Some((file, lines_part)) = target.rsplit_once(" (")
-                        && lines_part.ends_with(" lines)")
-                    {
-                        spans.push(Span::styled(
-                            file.to_string(),
-                            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                        ));
-                        spans.push(Span::raw(" "));
-                        spans.push(Span::styled("(", Style::default().fg(theme.dim)));
-                        let count_str = lines_part.strip_suffix(')').unwrap_or(lines_part);
-                        spans.push(Span::styled(
-                            count_str.to_string(),
-                            Style::default().fg(theme.dim),
-                        ));
-                        spans.push(Span::styled(")", Style::default().fg(theme.dim)));
-                    } else {
-                        spans.push(Span::styled(
-                            target.to_string(),
-                            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                        ));
-                    }
-                }
-            } else {
-                spans.push(Span::styled(
-                    rest_trimmed.to_string(),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ));
-            }
-            lines.push(Line::from(spans));
-        } else if in_shell_output {
-            let cleaned = if let Some(stripped) = line.trim_start().strip_prefix("│ ") {
-                stripped
-            } else if line.trim_start() == "│" {
-                ""
-            } else {
-                line
-            };
-            let text_style =
-                if cleaned.trim_start().starts_with("... (") && cleaned.trim_end().ends_with(')') {
-                    Style::default()
-                        .fg(theme.dim)
-                        .add_modifier(Modifier::ITALIC)
-                } else {
-                    Style::default().fg(theme.quiet)
-                };
-            lines.push(
-                Line::from(vec![Span::styled(cleaned.to_string(), text_style)])
-                    .style(Style::default().bg(theme.bg_element)),
-            );
-        } else if let Some(rest) = line.trim_start().strip_prefix("└ ") {
-            let mut spans = vec![Span::styled("  └ ", Style::default().fg(theme.dim))];
-            let rest_trimmed = rest.trim();
-            if let Some(err_detail) = rest_trimmed.strip_prefix("failed:") {
-                spans.push(Span::styled(
-                    "failed: ",
-                    Style::default()
-                        .fg(theme.error)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    err_detail.trim().to_string(),
-                    Style::default().fg(theme.error),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    rest_trimmed.to_string(),
-                    Style::default().fg(theme.quiet),
-                ));
-            }
-            lines.push(Line::from(spans));
-        } else if line.trim_start().starts_with("│ ") || line.trim_start() == "│" {
-            if in_thought {
-                continue;
-            }
-            let trimmed = line.trim_start();
-            let indent_len = line.len().saturating_sub(trimmed.len());
-            let indent = &line[..indent_len];
-            let rest = if trimmed == "│" {
-                ""
-            } else {
-                trimmed.strip_prefix("│ ").unwrap_or("")
-            };
-            let mut spans = vec![Span::styled(
-                format!("{indent}│ "),
-                Style::default().fg(theme.dim),
-            )];
-            if in_box {
-                if let Some(url_part) = rest
-                    .strip_prefix("   URL: ")
-                    .or_else(|| rest.strip_prefix("URL: "))
-                {
-                    spans.push(Span::styled("   URL: ", Style::default().fg(theme.dim)));
-                    spans.push(Span::styled(
-                        url_part.to_string(),
-                        Style::default()
-                            .fg(theme.teal)
-                            .add_modifier(Modifier::UNDERLINED),
-                    ));
-                } else if let Some((num_str, title_str)) = split_numbered_result(rest) {
-                    spans.push(Span::styled(
-                        format!("{num_str}. "),
-                        Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::styled(
-                        title_str.to_string(),
-                        Style::default().fg(theme.ink),
-                    ));
-                } else if is_output_box {
-                    let text_style = if rest.starts_with("... (") && rest.ends_with(')') {
-                        Style::default()
-                            .fg(theme.dim)
-                            .add_modifier(Modifier::ITALIC)
-                    } else {
-                        Style::default().fg(theme.quiet)
-                    };
-                    spans.push(Span::styled(rest.to_string(), text_style));
-                } else {
-                    spans.push(Span::styled(
-                        rest.to_string(),
-                        Style::default().fg(theme.ink),
-                    ));
-                }
-            } else if let Some(item) = rest.strip_prefix("✔ ") {
-                spans.push(Span::styled("✔ ", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.dim),
-                ));
-            } else if let Some(item) = rest.strip_prefix("[✔] ") {
-                spans.push(Span::styled("[✔] ", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.dim),
-                ));
-            } else if let Some(item) = rest.strip_prefix("[✔]") {
-                spans.push(Span::styled("[✔]", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.dim),
-                ));
-            } else if let Some(item) = rest.strip_prefix("• ") {
-                spans.push(Span::styled(
-                    "• ",
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-            } else if let Some(item) = rest.strip_prefix("[•] ") {
-                spans.push(Span::styled(
-                    "[•] ",
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-            } else if let Some(item) = rest.strip_prefix("[•]") {
-                spans.push(Span::styled(
-                    "[•]",
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-            } else if let Some(item) = rest.strip_prefix("□ ") {
-                spans.push(Span::styled("□ ", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.quiet),
-                ));
-            } else if let Some(item) = rest.strip_prefix("[ ] ") {
-                spans.push(Span::styled("[ ] ", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.quiet),
-                ));
-            } else if let Some(item) = rest.strip_prefix("[ ]") {
-                spans.push(Span::styled("[ ]", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.quiet),
-                ));
-            } else if rest.contains("✔ ") || rest.contains("[✔]") {
-                spans.push(Span::styled(
-                    rest.to_string(),
-                    Style::default().fg(theme.dim),
-                ));
-            } else if rest.contains("• ") || rest.contains("[•]") {
-                spans.push(Span::styled(
-                    rest.to_string(),
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    rest.to_string(),
-                    Style::default().fg(theme.quiet),
-                ));
-            }
-            lines.push(Line::from(spans));
-        } else if line.trim_start().starts_with("✔ ")
-            || line.trim_start().starts_with("[✔]")
-            || line.trim_start().starts_with("[•]")
-            || line.trim_start().starts_with("□ ")
-            || line.trim_start().starts_with("[ ]")
-        {
-            let trimmed = line.trim_start();
-            let indent_len = line.len() - trimmed.len();
-            let indent = &line[..indent_len];
-            let mut spans = if indent.is_empty() {
-                Vec::new()
-            } else {
-                vec![Span::raw(indent.to_string())]
-            };
-            if let Some(item) = trimmed.strip_prefix("✔ ") {
-                spans.push(Span::styled("✔ ", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.dim),
-                ));
-            } else if let Some(item) = trimmed.strip_prefix("[✔] ") {
-                spans.push(Span::styled("[✔] ", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.dim),
-                ));
-            } else if let Some(item) = trimmed.strip_prefix("[✔]") {
-                spans.push(Span::styled("[✔]", Style::default().fg(theme.dim)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.dim),
-                ));
-            } else if let Some(item) = trimmed.strip_prefix("[•] ") {
-                spans.push(Span::styled(
-                    "[•] ",
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-            } else if let Some(item) = trimmed.strip_prefix("[•]") {
-                spans.push(Span::styled(
-                    "[•]",
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
-                ));
-            } else if let Some(item) = trimmed.strip_prefix("□ ") {
-                spans.push(Span::styled("□ ", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.quiet),
-                ));
-            } else if let Some(item) = trimmed.strip_prefix("[ ] ") {
-                spans.push(Span::styled("[ ] ", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.quiet),
-                ));
-            } else if let Some(item) = trimmed.strip_prefix("[ ]") {
-                spans.push(Span::styled("[ ]", Style::default().fg(theme.quiet)));
-                spans.push(Span::styled(
-                    item.to_string(),
-                    Style::default().fg(theme.quiet),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    trimmed.to_string(),
-                    Style::default().fg(theme.quiet),
-                ));
-            }
-            lines.push(Line::from(spans));
-        } else if let Some((indent, left_col, right_col)) = parse_side_by_side_diff_line(line) {
-            let mut spans = vec![Span::raw(indent.to_string())];
-            spans.extend(render_side_by_side_col(left_col, theme));
-            spans.push(Span::styled(" │ ", Style::default().fg(theme.dim)));
-            spans.extend(render_side_by_side_col(right_col, theme));
-            lines.push(Line::from(spans));
-        } else if (line.starts_with(' ') || line.starts_with('\t'))
-            && (line.trim_start().starts_with("- ") || line.trim_start() == "-")
-        {
-            let trimmed = line.trim_start();
-            let indent = &line[..line.len() - trimmed.len()];
-            let removed_text = trimmed.strip_prefix("- ").unwrap_or("");
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{indent}- "),
-                    Style::default()
-                        .fg(theme.error)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(removed_text.to_string(), Style::default().fg(theme.error)),
-            ]));
-        } else if (line.starts_with(' ') || line.starts_with('\t'))
-            && (line.trim_start().starts_with("+ ") || line.trim_start() == "+")
-        {
-            let trimmed = line.trim_start();
-            let indent = &line[..line.len() - trimmed.len()];
-            let added_text = trimmed.strip_prefix("+ ").unwrap_or("");
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{indent}+ "),
-                    Style::default()
-                        .fg(theme.success)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(added_text.to_string(), Style::default().fg(theme.success)),
-            ]));
-        } else if (line.starts_with(' ') || line.starts_with('\t'))
-            && line.trim_start().starts_with('⋯')
-        {
-            lines.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(theme.dim),
-            )));
-        } else if let Some(rest) = line.strip_prefix("⬡ ") {
-            let spans = vec![
-                Span::styled(
-                    "⬡ ",
-                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    rest.to_string(),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ),
-            ];
-            lines.push(Line::from(spans));
-        } else if let Some(rest) = line.strip_prefix("⚙ [") {
-            let inner = rest.strip_suffix(']').unwrap_or(rest);
-            let mut spans = vec![Span::styled(
-                "⚙ ",
-                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-            )];
-            if let Some((name, args)) = inner.split_once(':') {
-                spans.push(Span::styled(
-                    name.trim().to_string(),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    args.trim().to_string(),
-                    Style::default().fg(theme.ink),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    inner.trim().to_string(),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ));
-            }
-            lines.push(Line::from(spans));
-        } else if let Some(rest) = line.strip_prefix("✓ ") {
-            lines.push(Line::from(vec![
-                Span::styled("  └ ", Style::default().fg(theme.dim)),
-                Span::styled(rest.to_string(), Style::default().fg(theme.quiet)),
-            ]));
-        } else if let Some(rest) = line.strip_prefix("✗ ") {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "  └ failed: ",
-                    Style::default()
-                        .fg(theme.error)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(rest.to_string(), Style::default().fg(theme.error)),
-            ]));
         } else if line.starts_with("### ") {
             lines.push(Line::from(Span::styled(
                 line.to_string(),
@@ -2522,87 +1793,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_transcript_crabcode_success_and_failure() {
-        let theme = ThemeKind::ClawcodeDark.to_theme();
-        let mode_color = Color::Cyan;
-
-        let transcript = "⬢ read_file src/main.rs\n└ done";
-        let lines = format_transcript_lines(transcript, &theme, mode_color);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].spans[0].content, "⬢ ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme.success));
-        assert_eq!(lines[0].spans[1].content, "read_file");
-        assert_eq!(lines[0].spans[3].content, "src/main.rs");
-
-        let transcript = "⬢ edit_file src/main.rs\n└ failed: file not found";
-        let lines = format_transcript_lines(transcript, &theme, mode_color);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].spans[0].content, "⬢ ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme.error));
-    }
-
-    #[test]
-    fn test_format_transcript_branch_lines() {
-        let theme = ThemeKind::ClawcodeDark.to_theme();
-        let mode_color = Color::Cyan;
-
-        let lines = format_transcript_lines("  └ completed successfully", &theme, mode_color);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content, "  └ ");
-        assert_eq!(lines[0].spans[1].content, "completed successfully");
-
-        let lines = format_transcript_lines("  └ failed: permission denied", &theme, mode_color);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content, "  └ ");
-        assert_eq!(lines[0].spans[1].content, "failed: ");
-        assert_eq!(lines[0].spans[2].content, "permission denied");
-    }
-
-    #[test]
-    fn test_format_transcript_active_tool() {
-        let theme = ThemeKind::ClawcodeDark.to_theme();
-        let mode_color = Color::Cyan;
-        let lines = format_transcript_lines("⬡ Reading src/tui/render.rs...", &theme, mode_color);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content, "⬡ ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(mode_color));
-        assert_eq!(lines[0].spans[1].content, "Reading src/tui/render.rs...");
-    }
-
-    #[test]
-    fn test_format_transcript_historical_tool() {
-        let theme = ThemeKind::ClawcodeDark.to_theme();
-        let mode_color = Color::Cyan;
-
-        let lines = format_transcript_lines("⚙ [bash: cargo test]", &theme, mode_color);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content, "⚙ ");
-        assert_eq!(lines[0].spans[1].content, "bash");
-        assert_eq!(lines[0].spans[3].content, "cargo test");
-
-        let lines = format_transcript_lines("⚙ [cargo_check]", &theme, mode_color);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content, "⚙ ");
-        assert_eq!(lines[0].spans[1].content, "cargo_check");
-    }
-
-    #[test]
-    fn test_format_transcript_success_and_failure_markers() {
-        let theme = ThemeKind::ClawcodeDark.to_theme();
-        let mode_color = Color::Cyan;
-
-        let lines = format_transcript_lines("✓ Build succeeded", &theme, mode_color);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content, "  └ ");
-        assert_eq!(lines[0].spans[1].content, "Build succeeded");
-
-        let lines = format_transcript_lines("✗ Test failed", &theme, mode_color);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans[0].content, "  └ failed: ");
-        assert_eq!(lines[0].spans[1].content, "Test failed");
-    }
-
-    #[test]
     fn test_format_transcript_plain_text() {
         let theme = ThemeKind::ClawcodeDark.to_theme();
         let mode_color = Color::Cyan;
@@ -2614,124 +1804,6 @@ mod tests {
             "Plain response text from assistant"
         );
         assert_eq!(lines[0].spans[0].style.fg, Some(theme.ink));
-    }
-
-    #[test]
-    fn test_format_transcript_diff_lines() {
-        let theme = ThemeKind::ClawcodeDark.to_theme();
-        let mode_color = Color::Cyan;
-
-        let transcript = "    - old removed line\n    + new added line";
-        let lines = format_transcript_lines(transcript, &theme, mode_color);
-        assert_eq!(lines.len(), 2);
-
-        assert_eq!(lines[0].spans[0].content, "    - ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme.error));
-        assert_eq!(lines[0].spans[1].content, "old removed line");
-        assert_eq!(lines[0].spans[1].style.fg, Some(theme.error));
-
-        assert_eq!(lines[1].spans[0].content, "    + ");
-        assert_eq!(lines[1].spans[0].style.fg, Some(theme.success));
-        assert_eq!(lines[1].spans[1].content, "new added line");
-        assert_eq!(lines[1].spans[1].style.fg, Some(theme.success));
-    }
-
-    #[test]
-    fn test_format_transcript_edit_diff_badge() {
-        let theme = ThemeKind::ClawcodeDark.to_theme();
-        let mode_color = Color::Cyan;
-
-        let transcript = "⬢ Edit src/main.rs (+3 -1)\n    - old\n    + new\n  └ succeeded";
-        let lines = format_transcript_lines(transcript, &theme, mode_color);
-        assert_eq!(lines.len(), 4);
-
-        assert_eq!(lines[0].spans[0].content, "⬢ ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme.success));
-
-        let add_span = lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content == "+3")
-            .expect("+3 badge span");
-        assert_eq!(add_span.style.fg, Some(theme.success));
-
-        let rem_span = lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content == "-1")
-            .expect("-1 badge span");
-        assert_eq!(rem_span.style.fg, Some(theme.error));
-
-        assert_eq!(lines[1].spans[0].style.fg, Some(theme.error));
-        assert_eq!(lines[2].spans[0].style.fg, Some(theme.success));
-        assert_eq!(lines[3].spans[0].content, "  └ ");
-    }
-
-    #[test]
-    fn test_format_transcript_opencode_side_by_side_diff() {
-        let theme = ThemeKind::ClawcodeDark.to_theme();
-        let mode_color = Color::Cyan;
-
-        let transcript = concat!(
-            "• Edit database/migrations/2025_12_11_141134_add_date_of_birth_to_users_table.php (+1 -1)\n",
-            "      11   */                                    │   11   */                                   \n",
-            "      15 -         //                            │   15 +         $table->date('dob');         \n"
-        );
-
-        let lines = format_transcript_lines(transcript, &theme, mode_color);
-        assert_eq!(lines.len(), 3);
-
-        // Line 0: Header with bullet • in theme.teal
-        assert_eq!(lines[0].spans[0].content, "• ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme.teal));
-        assert_eq!(lines[0].spans[1].content, "Edit");
-        assert_eq!(
-            lines[0].spans[3].content,
-            "database/migrations/2025_12_11_141134_add_date_of_birth_to_users_table.php"
-        );
-        let add_span = lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content == "+1")
-            .expect("+1 badge");
-        assert_eq!(add_span.style.fg, Some(theme.success));
-        let rem_span = lines[0]
-            .spans
-            .iter()
-            .find(|s| s.content == "-1")
-            .expect("-1 badge");
-        assert_eq!(rem_span.style.fg, Some(theme.error));
-
-        // Line 1: Context row with dim line numbers and theme.dim separator
-        let sep_span = lines[1]
-            .spans
-            .iter()
-            .find(|s| s.content == " │ ")
-            .expect("separator span");
-        assert_eq!(sep_span.style.fg, Some(theme.dim));
-        assert_eq!(lines[1].spans[1].style.fg, Some(theme.dim)); // num span
-        assert_eq!(lines[1].spans[1].style.bg, None); // normal bg
-
-        // Line 2: Side-by-side diff with red bg on left and green/teal bg on right
-        let diff_remove_bg = Color::Rgb(55, 18, 25);
-        let diff_add_bg = Color::Rgb(18, 50, 45);
-
-        // Left col has line num, minus sign with theme.error, and diff_remove_bg
-        assert_eq!(lines[2].spans[1].style.bg, Some(diff_remove_bg));
-        assert_eq!(lines[2].spans[2].content, "- ");
-        assert_eq!(lines[2].spans[2].style.fg, Some(theme.error));
-        assert_eq!(lines[2].spans[2].style.bg, Some(diff_remove_bg));
-        assert_eq!(lines[2].spans[3].style.bg, Some(diff_remove_bg));
-
-        // Separator
-        assert_eq!(lines[2].spans[4].content, " │ ");
-
-        // Right col has line num, plus sign with theme.success, and diff_add_bg
-        assert_eq!(lines[2].spans[5].style.bg, Some(diff_add_bg));
-        assert_eq!(lines[2].spans[6].content, "+ ");
-        assert_eq!(lines[2].spans[6].style.fg, Some(theme.success));
-        assert_eq!(lines[2].spans[6].style.bg, Some(diff_add_bg));
-        assert_eq!(lines[2].spans[7].style.bg, Some(diff_add_bg));
     }
 
     #[test]
@@ -2820,107 +1892,64 @@ mod tests {
     }
 
     #[test]
-    fn test_format_transcript_visual_checklist_plan() {
+    fn test_append_stream_parts_user_and_tools() {
+        let mut app = App::default();
         let theme = ThemeKind::ClawcodeDark.to_theme();
         let mode_color = Color::Cyan;
-
-        let transcript = "\
-⬢ Updated Plan
-  │ ✔ 1. Selesai langkah pertama
-  │ • 2. Sedang menjalankan langkah kedua
-  │ □ 3. Langkah ketiga pending
-  └ Plan updated: 3 steps";
-
-        let lines = format_transcript_lines(transcript, &theme, mode_color);
-        assert_eq!(lines.len(), 5);
-
-        // Header: ⬢ Updated Plan
-        assert_eq!(lines[0].spans[0].content, "⬢ ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme.success));
-        assert_eq!(lines[0].spans[1].content, "Updated Plan");
-
-        // Line 1: completed item with ✔
-        assert_eq!(lines[1].spans[0].content, "  │ ");
-        assert_eq!(lines[1].spans[0].style.fg, Some(theme.dim));
-        assert_eq!(lines[1].spans[1].content, "✔ ");
-        assert_eq!(lines[1].spans[1].style.fg, Some(theme.dim));
-        assert_eq!(lines[1].spans[2].content, "1. Selesai langkah pertama");
-        assert_eq!(lines[1].spans[2].style.fg, Some(theme.dim));
-
-        // Line 2: in_progress item with •
-        assert_eq!(lines[2].spans[0].content, "  │ ");
-        assert_eq!(lines[2].spans[0].style.fg, Some(theme.dim));
-        assert_eq!(lines[2].spans[1].content, "• ");
-        assert_eq!(lines[2].spans[1].style.fg, Some(theme.teal));
+        app.set_tool_rows_for_test(vec![ToolRow {
+            call_id: "tool-1".to_string(),
+            name: "bash".to_string(),
+            desc: "ls -la".to_string(),
+            arguments: serde_json::json!({ "command": "ls -la" }).to_string(),
+            output: "total 0\n-rw-r--r-- 1 user 0 test.txt".to_string(),
+            state: ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: std::time::Instant::now(),
+            expandable: false,
+        }]);
+        let parts = vec![
+            StreamPart::User("Check directory".to_string()),
+            StreamPart::Tool("tool-1".to_string()),
+            StreamPart::Text("Directory checked.".to_string()),
+        ];
+        let mut lines = Vec::new();
+        let mut tool_lines = Vec::new();
+        append_stream_parts(
+            &mut lines,
+            &parts,
+            &app,
+            &theme,
+            mode_color,
+            80,
+            &mut tool_lines,
+        );
         assert!(
-            lines[2].spans[1]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
+            lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content == "▌ "))
         );
-        assert_eq!(
-            lines[2].spans[2].content,
-            "2. Sedang menjalankan langkah kedua"
-        );
-        assert_eq!(lines[2].spans[2].style.fg, Some(theme.teal));
         assert!(
-            lines[2].spans[2]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
+            lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content == "Check directory"))
         );
-
-        // Line 3: pending item with □
-        assert_eq!(lines[3].spans[0].content, "  │ ");
-        assert_eq!(lines[3].spans[0].style.fg, Some(theme.dim));
-        assert_eq!(lines[3].spans[1].content, "□ ");
-        assert_eq!(lines[3].spans[1].style.fg, Some(theme.quiet));
-        assert_eq!(lines[3].spans[2].content, "3. Langkah ketiga pending");
-        assert_eq!(lines[3].spans[2].style.fg, Some(theme.quiet));
-
-        // Line 4: branch footer
-        assert_eq!(lines[4].spans[0].content, "  └ ");
-        assert_eq!(lines[4].spans[0].style.fg, Some(theme.dim));
-        assert_eq!(lines[4].spans[1].content, "Plan updated: 3 steps");
-        assert_eq!(lines[4].spans[1].style.fg, Some(theme.quiet));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content.contains("ls -la")))
+        );
+        assert!(lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains("Directory checked."))
+        }));
     }
-
     #[test]
     fn truncate_tool_text_respects_terminal_cells() {
         let value = truncate_tool_text("界界界abc", 5);
         assert!(text_cell_width(&value) <= 5);
         assert!(value.ends_with('…'));
-    }
-
-    #[test]
-    fn test_format_transcript_checklist_bracket_markers() {
-        let theme = ThemeKind::ClawcodeDark.to_theme();
-        let mode_color = Color::Cyan;
-
-        let transcript = "  │ [✔] 1. Task A\n  │ [•] 2. Task B\n  │ [ ] 3. Task C";
-
-        let lines = format_transcript_lines(transcript, &theme, mode_color);
-        assert_eq!(lines.len(), 3);
-
-        assert_eq!(lines[0].spans[0].content, "  │ ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(theme.dim));
-        assert_eq!(lines[0].spans[1].content, "[✔] ");
-        assert_eq!(lines[0].spans[1].style.fg, Some(theme.dim));
-
-        assert_eq!(lines[1].spans[0].content, "  │ ");
-        assert_eq!(lines[1].spans[0].style.fg, Some(theme.dim));
-        assert_eq!(lines[1].spans[1].content, "[•] ");
-        assert_eq!(lines[1].spans[1].style.fg, Some(theme.teal));
-        assert!(
-            lines[1].spans[1]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
-        assert_eq!(lines[2].spans[0].content, "  │ ");
-        assert_eq!(lines[2].spans[0].style.fg, Some(theme.dim));
-        assert_eq!(lines[2].spans[1].content, "[ ] ");
-        assert_eq!(lines[2].spans[1].style.fg, Some(theme.quiet));
     }
 
     #[test]
