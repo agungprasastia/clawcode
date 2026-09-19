@@ -917,38 +917,20 @@ fn render_generic_tool_card(
     width: u16,
     tool_row_lines: &mut Vec<(String, usize)>,
 ) {
-    let card_width = (width as usize).saturating_sub(2).max(20);
-    if !lines.is_empty()
-        && !lines
-            .last()
-            .map(|l| l.spans.is_empty() || (l.spans.len() == 1 && l.spans[0].content.is_empty()))
-            .unwrap_or(false)
-    {
-        lines.push(Line::from(""));
-    }
-
-    lines.push(empty_card_line(card_width, theme.bg_element));
-    tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
-
     lines.push(compact_tool_line(row, app, theme, mode_color, width));
     tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
 
-    append_specialized_detail(lines, row, theme, card_width, tool_row_lines);
-
-    lines.push(empty_card_line(card_width, theme.bg_element));
-    tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
-
-    lines.push(Line::from(""));
+    append_specialized_detail(lines, row, theme, tool_row_lines);
 }
+
 fn append_specialized_detail(
     lines: &mut Vec<Line<'static>>,
     row: &ToolRow,
     theme: &Theme,
-    card_width: usize,
     tool_row_lines: &mut Vec<(String, usize)>,
 ) {
     let terminal = row.state == ToolRowState::Completed || row.state == ToolRowState::Failed;
-    if !terminal && !matches!(row.name.as_str(), "task" | "execute") {
+    if !terminal && !matches!(row.name.as_str(), "task" | "execute" | "update_plan") {
         return;
     }
     let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments) else {
@@ -972,13 +954,10 @@ fn append_specialized_detail(
                 format!(": {description}")
             };
             let line = Line::from(vec![
-                Span::raw("      "),
-                Span::styled(
-                    format!("↳ {agent}{suffix}"),
-                    Style::default().fg(theme.quiet),
-                ),
+                Span::styled("      ↳ ", Style::default().fg(theme.quiet)),
+                Span::styled(format!("{agent}{suffix}"), Style::default().fg(theme.quiet)),
             ]);
-            lines.push(pad_card_line(line, card_width, theme.bg_element));
+            lines.push(line);
             tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
             if let Some(session_id) = row
                 .metadata
@@ -987,13 +966,13 @@ fn append_specialized_detail(
                 .and_then(|value| value.as_str())
             {
                 let session_line = Line::from(vec![
-                    Span::raw("      "),
+                    Span::styled("      ↳ ", Style::default().fg(theme.quiet)),
                     Span::styled(
-                        format!("↳ child session {session_id}"),
+                        format!("child session {session_id}"),
                         Style::default().fg(theme.dim),
                     ),
                 ]);
-                lines.push(pad_card_line(session_line, card_width, theme.bg_element));
+                lines.push(session_line);
                 tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
             }
         }
@@ -1005,10 +984,10 @@ fn append_specialized_detail(
                     };
                     let Some(status) = call.get("status").and_then(|value| value.as_str()) else {
                         let line = Line::from(vec![
-                            Span::raw("      "),
+                            Span::styled("      ↳ ", Style::default().fg(theme.quiet)),
                             Span::styled(tool.to_string(), Style::default().fg(theme.quiet)),
                         ]);
-                        lines.push(pad_card_line(line, card_width, theme.bg_element));
+                        lines.push(line);
                         tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
                         continue;
                     };
@@ -1019,10 +998,10 @@ fn append_specialized_detail(
                         _ => ("·", theme.quiet),
                     };
                     let line = Line::from(vec![
-                        Span::raw("      "),
+                        Span::styled("      ↳ ", Style::default().fg(theme.quiet)),
                         Span::styled(format!("{marker} {tool}"), Style::default().fg(color)),
                     ]);
-                    lines.push(pad_card_line(line, card_width, theme.bg_element));
+                    lines.push(line);
                     tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
                 }
             }
@@ -1031,7 +1010,7 @@ fn append_specialized_detail(
             let Some(plan) = args.get("plan").and_then(|value| value.as_array()) else {
                 return;
             };
-            for (index, item) in plan.iter().enumerate() {
+            for item in plan.iter() {
                 let Some(step) = item
                     .get("step")
                     .or_else(|| item.get("content"))
@@ -1040,35 +1019,25 @@ fn append_specialized_detail(
                 else {
                     continue;
                 };
+                let status = item
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("pending");
+                let (status_icon, status_color) = match status {
+                    "completed" | "complete" | "done" => ("✔ ", theme.success),
+                    "in_progress" | "in-progress" | "running" => ("• ", theme.amber),
+                    _ => ("□ ", theme.dim),
+                };
                 let line = Line::from(vec![
                     Span::styled("      │ ", Style::default().fg(theme.dim)),
-                    Span::styled(
-                        format!("{}. {}", index + 1, step),
-                        Style::default().fg(theme.quiet),
-                    ),
+                    Span::styled(status_icon, Style::default().fg(status_color)),
+                    Span::styled(step.to_string(), Style::default().fg(theme.quiet)),
                 ]);
-                lines.push(pad_card_line(line, card_width, theme.bg_element));
+                lines.push(line);
                 tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
             }
         }
         _ => {}
-    }
-}
-
-fn tool_icon(name: &str) -> &'static str {
-    match name {
-        "read_file" | "read" => "→ ",
-        "write_file" | "write" => "← ",
-        "edit_file" | "edit" | "patch" | "apply_patch" => "• ",
-        "list_dir" => "☰ ",
-        "glob_search" | "glob" => "✱ ",
-        "grep_search" | "grep" => "✱ ",
-        "bash" | "sh" => "$ ",
-        "webfetch" | "fetch" => "% ",
-        "websearch" | "search" => "◈ ",
-        "update_plan" => "⬢ ",
-        "task" => "✓ ",
-        _ => "⚙ ",
     }
 }
 
@@ -1079,78 +1048,295 @@ fn compact_tool_line(
     mode_color: Color,
     width: u16,
 ) -> Line<'static> {
-    let is_bash = matches!(row.name.as_str(), "bash" | "sh");
-    let (marker, marker_color) = match row.state {
-        ToolRowState::Pending => {
-            if row.name == "task" {
-                ("│ ".to_string(), theme.dim)
-            } else {
-                (
-                    format!("{} ", app.wave_spinner().compact_frame()),
-                    theme.dim,
-                )
-            }
-        }
-        ToolRowState::Running => {
-            if row.name == "task" {
-                ("│ ".to_string(), mode_color)
-            } else {
-                (
-                    format!("{} ", app.wave_spinner().compact_frame()),
-                    mode_color,
-                )
-            }
-        }
-        ToolRowState::Completed => {
-            if is_bash {
-                ("$ ".to_string(), theme.amber)
-            } else {
-                (tool_icon(&row.name).to_string(), theme.success)
-            }
-        }
-        ToolRowState::Failed => {
-            let icon = match row.name.as_str() {
-                "task" => "× ",
-                _ => tool_icon(&row.name),
-            };
-            (icon.to_string(), theme.error)
-        }
-    };
-
-    let mut detail = tool_row_detail(row);
-    if row.state == ToolRowState::Failed {
-        let first = row.output.lines().next().unwrap_or("error").trim();
-        let err_msg = first
-            .strip_prefix(&format!("Error executing {}: ", row.name))
-            .unwrap_or(first);
-        if !err_msg.is_empty() {
-            detail.push_str(" · failed: ");
-            detail.push_str(err_msg);
-        }
-    }
-
-    let max_chars = width.saturating_sub(6).max(8) as usize;
-    let text_color = if row.state == ToolRowState::Failed {
-        theme.error
-    } else {
-        theme.ink
-    };
-
-    let card_width = (width as usize).saturating_sub(2).max(20);
-    let line = Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-            marker,
+    let marker = match row.state {
+        ToolRowState::Running => Span::styled(
+            format!("{} ", app.wave_spinner().compact_frame()),
+            Style::default().fg(mode_color),
+        ),
+        ToolRowState::Pending => Span::styled(
+            format!("{} ", app.wave_spinner().compact_frame()),
+            Style::default().fg(theme.dim),
+        ),
+        ToolRowState::Completed => Span::styled(
+            "● ",
             Style::default()
-                .fg(marker_color)
+                .fg(theme.success)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            truncate_tool_text(&detail, max_chars),
-            Style::default().fg(text_color),
+        ToolRowState::Failed => Span::styled(
+            "× ",
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
         ),
-    ]);
-    pad_card_line(line, card_width, theme.bg_element)
+    };
+
+    let (verb, mut target, detail): (&str, String, Option<String>) =
+        if row.desc == "preparing arguments..." {
+            ("Preparing", format!("{}...", row.name), None)
+        } else {
+            let target_str = if row.desc.is_empty() {
+                row.arguments.clone()
+            } else {
+                row.desc.clone()
+            };
+            match row.name.as_str() {
+                "read_file" | "read" => {
+                    let clean = target_str
+                        .strip_prefix("Read ")
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Read", clean, None)
+                }
+                "write_file" | "write" => {
+                    let clean = target_str
+                        .strip_prefix("Write ")
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Write", clean, None)
+                }
+                "edit_file" | "edit" => {
+                    let diff_detail = if let Ok(args) =
+                        serde_json::from_str::<serde_json::Value>(&row.arguments)
+                        && let Some(old_str) = args
+                            .get("old_string")
+                            .or_else(|| args.get("old_str"))
+                            .and_then(|v| v.as_str())
+                        && let Some(new_str) = args
+                            .get("new_string")
+                            .or_else(|| args.get("new_str"))
+                            .and_then(|v| v.as_str())
+                    {
+                        let diff = crate::tui::diff::compute_diff(old_str, new_str, 0);
+                        Some(format!("+{} -{}", diff.added, diff.removed))
+                    } else {
+                        None
+                    };
+                    let clean = target_str
+                        .strip_prefix("Edit ")
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Edit", clean, diff_detail)
+                }
+                "patch" | "apply_patch" => {
+                    let patch_detail = if let Ok(args) =
+                        serde_json::from_str::<serde_json::Value>(&row.arguments)
+                        && let Some(patch_str) = args.get("patch").and_then(|v| v.as_str())
+                    {
+                        let mut added = 0usize;
+                        let mut removed = 0usize;
+                        for l in patch_str.lines() {
+                            if l.starts_with('+') && !l.starts_with("+++") {
+                                added += 1;
+                            } else if l.starts_with('-') && !l.starts_with("---") {
+                                removed += 1;
+                            }
+                        }
+                        Some(format!("+{added} -{removed}"))
+                    } else {
+                        None
+                    };
+                    let clean = target_str
+                        .strip_prefix("Patch ")
+                        .or_else(|| target_str.strip_prefix("Applied patch "))
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Patch", clean, patch_detail)
+                }
+                "list_dir" => {
+                    let clean = target_str
+                        .strip_prefix("List ")
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("List", clean, None)
+                }
+                "glob_search" | "glob" => {
+                    let count_detail = if row.state == ToolRowState::Completed {
+                        let count = row
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.get("count").or_else(|| m.get("matches")))
+                            .and_then(|v| v.as_u64())
+                            .map(|c| c as usize)
+                            .unwrap_or_else(|| {
+                                row.output.lines().filter(|l| !l.trim().is_empty()).count()
+                            });
+                        Some(format!(
+                            "{} {}",
+                            count,
+                            if count == 1 { "match" } else { "matches" }
+                        ))
+                    } else {
+                        None
+                    };
+                    let clean = target_str
+                        .strip_prefix("Glob ")
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Glob", clean, count_detail)
+                }
+                "grep_search" | "grep" => {
+                    let count_detail = if row.state == ToolRowState::Completed {
+                        let count = row
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.get("count").or_else(|| m.get("matches")))
+                            .and_then(|v| v.as_u64())
+                            .map(|c| c as usize)
+                            .unwrap_or_else(|| {
+                                row.output.lines().filter(|l| !l.trim().is_empty()).count()
+                            });
+                        Some(format!(
+                            "{} {}",
+                            count,
+                            if count == 1 { "match" } else { "matches" }
+                        ))
+                    } else {
+                        None
+                    };
+                    let clean = target_str
+                        .strip_prefix("Grep ")
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Grep", clean, count_detail)
+                }
+                "webfetch" | "fetch" => {
+                    let clean = target_str
+                        .strip_prefix("Fetch ")
+                        .or_else(|| target_str.strip_prefix("Fetched "))
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Fetch", clean, None)
+                }
+                "websearch" | "search" => {
+                    let clean = target_str
+                        .strip_prefix("Search ")
+                        .or_else(|| target_str.strip_prefix("Searched "))
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Search", clean, None)
+                }
+                "update_plan" => ("Updated Plan", String::new(), None),
+                "task" => {
+                    let clean = target_str
+                        .strip_prefix("Task ")
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Task", clean, None)
+                }
+                "execute" => {
+                    let clean = target_str
+                        .strip_prefix("Execute ")
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Execute", clean, None)
+                }
+                "question" => {
+                    let clean = target_str
+                        .strip_prefix("Ask ")
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Ask", clean, None)
+                }
+                "skill" => {
+                    let clean = target_str
+                        .strip_prefix("Load skill ")
+                        .or_else(|| target_str.strip_prefix("Loaded skill "))
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    ("Load skill", clean, None)
+                }
+                "bash" | "sh" => {
+                    let clean = target_str.strip_prefix("$ ").unwrap_or(&target_str).trim();
+                    if clean.is_empty() {
+                        ("bash", String::new(), None)
+                    } else {
+                        ("", clean.to_string(), None)
+                    }
+                }
+                _ => {
+                    let clean = target_str
+                        .strip_prefix("Run ")
+                        .unwrap_or(&target_str)
+                        .to_string();
+                    if clean.is_empty() {
+                        ("Run", row.name.clone(), None)
+                    } else {
+                        ("Run", clean, None)
+                    }
+                }
+            }
+        };
+
+    let err_msg = if row.state == ToolRowState::Failed {
+        let first = row.output.lines().next().unwrap_or("error").trim();
+        let stripped = first
+            .strip_prefix(&format!("Error executing {}: ", row.name))
+            .unwrap_or(first);
+        if stripped.is_empty() {
+            first.to_string()
+        } else {
+            stripped.to_string()
+        }
+    } else {
+        String::new()
+    };
+
+    let indent_w = 3;
+    let marker_w = 2;
+    let verb_w = if verb.is_empty() {
+        0
+    } else if target.is_empty() {
+        text_cell_width(verb)
+    } else {
+        text_cell_width(verb) + 1
+    };
+    let detail_w = detail.as_ref().map(|d| text_cell_width(d) + 3).unwrap_or(0);
+    let err_w = if row.state == ToolRowState::Failed && !err_msg.is_empty() {
+        text_cell_width(&err_msg) + 11
+    } else {
+        0
+    };
+
+    let overhead = indent_w + marker_w + verb_w + detail_w + err_w;
+    let max_target_width = (width as usize).saturating_sub(overhead + 2);
+    if width > 0 && max_target_width >= 8 && text_cell_width(&target) > max_target_width {
+        target = truncate_tool_text(&target, max_target_width);
+    }
+
+    let mut spans = vec![Span::raw("   "), marker];
+
+    if !verb.is_empty() {
+        let verb_text = if target.is_empty() {
+            verb.to_string()
+        } else {
+            format!("{verb} ")
+        };
+        spans.push(Span::styled(
+            verb_text,
+            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    if !target.is_empty() {
+        spans.push(Span::styled(target, Style::default().fg(theme.ink)));
+    }
+
+    if let Some(detail) = detail {
+        spans.push(Span::styled(
+            format!(" ({detail})"),
+            Style::default().fg(theme.quiet),
+        ));
+    }
+
+    if row.state == ToolRowState::Failed && !err_msg.is_empty() {
+        spans.push(Span::styled(
+            format!(" · failed: {err_msg}"),
+            Style::default().fg(theme.error),
+        ));
+    }
+
+    Line::from(spans)
 }
 
 pub(crate) fn visual_line_count(lines: &[Line], width: u16) -> usize {

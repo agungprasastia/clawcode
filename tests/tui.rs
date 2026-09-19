@@ -1763,9 +1763,9 @@ fn tool_execution_update_plan_renders_checklist_and_tracks_plan() {
         .join("\n");
 
     assert!(text.contains("Updated Plan"));
-    assert!(text.contains("1. Selesai langkah pertama"));
-    assert!(text.contains("2. Sedang menjalankan langkah kedua"));
-    assert!(text.contains("3. Langkah ketiga pending"));
+    assert!(text.contains("✔ Selesai langkah pertama"));
+    assert!(text.contains("• Sedang menjalankan langkah kedua"));
+    assert!(text.contains("□ Langkah ketiga pending"));
 }
 
 #[test]
@@ -3916,10 +3916,10 @@ fn opencode_visual_streaming_parity_suite() {
     assert!(rendered.contains("Thought for "));
     assert!(!rendered.contains("💭"));
 
-    // Tool rows use OpenCode specific icons
-    assert!(rendered.contains("→ Read README.md"));
+    // Tool rows use clean dot icon
+    assert!(rendered.contains("● Read README.md"));
     // No noisy line count suffix
-    assert!(!rendered.contains("→ Read README.md · 3 lines"));
+    assert!(!rendered.contains("● Read README.md · 3 lines"));
 
     // Shell row uses $ prefix
     assert!(rendered.contains("$ git status"));
@@ -4229,7 +4229,7 @@ fn test_glob_grep_read_have_no_click_to_expand() {
         .join("\n");
 
     // Must be rendered as clean inline tool with match count
-    assert!(rendered.contains("✱ Glob **/*.md (5 matches)"));
+    assert!(rendered.contains("● Glob **/*.md (5 matches)"));
     // Must NEVER show generic click to expand for inline tools
     assert!(!rendered.contains("↳ click to expand"));
 }
@@ -4912,7 +4912,7 @@ fn tool_card_rendering_and_raw_tool_bracket_badge_formatting() {
             row.contains("Read Cargo.toml")
         })
         .expect("tool header line exists");
-    assert_eq!(buffer[(50, tool_y)].bg, theme.bg_element);
+    assert_ne!(buffer[(50, tool_y)].bg, theme.bg_element);
 }
 
 #[test]
