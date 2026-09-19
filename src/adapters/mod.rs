@@ -339,20 +339,39 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
         let (body, parser): (serde_json::Value, StreamEventParser) = match self.id.as_str() {
             "anthropic" => {
                 let mut system_prompt = None;
-                let mut anthropic_messages = Vec::new();
+                let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
 
                 for m in &request.messages {
                     if m.role == "system" {
                         system_prompt = Some(m.content.clone());
                     } else if m.role == "tool" {
-                        anthropic_messages.push(serde_json::json!({
-                            "role": "user",
-                            "content": [{
-                                "type": "tool_result",
-                                "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
-                                "content": m.content,
-                            }]
-                        }));
+                        let tool_result = serde_json::json!({
+                            "type": "tool_result",
+                            "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                            "content": m.content,
+                        });
+                        let merged = if let Some(last) = anthropic_messages.last_mut() {
+                            if last.get("role").and_then(|r| r.as_str()) == Some("user") {
+                                if let Some(arr) =
+                                    last.get_mut("content").and_then(|c| c.as_array_mut())
+                                {
+                                    arr.push(tool_result.clone());
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if !merged {
+                            anthropic_messages.push(serde_json::json!({
+                                "role": "user",
+                                "content": [tool_result],
+                            }));
+                        }
                     } else if m.role == "assistant" && m.tool_calls.is_some() {
                         let mut contents = Vec::new();
                         if !m.content.is_empty() {
@@ -1196,6 +1215,43 @@ mod tests {
         assert_eq!(msgs[0]["name"], "read_file");
         assert_eq!(msgs[0]["tool_call_id"], "call_123");
         assert_eq!(msgs[0]["content"], "file content");
+    }
+    #[test]
+    fn build_payload_serializes_consecutive_tool_messages_into_single_anthropic_user_message() {
+        let provider = JsonProvider::new(
+            "anthropic",
+            "https://api.anthropic.com/v1/messages",
+            MockTransport("".into()),
+        );
+        let request = StreamRequest::new("claude-3-5-sonnet", "", 100).with_messages(vec![
+            crate::provider::ChatMessage {
+                role: "tool".into(),
+                content: "output 1".into(),
+                tool_call_id: Some("call_1".into()),
+                tool_calls: None,
+                name: Some("read_file".into()),
+            },
+            crate::provider::ChatMessage {
+                role: "tool".into(),
+                content: "output 2".into(),
+                tool_call_id: Some("call_2".into()),
+                tool_calls: None,
+                name: Some("write_file".into()),
+            },
+        ]);
+        let (body, _) = provider.build_payload(&request);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let msgs = parsed["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["tool_use_id"], "call_1");
+        assert_eq!(content[0]["content"], "output 1");
+        assert_eq!(content[1]["type"], "tool_result");
+        assert_eq!(content[1]["tool_use_id"], "call_2");
+        assert_eq!(content[1]["content"], "output 2");
     }
     #[test]
     fn parses_sse_with_comments_and_event_lines() {

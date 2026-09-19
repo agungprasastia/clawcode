@@ -402,6 +402,21 @@ fn test_execute_tool_bash_requires_approval_for_risky_commands() {
     );
     assert!(marker.exists(), "blocked command must not mutate workspace");
 }
+#[test]
+fn test_execute_tool_bash_stdin_null() {
+    let (_root, workspace) = workspace("bash-stdin");
+    let cmd = if cfg!(windows) {
+        r#"{"command": "[Console]::In.ReadToEnd()"}"#
+    } else {
+        r#"{"command": "cat"}"#
+    };
+    let res = clawcode::conversation::tools::execute_tool(&workspace, Mode::Build, "bash", cmd);
+    assert!(
+        res.is_ok(),
+        "command reading stdin should finish immediately: {:?}",
+        res
+    );
+}
 
 #[test]
 fn test_read_file_inline_selectors_and_formatting() {

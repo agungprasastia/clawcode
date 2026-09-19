@@ -110,7 +110,7 @@ impl WriterHandle {
     pub fn spawn(db: Db) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<Command>(WRITER_CHANNEL_CAPACITY);
         let worker = thread::spawn(move || {
-            // ...existing worker loop, returns db at the end...
+            let mut db = db;
             let mut pending: Vec<PendingAppend> = Vec::new();
             let mut pending_events: Vec<PendingEvent> = Vec::new();
             while let Ok(command) = receiver.recv() {
@@ -127,8 +127,8 @@ impl WriterHandle {
                         content,
                         reply,
                     } => {
-                        flush_batch(&db, &mut pending);
-                        flush_events(&db, &mut pending_events);
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
                             db.append_message(session_id, &role, &content)
                                 .map_err(|error| error.to_string()),
@@ -152,8 +152,8 @@ impl WriterHandle {
                         arguments,
                         reply,
                     } => {
-                        flush_batch(&db, &mut pending);
-                        flush_events(&db, &mut pending_events);
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
                             db.create_tool_call(
                                 session_id,
@@ -167,8 +167,8 @@ impl WriterHandle {
                         );
                     }
                     Command::StartToolCall { id, reply } => {
-                        flush_batch(&db, &mut pending);
-                        flush_events(&db, &mut pending_events);
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
                         let _ =
                             reply.send(db.start_tool_call(id).map_err(|error| error.to_string()));
                     }
@@ -179,8 +179,8 @@ impl WriterHandle {
                         error,
                         reply,
                     } => {
-                        flush_batch(&db, &mut pending);
-                        flush_events(&db, &mut pending_events);
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
                             db.settle_tool_call(id, status, result.as_deref(), error.as_deref())
                                 .map_err(|error| error.to_string()),
@@ -192,16 +192,16 @@ impl WriterHandle {
                         delivery,
                         reply,
                     } => {
-                        flush_batch(&db, &mut pending);
-                        flush_events(&db, &mut pending_events);
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
                             db.admit_input(session_id, &content, delivery)
                                 .map_err(|error| error.to_string()),
                         );
                     }
                     Command::PromoteInput { input_id, reply } => {
-                        flush_batch(&db, &mut pending);
-                        flush_events(&db, &mut pending_events);
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
                             db.promote_input(input_id)
                                 .map_err(|error| error.to_string()),
@@ -214,8 +214,8 @@ impl WriterHandle {
                         source_snapshot_json,
                         reply,
                     } => {
-                        flush_batch(&db, &mut pending);
-                        flush_events(&db, &mut pending_events);
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
                             db.insert_context_epoch(
                                 session_id,
@@ -232,8 +232,8 @@ impl WriterHandle {
                         new_snapshot_json,
                         reply,
                     } => {
-                        flush_batch(&db, &mut pending);
-                        flush_events(&db, &mut pending_events);
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
                             db.update_context_epoch_snapshot(
                                 session_id,
@@ -250,8 +250,8 @@ impl WriterHandle {
                         delta_system_message,
                         reply,
                     } => {
-                        flush_batch(&db, &mut pending);
-                        flush_events(&db, &mut pending_events);
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
                             db.reconcile_epoch_change(
                                 session_id,
@@ -263,8 +263,8 @@ impl WriterHandle {
                         );
                     }
                     Command::Flush(ack) => {
-                        flush_batch(&db, &mut pending);
-                        flush_events(&db, &mut pending_events);
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
                         let _ = ack.send(());
                     }
                 }
@@ -283,8 +283,8 @@ impl WriterHandle {
                             content,
                             reply,
                         } => {
-                            flush_batch(&db, &mut pending);
-                            flush_events(&db, &mut pending_events);
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
                                 db.append_message(session_id, &role, &content)
                                     .map_err(|error| error.to_string()),
@@ -312,8 +312,8 @@ impl WriterHandle {
                             arguments,
                             reply,
                         } => {
-                            flush_batch(&db, &mut pending);
-                            flush_events(&db, &mut pending_events);
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
                                 db.create_tool_call(
                                     session_id,
@@ -327,8 +327,8 @@ impl WriterHandle {
                             );
                         }
                         Command::StartToolCall { id, reply } => {
-                            flush_batch(&db, &mut pending);
-                            flush_events(&db, &mut pending_events);
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
                             let _ = reply
                                 .send(db.start_tool_call(id).map_err(|error| error.to_string()));
                         }
@@ -339,8 +339,8 @@ impl WriterHandle {
                             error,
                             reply,
                         } => {
-                            flush_batch(&db, &mut pending);
-                            flush_events(&db, &mut pending_events);
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
                                 db.settle_tool_call(
                                     id,
@@ -357,16 +357,16 @@ impl WriterHandle {
                             delivery,
                             reply,
                         } => {
-                            flush_batch(&db, &mut pending);
-                            flush_events(&db, &mut pending_events);
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
                                 db.admit_input(session_id, &content, delivery)
                                     .map_err(|error| error.to_string()),
                             );
                         }
                         Command::PromoteInput { input_id, reply } => {
-                            flush_batch(&db, &mut pending);
-                            flush_events(&db, &mut pending_events);
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
                                 db.promote_input(input_id)
                                     .map_err(|error| error.to_string()),
@@ -379,8 +379,8 @@ impl WriterHandle {
                             source_snapshot_json,
                             reply,
                         } => {
-                            flush_batch(&db, &mut pending);
-                            flush_events(&db, &mut pending_events);
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
                                 db.insert_context_epoch(
                                     session_id,
@@ -397,8 +397,8 @@ impl WriterHandle {
                             new_snapshot_json,
                             reply,
                         } => {
-                            flush_batch(&db, &mut pending);
-                            flush_events(&db, &mut pending_events);
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
                                 db.update_context_epoch_snapshot(
                                     session_id,
@@ -415,8 +415,8 @@ impl WriterHandle {
                             delta_system_message,
                             reply,
                         } => {
-                            flush_batch(&db, &mut pending);
-                            flush_events(&db, &mut pending_events);
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
                                 db.reconcile_epoch_change(
                                     session_id,
@@ -428,17 +428,17 @@ impl WriterHandle {
                             );
                         }
                         Command::Flush(ack) => {
-                            flush_batch(&db, &mut pending);
-                            flush_events(&db, &mut pending_events);
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
                             let _ = ack.send(());
                         }
                     }
                 }
-                flush_batch(&db, &mut pending);
-                flush_events(&db, &mut pending_events);
+                flush_batch(&mut db, &mut pending);
+                flush_events(&mut db, &mut pending_events);
             }
-            flush_batch(&db, &mut pending);
-            flush_events(&db, &mut pending_events);
+            flush_batch(&mut db, &mut pending);
+            flush_events(&mut db, &mut pending_events);
             db
         });
         Self {
@@ -748,11 +748,18 @@ impl WriterHandle {
 
 /// Commit pending appends in one transaction and ack each sender. A row that
 /// fails to insert gets `Err` in its own reply; remaining rows still commit.
-fn flush_batch(db: &Db, pending: &mut Vec<PendingAppend>) {
+fn flush_batch(db: &mut Db, pending: &mut Vec<PendingAppend>) {
+    if pending.is_empty() {
+        return;
+    }
     let batch: Vec<PendingAppend> = std::mem::take(pending);
-    let tx = match db.connection.unchecked_transaction() {
+    let tx = match db
+        .connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+    {
         Ok(tx) => tx,
         Err(error) => {
+            tracing::error!(%error, "persistence batch transaction begin failed");
             for (_, _, _, reply) in &batch {
                 let _ = reply.send(Err(error.to_string()));
             }
@@ -767,14 +774,17 @@ fn flush_batch(db: &Db, pending: &mut Vec<PendingAppend>) {
                 rusqlite::params![session_id, role, content],
             )
             .map(|_| ())
-            .map_err(|error| error.to_string()),
+            .map_err(|error| {
+                tracing::error!(%error, "persistence batch message insert failed");
+                error.to_string()
+            }),
         );
     }
     if let Err(error) = tx.commit() {
+        tracing::error!(%error, "persistence batch commit failed");
         for result in &mut results {
             *result = Err(error.to_string());
         }
-        tracing::error!(%error, "persistence batch commit failed");
     }
     for ((_, _, _, reply), result) in batch.into_iter().zip(results) {
         let _ = reply.send(result);
@@ -783,11 +793,18 @@ fn flush_batch(db: &Db, pending: &mut Vec<PendingAppend>) {
 
 /// Commit pending event appends in one transaction and ack each sender with
 /// the assigned seq.
-fn flush_events(db: &Db, pending: &mut Vec<PendingEvent>) {
+fn flush_events(db: &mut Db, pending: &mut Vec<PendingEvent>) {
+    if pending.is_empty() {
+        return;
+    }
     let batch: Vec<PendingEvent> = std::mem::take(pending);
-    let tx = match db.connection.unchecked_transaction() {
+    let tx = match db
+        .connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+    {
         Ok(tx) => tx,
         Err(error) => {
+            tracing::error!(%error, "persistence event batch transaction begin failed");
             for (_, _, _, _, reply) in &batch {
                 let _ = reply.send(Err(error.to_string()));
             }
@@ -808,7 +825,10 @@ fn flush_events(db: &Db, pending: &mut Vec<PendingEvent>) {
                 rusqlite::params![session_id, generation_id, kind, payload_json],
                 |row| row.get(0),
             )
-            .map_err(|error| error.to_string());
+            .map_err(|error| {
+                tracing::error!(%error, "persistence event batch insert failed");
+                error.to_string()
+            });
         if let Ok(seq) = res {
             let entry = session_max_seq.entry(*session_id).or_insert(seq);
             if seq > *entry {
@@ -826,10 +846,10 @@ fn flush_events(db: &Db, pending: &mut Vec<PendingEvent>) {
         );
     }
     if let Err(error) = tx.commit() {
+        tracing::error!(%error, "persistence event batch commit failed");
         for result in &mut results {
             *result = Err(error.to_string());
         }
-        tracing::error!(%error, "persistence event batch commit failed");
     }
     for ((_, _, _, _, reply), result) in batch.into_iter().zip(results) {
         let _ = reply.send(result);

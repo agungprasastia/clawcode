@@ -4,7 +4,7 @@
 use super::events::{FinishReason, StreamEvent, Usage};
 use std::fmt;
 use std::time::Duration;
-    
+
 /// A tool call made by the assistant.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolCall {

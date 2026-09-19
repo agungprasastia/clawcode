@@ -23,7 +23,7 @@ pub const MAX_OUTPUT_TOKENS: u32 = 4_096;
 pub const CLIENT_CHANNEL_CAPACITY: usize = 256;
 
 /// How long a SQLite access waits for a competing writer before failing.
-pub const DB_BUSY_TIMEOUT: Duration = Duration::from_millis(2_000);
+pub const DB_BUSY_TIMEOUT: Duration = Duration::from_millis(10_000);
 
 /// Commands accepted by the runtime worker.
 pub enum ClientCommand {
@@ -932,17 +932,77 @@ fn run_generation(
         raw_history.swap(n - 2, n - 1);
     }
 
-    let history: Vec<crate::provider::ChatMessage> = raw_history
-        .into_iter()
-        .filter(|m| m.role == "user" || m.role == "assistant" || m.role == "system")
-        .map(|m| crate::provider::ChatMessage {
-            role: m.role,
-            content: m.content,
-            tool_call_id: None,
-            tool_calls: None,
-            name: None,
-        })
-        .collect();
+    let session_tool_calls = ctx
+        .db
+        .with(|db| db.tool_calls(ctx.session_id))
+        .unwrap_or_default();
+
+    let mut tool_calls_by_assistant: std::collections::HashMap<
+        i64,
+        Vec<crate::persistence::ToolCall>,
+    > = std::collections::HashMap::new();
+    for tc in session_tool_calls {
+        tool_calls_by_assistant
+            .entry(tc.assistant_message_id)
+            .or_default()
+            .push(tc);
+    }
+
+    let mut history = Vec::with_capacity(raw_history.len());
+    let mut pending_tool_calls: std::collections::VecDeque<crate::persistence::ToolCall> =
+        std::collections::VecDeque::new();
+
+    for m in raw_history {
+        match m.role.as_str() {
+            "user" | "system" => {
+                pending_tool_calls.clear();
+                history.push(crate::provider::ChatMessage {
+                    role: m.role,
+                    content: m.content,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    name: None,
+                });
+            }
+            "assistant" => {
+                pending_tool_calls.clear();
+                let tc_list = tool_calls_by_assistant.remove(&m.id).unwrap_or_default();
+                let provider_tool_calls = if tc_list.is_empty() {
+                    None
+                } else {
+                    Some(
+                        tc_list
+                            .iter()
+                            .map(|tc| crate::provider::ToolCall {
+                                id: tc.call_id.clone(),
+                                name: tc.tool_name.clone(),
+                                arguments: tc.arguments.clone(),
+                            })
+                            .collect(),
+                    )
+                };
+                pending_tool_calls.extend(tc_list);
+                history.push(crate::provider::ChatMessage {
+                    role: m.role,
+                    content: m.content,
+                    tool_call_id: None,
+                    tool_calls: provider_tool_calls,
+                    name: None,
+                });
+            }
+            "tool" => {
+                let tc = pending_tool_calls.pop_front();
+                history.push(crate::provider::ChatMessage {
+                    role: m.role,
+                    content: m.content,
+                    tool_call_id: tc.as_ref().map(|t| t.call_id.clone()),
+                    tool_calls: None,
+                    name: tc.as_ref().map(|t| t.tool_name.clone()),
+                });
+            }
+            _ => {}
+        }
+    }
 
     let mut messages = Vec::with_capacity(history.len() + 2);
     messages.push(crate::provider::ChatMessage {
@@ -1113,8 +1173,8 @@ fn run_generation(
                 .iter()
                 .filter(|(call_id, _, _)| completed_tool_call_ids.contains(call_id))
                 .count();
-            if malformed_tool_stream || turn_tool_calls.len() != 1 || complete_count != 1 {
-                let message = "first slice requires exactly one complete local tool call";
+            if malformed_tool_stream || complete_count != turn_tool_calls.len() {
+                let message = "stream requires complete local tool calls";
                 ctx.db.last_error(ctx.session_id, message);
                 fail_generation(ctx, message);
                 ctx.deactivate();
@@ -1206,188 +1266,207 @@ fn run_generation(
             );
         }
 
-        let Some((call_id, tool_name, args_str)) = turn_tool_calls.into_iter().next() else {
-            fail_generation(ctx, "provider returned no complete local tool call");
-            ctx.deactivate();
-            return;
-        };
-        let (created_call, created_seq) = match ctx.writer.create_tool_call(
-            ctx.session_id,
-            ctx.generation_id,
-            assistant_message.id,
-            &call_id,
-            &tool_name,
-            &args_str,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                fail_generation(ctx, &error);
-                ctx.deactivate();
-                return;
-            }
-        };
-        ctx.set_active_tool_call(created_call.id);
-        ctx.publish(
-            created_seq,
-            "tool_call_created",
-            tool_call_event_payload(&created_call, None, None),
-        );
-        let (running_call, running_seq) = match ctx.writer.start_tool_call(created_call.id) {
-            Ok(value) => value,
-            Err(error) => {
-                let mut message = format!("tool start failed before execution: {error}");
-                match ctx.writer.settle_tool_call(
-                    created_call.id,
-                    ToolCallStatus::Failed,
-                    None,
-                    Some(&message),
-                ) {
-                    Ok((failed_call, failed_seq)) => ctx.publish(
-                        failed_seq,
-                        "tool_call_settled",
-                        tool_call_event_payload(&failed_call, None, Some(&message)),
-                    ),
-                    Err(settle_error) => {
-                        message.push_str(&format!(
-                            "; durable call may remain created: {settle_error}"
-                        ));
-                    }
-                }
-                ctx.clear_active_tool_call();
-                fail_generation(ctx, &message);
-                ctx.deactivate();
-                return;
-            }
-        };
-        ctx.publish(
-            running_seq,
-            "tool_call_started",
-            tool_call_event_payload(&running_call, None, None),
-        );
+        struct ExecutedTool {
+            call_id: String,
+            tool_name: String,
+            content: String,
+        }
+        let mut executed_tools = Vec::with_capacity(turn_tool_calls.len());
 
-        let effective_ws_dir = if workspace_dir.as_os_str().is_empty() || !workspace_dir.exists() {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-        } else {
-            workspace_dir.clone()
-        };
-        let child_db = ctx.db.clone();
-        let child_generation_id = ctx.generation_id;
-        let child_tool_name = tool_name.clone();
-        let child_args = args_str.clone();
-        let child = thread::Builder::new()
-            .name("clawcode-local-tool".to_string())
-            .spawn(move || {
-                if cancel_requested(&child_db, child_generation_id) {
-                    return LocalToolOutcome::Cancelled;
+        for (call_id, tool_name, args_str) in &turn_tool_calls {
+            if cancel_requested(&ctx.db, ctx.generation_id) {
+                ctx.db.clear_last_error(ctx.session_id);
+                let _ = ctx.db.with(|db| {
+                    db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None)
+                });
+                ctx.emit_status("cancelled", None);
+                ctx.deactivate();
+                return;
+            }
+
+            let (created_call, created_seq) = match ctx.writer.create_tool_call(
+                ctx.session_id,
+                ctx.generation_id,
+                assistant_message.id,
+                call_id,
+                tool_name,
+                args_str,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    fail_generation(ctx, &error);
+                    ctx.deactivate();
+                    return;
                 }
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match crate::workspace::Workspace::with_filesystem(
-                        &effective_ws_dir,
-                        crate::workspace::RealFileSystem,
+            };
+            ctx.set_active_tool_call(created_call.id);
+            ctx.publish(
+                created_seq,
+                "tool_call_created",
+                tool_call_event_payload(&created_call, None, None),
+            );
+            let (running_call, running_seq) = match ctx.writer.start_tool_call(created_call.id) {
+                Ok(value) => value,
+                Err(error) => {
+                    let mut message = format!("tool start failed before execution: {error}");
+                    match ctx.writer.settle_tool_call(
+                        created_call.id,
+                        ToolCallStatus::Failed,
+                        None,
+                        Some(&message),
                     ) {
-                        Ok(ws) => crate::conversation::tools::execute_tool(
-                            &ws,
-                            mode,
-                            &child_tool_name,
-                            &child_args,
+                        Ok((failed_call, failed_seq)) => ctx.publish(
+                            failed_seq,
+                            "tool_call_settled",
+                            tool_call_event_payload(&failed_call, None, Some(&message)),
                         ),
-                        Err(error) => Err(format!(
-                            "Failed to open workspace {}: {error}",
-                            effective_ws_dir.display()
-                        )),
+                        Err(settle_error) => {
+                            message.push_str(&format!(
+                                "; durable call may remain created: {settle_error}"
+                            ));
+                        }
                     }
-                }));
-                match result {
-                    Ok(Ok(output)) => LocalToolOutcome::Completed(output),
-                    Ok(Err(error)) => LocalToolOutcome::Failed(error),
-                    Err(_) => LocalToolOutcome::Failed("local tool thread panicked".to_string()),
+                    ctx.clear_active_tool_call();
+                    fail_generation(ctx, &message);
+                    ctx.deactivate();
+                    return;
                 }
-            });
-        let outcome = match child {
-            Ok(handle) => match handle.join() {
-                Ok(outcome) => outcome,
-                Err(_) => LocalToolOutcome::Failed("local tool thread panicked".to_string()),
-            },
-            Err(error) => LocalToolOutcome::Failed(format!("failed to spawn local tool: {error}")),
-        };
-        let outcome = if cancel_requested(&ctx.db, ctx.generation_id) {
-            LocalToolOutcome::Cancelled
-        } else {
-            outcome
-        };
+            };
+            ctx.publish(
+                running_seq,
+                "tool_call_started",
+                tool_call_event_payload(&running_call, None, None),
+            );
 
-        let (settlement_status, result, error) = match outcome {
-            LocalToolOutcome::Completed(output) => (
-                ToolCallStatus::Completed,
-                Some(bound_tool_text(output)),
-                None,
-            ),
-            LocalToolOutcome::Failed(error) => {
-                (ToolCallStatus::Failed, None, Some(bound_tool_text(error)))
-            }
-            LocalToolOutcome::Cancelled => (ToolCallStatus::Cancelled, None, None),
-        };
-        let (settled_call, settled_seq) = match ctx.writer.settle_tool_call(
-            created_call.id,
-            settlement_status,
-            result.as_deref(),
-            error.as_deref(),
-        ) {
-            Ok(value) => {
-                ctx.clear_active_tool_call();
-                value
-            }
-            Err(error) => {
-                ctx.clear_active_tool_call();
-                let message =
-                    format!("tool settlement failed; durable call may remain running: {error}");
-                ctx.db.last_error(ctx.session_id, &message);
-                fail_generation(ctx, &message);
+            let effective_ws_dir =
+                if workspace_dir.as_os_str().is_empty() || !workspace_dir.exists() {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                } else {
+                    workspace_dir.clone()
+                };
+            let child_db = ctx.db.clone();
+            let child_generation_id = ctx.generation_id;
+            let child_tool_name = tool_name.clone();
+            let child_args = args_str.clone();
+            let child = thread::Builder::new()
+                .name("clawcode-local-tool".to_string())
+                .spawn(move || {
+                    if cancel_requested(&child_db, child_generation_id) {
+                        return LocalToolOutcome::Cancelled;
+                    }
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        match crate::workspace::Workspace::with_filesystem(
+                            &effective_ws_dir,
+                            crate::workspace::RealFileSystem,
+                        ) {
+                            Ok(ws) => crate::conversation::tools::execute_tool(
+                                &ws,
+                                mode,
+                                &child_tool_name,
+                                &child_args,
+                            ),
+                            Err(error) => Err(format!(
+                                "Failed to open workspace {}: {error}",
+                                effective_ws_dir.display()
+                            )),
+                        }
+                    }));
+                    match result {
+                        Ok(Ok(output)) => LocalToolOutcome::Completed(output),
+                        Ok(Err(error)) => LocalToolOutcome::Failed(error),
+                        Err(_) => {
+                            LocalToolOutcome::Failed("local tool thread panicked".to_string())
+                        }
+                    }
+                });
+            let outcome = match child {
+                Ok(handle) => match handle.join() {
+                    Ok(outcome) => outcome,
+                    Err(_) => LocalToolOutcome::Failed("local tool thread panicked".to_string()),
+                },
+                Err(error) => {
+                    LocalToolOutcome::Failed(format!("failed to spawn local tool: {error}"))
+                }
+            };
+            let outcome = if cancel_requested(&ctx.db, ctx.generation_id) {
+                LocalToolOutcome::Cancelled
+            } else {
+                outcome
+            };
+
+            let (settlement_status, result, error) = match outcome {
+                LocalToolOutcome::Completed(output) => (
+                    ToolCallStatus::Completed,
+                    Some(bound_tool_text(output)),
+                    None,
+                ),
+                LocalToolOutcome::Failed(error) => {
+                    (ToolCallStatus::Failed, None, Some(bound_tool_text(error)))
+                }
+                LocalToolOutcome::Cancelled => (ToolCallStatus::Cancelled, None, None),
+            };
+            let (settled_call, settled_seq) = match ctx.writer.settle_tool_call(
+                created_call.id,
+                settlement_status,
+                result.as_deref(),
+                error.as_deref(),
+            ) {
+                Ok(value) => {
+                    ctx.clear_active_tool_call();
+                    value
+                }
+                Err(error) => {
+                    ctx.clear_active_tool_call();
+                    let message =
+                        format!("tool settlement failed; durable call may remain running: {error}");
+                    ctx.db.last_error(ctx.session_id, &message);
+                    fail_generation(ctx, &message);
+                    ctx.deactivate();
+                    return;
+                }
+            };
+            ctx.publish(
+                settled_seq,
+                "tool_call_settled",
+                tool_call_event_payload(&settled_call, result.as_deref(), error.as_deref()),
+            );
+            let projected_content = result.as_deref().or(error.as_deref()).unwrap_or("");
+            if persist_message(ctx, "tool", projected_content).is_none() {
                 ctx.deactivate();
                 return;
             }
-        };
-        ctx.publish(
-            settled_seq,
-            "tool_call_settled",
-            tool_call_event_payload(&settled_call, result.as_deref(), error.as_deref()),
-        );
-        let projected_content = result.as_deref().or(error.as_deref()).unwrap_or("");
-        if persist_message(ctx, "tool", projected_content).is_none() {
-            ctx.deactivate();
-            return;
-        }
-        let _reloaded_messages = ctx.db.with(|db| db.messages(ctx.session_id));
-        let success = settled_call.status == ToolCallStatus::Completed;
-        let output = result.as_deref().or(error.as_deref()).unwrap_or("");
-        ctx.emit(
-            "tool_executed",
-            &serde_json::json!({
-                "id": call_id,
-                "name": tool_name,
-                "arguments": serde_json::from_str::<serde_json::Value>(&args_str)
-                    .unwrap_or_else(|_| serde_json::Value::String(args_str.clone())),
-                "success": success,
-                "output": output,
-                "assistant_message_id": assistant_message.id,
-            }),
-        );
-        if settled_call.status == ToolCallStatus::Cancelled {
-            ctx.db.clear_last_error(ctx.session_id);
-            let _ = ctx.db.with(|db| {
-                db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None)
+            let _reloaded_messages = ctx.db.with(|db| db.messages(ctx.session_id));
+            let success = settled_call.status == ToolCallStatus::Completed;
+            let output = result.as_deref().or(error.as_deref()).unwrap_or("");
+            ctx.emit(
+                "tool_executed",
+                &serde_json::json!({
+                    "id": call_id,
+                    "name": tool_name,
+                    "arguments": serde_json::from_str::<serde_json::Value>(args_str)
+                        .unwrap_or_else(|_| serde_json::Value::String(args_str.clone())),
+                    "success": success,
+                    "output": output,
+                    "assistant_message_id": assistant_message.id,
+                }),
+            );
+            if settled_call.status == ToolCallStatus::Cancelled {
+                ctx.db.clear_last_error(ctx.session_id);
+                let _ = ctx.db.with(|db| {
+                    db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None)
+                });
+                ctx.emit_status("cancelled", None);
+                ctx.deactivate();
+                return;
+            }
+
+            executed_tools.push(ExecutedTool {
+                call_id: call_id.clone(),
+                tool_name: tool_name.clone(),
+                content: projected_content.to_string(),
             });
-            ctx.emit_status("cancelled", None);
-            ctx.deactivate();
-            return;
         }
-        if settled_call.status == ToolCallStatus::Failed {
-            let message = error.as_deref().unwrap_or("local tool failed");
-            ctx.db.last_error(ctx.session_id, message);
-            fail_generation(ctx, message);
-            ctx.deactivate();
-            return;
-        }
+
         ctx.emit(
             "agent_turn",
             &serde_json::json!({
@@ -1395,24 +1474,30 @@ fn run_generation(
                 "assistant_message_id": assistant_message.id,
             }),
         );
+        let executed_tool_calls: Vec<crate::provider::ToolCall> = turn_tool_calls
+            .into_iter()
+            .map(|(call_id, tool_name, args_str)| crate::provider::ToolCall {
+                id: call_id,
+                name: tool_name,
+                arguments: args_str,
+            })
+            .collect();
         messages.push(crate::provider::ChatMessage {
             role: "assistant".to_string(),
             content: text.clone(),
             tool_call_id: None,
-            tool_calls: Some(vec![crate::provider::ToolCall {
-                id: call_id.clone(),
-                name: tool_name.clone(),
-                arguments: args_str.clone(),
-            }]),
+            tool_calls: Some(executed_tool_calls),
             name: None,
         });
-        messages.push(crate::provider::ChatMessage {
-            role: "tool".to_string(),
-            content: projected_content.to_string(),
-            tool_call_id: Some(call_id.clone()),
-            tool_calls: None,
-            name: Some(tool_name.clone()),
-        });
+        for tool_res in executed_tools {
+            messages.push(crate::provider::ChatMessage {
+                role: "tool".to_string(),
+                content: tool_res.content,
+                tool_call_id: Some(tool_res.call_id),
+                tool_calls: None,
+                name: Some(tool_res.tool_name),
+            });
+        }
         continue;
     }
 

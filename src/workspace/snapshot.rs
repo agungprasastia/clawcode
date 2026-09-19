@@ -141,6 +141,13 @@ impl SnapshotStore {
                         "snapshot checksum validation failed",
                     ));
                 }
+                if let Some(parent) = snapshot.path.parent()
+                    && !filesystem.is_dir(parent)
+                {
+                    filesystem
+                        .create_dir_all(parent)
+                        .map_err(|error| diagnostic("create parent directory", parent, error))?;
+                }
                 let temporary =
                     temporary_sibling(&snapshot.path, &id.0.to_string()).map_err(|error| {
                         diagnostic("create snapshot temporary path", &snapshot.path, error)

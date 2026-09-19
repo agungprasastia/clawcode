@@ -77,31 +77,56 @@ impl WorkspaceRoot {
 
         let target = self.canonical_path.join(relative);
         let resolved_path = if target.exists() {
-            fs::canonicalize(&target)
-        } else {
-            let parent = target.parent().ok_or_else(|| {
-                Diagnostic::new(ErrorCategory::Workspace, "workspace path has no parent")
-            })?;
-            let final_component = target.file_name().ok_or_else(|| {
+            fs::canonicalize(&target).map_err(|error| {
                 Diagnostic::new(
                     ErrorCategory::Workspace,
                     format!(
-                        "workspace path has no final component: {}",
+                        "failed to resolve workspace path {}: {error}",
+                        relative.display()
+                    ),
+                )
+            })?
+        } else {
+            let existing_ancestor = target
+                .ancestors()
+                .find(|ancestor| ancestor.exists())
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        ErrorCategory::Workspace,
+                        format!(
+                            "failed to find existing ancestor for workspace path: {}",
+                            relative.display()
+                        ),
+                    )
+                })?;
+            let tail = target.strip_prefix(existing_ancestor).map_err(|error| {
+                Diagnostic::new(
+                    ErrorCategory::Workspace,
+                    format!(
+                        "failed to determine relative tail for {}: {error}",
                         relative.display()
                     ),
                 )
             })?;
-            fs::canonicalize(parent).map(|canonical_parent| canonical_parent.join(final_component))
-        }
-        .map_err(|error| {
-            Diagnostic::new(
-                ErrorCategory::Workspace,
-                format!(
-                    "failed to resolve workspace path {}: {error}",
-                    relative.display()
-                ),
-            )
-        })?;
+            let canonical_ancestor = fs::canonicalize(existing_ancestor).map_err(|error| {
+                Diagnostic::new(
+                    ErrorCategory::Workspace,
+                    format!(
+                        "failed to resolve workspace path {}: {error}",
+                        relative.display()
+                    ),
+                )
+            })?;
+            if !canonical_ancestor.starts_with(&self.canonical_path)
+                && !strip_unc_prefix(&canonical_ancestor).starts_with(stripped_canonical)
+            {
+                return Err(Diagnostic::new(
+                    ErrorCategory::Workspace,
+                    format!("workspace path escapes root: {}", relative.display()),
+                ));
+            }
+            canonical_ancestor.join(tail)
+        };
 
         if !resolved_path.starts_with(&self.canonical_path)
             && !strip_unc_prefix(&resolved_path).starts_with(stripped_canonical)

@@ -326,7 +326,7 @@ fn one_tool_call_is_joined_and_settled_before_generation_finishes() {
 }
 
 #[test]
-fn failed_local_tool_never_completes_generation() {
+fn tool_failure_does_not_abort_generation_and_feeds_back_error() {
     let path = temp_db_path("failed_tool");
     let db = Db::open(&path).expect("runtime db");
     let session = db.create_session("tool failure").unwrap();
@@ -358,19 +358,26 @@ fn failed_local_tool_never_completes_generation() {
         }
     }
     let finished = finished.expect("failed tool generation must finish");
-    assert!(finished.payload_json.contains("failed"));
-    assert!(!finished.payload_json.contains("completed"));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(finished.payload_json.contains("completed"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     let db = client.shutdown();
     let tool_calls = db.tool_calls(session.id).unwrap();
     assert_eq!(tool_calls.len(), 1);
     assert_eq!(tool_calls[0].status, ToolCallStatus::Failed);
+
+    let messages = db.messages(session.id).unwrap();
+    assert_eq!(
+        messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
+        vec!["user", "assistant", "tool", "assistant"]
+    );
+    assert!(!messages[2].content.is_empty());
+    assert_eq!(messages[3].content, "File read complete.");
     let _ = std::fs::remove_file(&path);
 }
 
 #[test]
-fn incomplete_or_multiple_tool_calls_fail_before_execution() {
+fn incomplete_or_malformed_tool_calls_fail_before_execution() {
     let cases = [
         (
             "incomplete",
@@ -382,28 +389,6 @@ fn incomplete_or_multiple_tool_calls_fail_before_execution() {
                 StreamEvent::ToolCallDelta {
                     id: "call-1".into(),
                     arguments: r#"{"path":"Cargo.toml"}"#.into(),
-                },
-                StreamEvent::Finish {
-                    reason: FinishReason::ToolCall,
-                },
-            ],
-        ),
-        (
-            "multiple",
-            vec![
-                StreamEvent::ToolCallStart {
-                    id: "call-1".into(),
-                    name: "read_file".into(),
-                },
-                StreamEvent::ToolCallEnd {
-                    id: "call-1".into(),
-                },
-                StreamEvent::ToolCallStart {
-                    id: "call-2".into(),
-                    name: "read_file".into(),
-                },
-                StreamEvent::ToolCallEnd {
-                    id: "call-2".into(),
                 },
                 StreamEvent::Finish {
                     reason: FinishReason::ToolCall,
@@ -491,6 +476,285 @@ fn incomplete_or_multiple_tool_calls_fail_before_execution() {
         );
         let _ = std::fs::remove_file(&path);
     }
+}
+
+#[derive(Debug)]
+struct ParallelToolProvider {
+    calls: Arc<AtomicUsize>,
+    turn2_request: Arc<std::sync::Mutex<Option<StreamRequest>>>,
+}
+
+impl Provider for ParallelToolProvider {
+    fn id(&self) -> &ProviderId {
+        static ID: std::sync::LazyLock<ProviderId> =
+            std::sync::LazyLock::new(|| ProviderId::new("parallel-tool"));
+        &ID
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tools: true,
+        }
+    }
+
+    fn models(&self) -> Vec<ModelInfo> {
+        Vec::new()
+    }
+
+    fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+        let call_count = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_count == 0 {
+            Ok(StreamResponse {
+                events: vec![
+                    StreamEvent::ToolCallStart {
+                        id: "call-1".to_string(),
+                        name: "read_file".to_string(),
+                    },
+                    StreamEvent::ToolCallDelta {
+                        id: "call-1".to_string(),
+                        arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                    },
+                    StreamEvent::ToolCallEnd {
+                        id: "call-1".to_string(),
+                    },
+                    StreamEvent::ToolCallStart {
+                        id: "call-2".to_string(),
+                        name: "read_file".to_string(),
+                    },
+                    StreamEvent::ToolCallDelta {
+                        id: "call-2".to_string(),
+                        arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                    },
+                    StreamEvent::ToolCallEnd {
+                        id: "call-2".to_string(),
+                    },
+                    StreamEvent::Finish {
+                        reason: FinishReason::ToolCall,
+                    },
+                ],
+            })
+        } else {
+            *self.turn2_request.lock().unwrap() = Some(request.clone());
+            Ok(StreamResponse {
+                events: vec![
+                    StreamEvent::TextDelta("Parallel tools executed.".to_string()),
+                    StreamEvent::Finish {
+                        reason: FinishReason::Stop,
+                    },
+                ],
+            })
+        }
+    }
+}
+
+#[test]
+fn multiple_parallel_tool_calls_execute_sequentially_settle_and_feed_back() {
+    let path = temp_db_path("parallel_tools");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("parallel tools").unwrap();
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let (_subscription, receiver) = bus.subscribe(Some(session.id));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let turn2_request = Arc::new(std::sync::Mutex::new(None));
+    let client = RuntimeClient::spawn(
+        db,
+        writer,
+        Box::new(ParallelToolProvider {
+            calls: Arc::clone(&calls),
+            turn2_request: Arc::clone(&turn2_request),
+        }),
+        bus,
+    );
+    client
+        .start_generation(session.id, "plan", "parallel-tool", "model", "read")
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let mut finished = None;
+    while started.elapsed() < std::time::Duration::from_secs(3) {
+        if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(50))
+            && event.kind == "generation_finished"
+        {
+            finished = Some(event);
+            break;
+        }
+    }
+    let finished = finished.expect("parallel tool generation must finish");
+    assert!(finished.payload_json.contains("completed"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let db = client.shutdown();
+    let tool_calls = db.tool_calls(session.id).unwrap();
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0].call_id, "call-1");
+    assert_eq!(tool_calls[0].status, ToolCallStatus::Completed);
+    assert_eq!(tool_calls[1].call_id, "call-2");
+    assert_eq!(tool_calls[1].status, ToolCallStatus::Completed);
+
+    let messages = db.messages(session.id).unwrap();
+    assert_eq!(
+        messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
+        vec!["user", "assistant", "tool", "tool", "assistant"]
+    );
+
+    let req = turn2_request
+        .lock()
+        .unwrap()
+        .take()
+        .expect("turn 2 request recorded");
+    let assistant_msg = req
+        .messages
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("assistant msg");
+    assert_eq!(
+        assistant_msg.tool_calls.as_ref().map(|tc| tc.len()),
+        Some(2)
+    );
+    let tool_msgs: Vec<_> = req.messages.iter().filter(|m| m.role == "tool").collect();
+    assert_eq!(tool_msgs.len(), 2);
+    assert_eq!(tool_msgs[0].tool_call_id.as_deref(), Some("call-1"));
+    assert_eq!(tool_msgs[1].tool_call_id.as_deref(), Some("call-2"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn cross_turn_history_preserves_tool_messages_and_tool_calls() {
+    let path = temp_db_path("cross_turn_history");
+    let db = Db::open(&path).expect("runtime db");
+    let session = db.create_session("cross-turn").unwrap();
+    let writer = WriterHandle::spawn(Db::open(&path).expect("writer db"));
+    let bus = EventBus::new();
+    let (_subscription, receiver) = bus.subscribe(Some(session.id));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let turn2_request = Arc::new(std::sync::Mutex::new(None));
+    let client = RuntimeClient::spawn(
+        db,
+        writer,
+        Box::new(ParallelToolProvider {
+            calls: Arc::clone(&calls),
+            turn2_request: Arc::clone(&turn2_request),
+        }),
+        bus,
+    );
+
+    client
+        .start_generation(session.id, "plan", "parallel-tool", "model", "first prompt")
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(3) {
+        if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(50))
+            && event.kind == "generation_finished"
+        {
+            break;
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    #[derive(Debug)]
+    struct Turn2CaptureProvider {
+        captured: Arc<std::sync::Mutex<Option<StreamRequest>>>,
+    }
+    impl Provider for Turn2CaptureProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("turn2-capture"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            *self.captured.lock().unwrap() = Some(request.clone());
+            Ok(StreamResponse {
+                events: vec![
+                    StreamEvent::TextDelta("Turn 2 answered.".to_string()),
+                    StreamEvent::Finish {
+                        reason: FinishReason::Stop,
+                    },
+                ],
+            })
+        }
+    }
+
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let db2 = client.shutdown();
+    let writer2 = WriterHandle::spawn(Db::open(&path).expect("writer db 2"));
+    let bus2 = EventBus::new();
+    let (_sub2, receiver2) = bus2.subscribe(Some(session.id));
+    let client2 = RuntimeClient::spawn(
+        db2,
+        writer2,
+        Box::new(Turn2CaptureProvider {
+            captured: Arc::clone(&captured),
+        }),
+        bus2,
+    );
+
+    client2
+        .start_generation(
+            session.id,
+            "plan",
+            "turn2-capture",
+            "model",
+            "second prompt",
+        )
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(3) {
+        if let Ok(event) = receiver2.recv_timeout(std::time::Duration::from_millis(50))
+            && event.kind == "generation_finished"
+        {
+            break;
+        }
+    }
+
+    let req = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("turn 2 must have received request");
+    let roles: Vec<&str> = req.messages.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(
+        roles,
+        vec![
+            "system",
+            "user",
+            "assistant",
+            "tool",
+            "tool",
+            "assistant",
+            "user"
+        ]
+    );
+    let gen1_assistant = &req.messages[2];
+    assert!(gen1_assistant.tool_calls.is_some());
+    let tcs = gen1_assistant.tool_calls.as_ref().unwrap();
+    assert_eq!(tcs.len(), 2);
+    assert_eq!(tcs[0].id, "call-1");
+    assert_eq!(tcs[1].id, "call-2");
+
+    let tool1 = &req.messages[3];
+    assert_eq!(tool1.tool_call_id.as_deref(), Some("call-1"));
+    assert_eq!(tool1.name.as_deref(), Some("read_file"));
+
+    let tool2 = &req.messages[4];
+    assert_eq!(tool2.tool_call_id.as_deref(), Some("call-2"));
+    assert_eq!(tool2.name.as_deref(), Some("read_file"));
+
+    let _ = client2.shutdown();
+    let _ = std::fs::remove_file(&path);
 }
 #[test]
 fn runtime_backed_prompt_submission_admits_and_promotes_input() {

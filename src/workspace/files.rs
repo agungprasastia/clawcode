@@ -27,6 +27,9 @@ pub trait FileSystem {
         path.is_dir()
     }
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir_all(path)
+    }
 }
 
 pub(crate) fn temporary_sibling(path: &Path, suffix: &str) -> io::Result<PathBuf> {
@@ -87,6 +90,10 @@ impl FileSystem for RealFileSystem {
 
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
         fs::canonicalize(path)
+    }
+
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir_all(path)
     }
 }
 

@@ -953,44 +953,96 @@ pub fn execute_tool(
                 crate::workspace::PolicyDecision::Allowed => {}
             }
 
-            let output = if cfg!(windows) {
-                std::process::Command::new("powershell")
-                    .args(["-NoProfile", "-Command", command_str])
-                    .current_dir(workspace.root_path())
-                    .output()
+            let mut cmd = if cfg!(windows) {
+                let mut c = std::process::Command::new("powershell");
+                c.args(["-NoProfile", "-Command", command_str]);
+                c
             } else {
-                std::process::Command::new("sh")
-                    .args(["-c", command_str])
-                    .current_dir(workspace.root_path())
-                    .output()
+                let mut c = std::process::Command::new("sh");
+                c.args(["-c", command_str]);
+                c
+            };
+            cmd.stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .current_dir(workspace.root_path());
+
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| format!("Failed to execute command: {e}"))?;
+
+            let mut stdout_pipe = child.stdout.take();
+            let mut stderr_pipe = child.stderr.take();
+
+            const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
+
+            let stdout_handle = std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut pipe) = stdout_pipe.take() {
+                    use std::io::Read;
+                    let _ = (&mut pipe).take(MAX_OUTPUT_BYTES).read_to_end(&mut buf);
+                    let mut sink = std::io::sink();
+                    let _ = std::io::copy(&mut pipe, &mut sink);
+                }
+                buf
+            });
+
+            let stderr_handle = std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut pipe) = stderr_pipe.take() {
+                    use std::io::Read;
+                    let _ = (&mut pipe).take(MAX_OUTPUT_BYTES).read_to_end(&mut buf);
+                    let mut sink = std::io::sink();
+                    let _ = std::io::copy(&mut pipe, &mut sink);
+                }
+                buf
+            });
+
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(120);
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {
+                        if start.elapsed() >= timeout {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err("Command execution timed out after 120 seconds".to_string());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(e) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format!("Failed to wait for child process: {e}"));
+                    }
+                }
             };
 
-            match output {
-                Ok(out) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let status = out.status.code().unwrap_or(-1);
-                    let mut res = String::new();
-                    if !stdout.is_empty() {
-                        res.push_str(&stdout);
-                    }
-                    if !stderr.is_empty() {
-                        if !res.is_empty() {
-                            res.push('\n');
-                        }
-                        res.push_str("STDERR:\n");
-                        res.push_str(&stderr);
-                    }
-                    if status != 0 {
-                        res.push_str(&format!("\n[Process exited with code {status}]"));
-                    }
-                    if res.is_empty() {
-                        res = "[Command finished with no output]".to_string();
-                    }
-                    Ok(res)
-                }
-                Err(e) => Err(format!("Failed to execute command: {e}")),
+            let stdout_bytes = stdout_handle.join().unwrap_or_default();
+            let stderr_bytes = stderr_handle.join().unwrap_or_default();
+
+            let stdout = String::from_utf8_lossy(&stdout_bytes);
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            let status_code = status.code().unwrap_or(-1);
+            let mut res = String::new();
+            if !stdout.is_empty() {
+                res.push_str(&stdout);
             }
+            if !stderr.is_empty() {
+                if !res.is_empty() {
+                    res.push('\n');
+                }
+                res.push_str("STDERR:\n");
+                res.push_str(&stderr);
+            }
+            if status_code != 0 {
+                res.push_str(&format!("\n[Process exited with code {status_code}]"));
+            }
+            if res.is_empty() {
+                res = "[Command finished with no output]".to_string();
+            }
+            Ok(res)
         }
         "question" => {
             let question = args

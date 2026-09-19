@@ -1413,7 +1413,10 @@ impl App {
             ConversationEvent::TextDelta(delta) => {
                 if self.status == ConversationStatus::Active {
                     self.push_stream_part(StreamPart::Text(delta.clone()));
-                    self.typewriter.push_delta(&delta);
+                    if let Some(flushed) = self.typewriter.push_delta(&delta) {
+                        self.transcript.push_str(&flushed);
+                        self.truncate_transcript();
+                    }
                 }
             }
             ConversationEvent::Finished(reason) => {
@@ -3074,7 +3077,10 @@ impl App {
                         && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
                     {
                         self.push_stream_part(StreamPart::Text(delta.to_string()));
-                        self.typewriter.push_delta(delta);
+                        if let Some(flushed) = self.typewriter.push_delta(delta) {
+                            self.transcript.push_str(&flushed);
+                            self.truncate_transcript();
+                        }
                         self.text_stream_active = true;
                     }
                 }
@@ -4212,19 +4218,23 @@ impl App {
     }
 
     fn truncate_transcript(&mut self) {
-        if self.transcript.len() <= Self::MAX_TRANSCRIPT_BYTES {
+        if self.transcript.len() <= Self::MAX_TRANSCRIPT_BYTES + 16 * 1024 {
             return;
         }
 
         let retained_bytes =
             Self::MAX_TRANSCRIPT_BYTES.saturating_sub(Self::TRUNCATION_MARKER.len());
-        let start = ceil_char_boundary(
-            &self.transcript,
-            self.transcript.len().saturating_sub(retained_bytes),
-        );
+        let cut_point = self.transcript.len().saturating_sub(retained_bytes);
+        let start = find_user_turn_boundary(&self.transcript, cut_point)
+            .unwrap_or_else(|| ceil_char_boundary(&self.transcript, cut_point));
 
+        let len_before = self.transcript.len();
         self.transcript
             .replace_range(..start, Self::TRUNCATION_MARKER);
+        let removed_bytes = len_before.saturating_sub(self.transcript.len());
+        if let Some(base) = self.stream_base_len {
+            self.stream_base_len = Some(base.saturating_sub(removed_bytes));
+        }
     }
 }
 fn parse_finish_reason(value: &str) -> Option<FinishReason> {
@@ -4498,12 +4508,28 @@ mod tests {
         // Fill with Japanese text
         let chunk = "こんにちは世界！🦀\n";
         let mut s = String::new();
-        while s.len() < App::MAX_TRANSCRIPT_BYTES + 1000 {
+        while s.len() < App::MAX_TRANSCRIPT_BYTES + 20 * 1024 {
             s.push_str(chunk);
         }
         app.apply(UiEvent::StreamDelta(s));
         assert!(app.transcript().len() <= App::MAX_TRANSCRIPT_BYTES);
         assert!(app.transcript().starts_with(App::TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn test_truncate_transcript_user_turn_boundary_and_stream_base() {
+        let mut app = App::default();
+        let turn1 = format!("> user turn 1\n{}\n", "a".repeat(100 * 1024));
+        let turn2 = format!("> user turn 2\n{}\n", "b".repeat(100 * 1024));
+        let turn3 = format!("> user turn 3\n{}\n", "c".repeat(100 * 1024));
+        app.transcript = format!("{turn1}{turn2}{turn3}");
+        let base = app.transcript.len() - 1000;
+        app.stream_base_len = Some(base);
+        app.truncate_transcript();
+        assert!(app.transcript.starts_with(App::TRUNCATION_MARKER));
+        assert!(app.transcript[App::TRUNCATION_MARKER.len()..].starts_with("> user turn"));
+        assert!(app.stream_base_len.is_some());
+        assert!(app.stream_base_len.unwrap() < base);
     }
 
     #[test]

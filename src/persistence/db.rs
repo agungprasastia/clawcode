@@ -286,7 +286,7 @@ impl Db {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         // Every connection (runtime + writer) waits for a competing writer
         // instead of failing the batch with SQLITE_BUSY.
-        let _ = connection.busy_timeout(std::time::Duration::from_millis(2_000));
+        connection.busy_timeout(std::time::Duration::from_millis(10_000))?;
         schema::migrate(&connection)?;
         // If workspace 1 exists with an empty root_path, seed it with current working directory
         if let Ok(cwd) = std::env::current_dir() {
@@ -304,7 +304,23 @@ impl Db {
     /// How long a SQLite access waits for a competing writer before failing.
     /// Relevant once the `Db` is shared behind a mutex across threads.
     pub fn set_busy_timeout(&self, timeout: std::time::Duration) {
-        let _ = self.connection.busy_timeout(timeout);
+        let _ = self
+            .connection
+            .busy_timeout(timeout.max(std::time::Duration::from_millis(10_000)));
+    }
+
+    pub fn transaction_with_behavior(
+        &mut self,
+        behavior: rusqlite::TransactionBehavior,
+    ) -> Result<rusqlite::Transaction<'_>, rusqlite::Error> {
+        self.connection.transaction_with_behavior(behavior)
+    }
+
+    pub(crate) fn write_transaction(&self) -> Result<rusqlite::Transaction<'_>, rusqlite::Error> {
+        rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )
     }
 
     /// Record or clear a session's last error.
@@ -494,7 +510,7 @@ impl Db {
                 MessageTooLarge(content.len()),
             )));
         }
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         let session_exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
             params![session_id],
@@ -526,7 +542,7 @@ impl Db {
         &self,
         input_id: i64,
     ) -> Result<(SessionInput, Message, i64), rusqlite::Error> {
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         let (session_id, content): (i64, String) = tx.query_row(
             "SELECT session_id, content FROM session_inputs WHERE id = ?1 AND status = 'pending'",
             params![input_id],
@@ -599,7 +615,7 @@ impl Db {
         arguments: &str,
     ) -> Result<(ToolCall, i64), rusqlite::Error> {
         ensure_tool_text_size(arguments)?;
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         let owns_message: bool = tx.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM messages
@@ -660,7 +676,7 @@ impl Db {
 
     /// Atomically mark a created call as running and append its event.
     pub fn start_tool_call(&self, id: i64) -> Result<(ToolCall, i64), rusqlite::Error> {
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         if tx.execute(
             "UPDATE tool_calls SET status = 'running'
              WHERE id = ?1 AND status = 'created'",
@@ -710,7 +726,7 @@ impl Db {
         if let Some(value) = error {
             ensure_tool_text_size(value)?;
         }
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         let updated = match status {
             ToolCallStatus::Failed => tx.execute(
                 "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4
@@ -1137,7 +1153,7 @@ impl Db {
                 MessageTooLarge(delta_system_message.len()),
             )));
         }
-        let tx = self.connection.unchecked_transaction()?;
+        let tx = self.write_transaction()?;
         let rows = tx.execute(
             "UPDATE context_epochs
              SET source_snapshot_json = ?1

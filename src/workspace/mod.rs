@@ -243,10 +243,14 @@ impl<F: FileSystem> Workspace<F> {
                     self.filesystem.remove_file(path)
                 }
                 FileState::Missing => Ok(()),
-                FileState::Present { bytes, .. } => {
+                FileState::Present { bytes, .. } => (|| -> std::io::Result<()> {
+                    if let Some(parent) = path.parent()
+                        && !self.filesystem.is_dir(parent)
+                    {
+                        self.filesystem.create_dir_all(parent)?;
+                    }
                     let temporary =
-                        crate::workspace::files::temporary_sibling(path, &id.value().to_string())
-                            .map_err(|error| diagnostic("create mutation temporary", path, error))?;
+                        crate::workspace::files::temporary_sibling(path, &id.value().to_string())?;
                     match self.filesystem.write_new(&temporary, bytes) {
                         Ok(()) => match self.filesystem.replace(&temporary, path) {
                             Ok(()) => Ok(()),
@@ -260,7 +264,7 @@ impl<F: FileSystem> Workspace<F> {
                             Err(error)
                         }
                     }
-                }
+                })(),
             };
             if let Err(error) = result {
                 let mut rollback_failure = None;
