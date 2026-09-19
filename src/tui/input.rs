@@ -62,7 +62,7 @@ fn translate_key(key: KeyEvent) -> Option<Input> {
         KeyCode::Down if key.modifiers.is_empty() => Some(Input::Down),
         KeyCode::Left if key.modifiers.is_empty() => Some(Input::Left),
         KeyCode::Right if key.modifiers.is_empty() => Some(Input::Right),
-        KeyCode::Esc | KeyCode::Char('q') if key.modifiers.is_empty() => Some(Input::Quit),
+        KeyCode::Esc if key.modifiers.is_empty() => Some(Input::Quit),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Cancel),
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Paste),
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Input::Clear),
@@ -155,6 +155,19 @@ mod tests {
         assert_eq!(translate_key(ctrl_v), Some(Input::Paste));
     }
 
+    #[test]
+    fn lowercase_q_remains_prompt_text() {
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+
+        assert_eq!(translate_key(key), Some(Input::Character('q')));
+    }
+
+    #[test]
+    fn escape_remains_quit_shortcut() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+
+        assert_eq!(translate_key(key), Some(Input::Quit));
+    }
     #[test]
     fn event_paste_translates_to_ui_event_paste() {
         let event = Event::Paste("clipboard text".to_string());

@@ -162,7 +162,7 @@ impl ConversationRuntime {
             )
         {
             writer
-                .try_append(session_id, "assistant", &state.output)
+                .append(session_id, "assistant", &state.output)
                 .map_err(ProviderError::Protocol)?;
         }
         Ok(state)

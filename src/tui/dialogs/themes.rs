@@ -16,6 +16,27 @@ pub struct ThemesDialogState {
     pub scroll_offset: usize,
 }
 
+fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
+    if Span::raw(text).width() <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let char_width = Span::raw(ch.to_string()).width();
+        if width + char_width > max_width.saturating_sub(1) {
+            break;
+        }
+        result.push(ch);
+        width += char_width;
+    }
+    result.push('…');
+    result
+}
+
 impl ThemesDialogState {
     pub fn new(active_theme: ThemeKind) -> Self {
         let items = ThemeKind::ALL.to_vec();
@@ -274,21 +295,15 @@ pub fn render_themes_dialog(
                 };
 
                 let row_width = chunks[2].width as usize;
-                let prefix_len = cursor.len() + active_dot.len();
-                let swatch_len = 6;
-                let badge_len = badge.len();
+                let prefix_len = Span::raw(format!("{cursor}{active_dot}")).width();
+                let swatch_len = Span::raw("█████ ").width();
+                let badge_len = Span::raw(&badge).width();
                 let available_for_name =
                     row_width.saturating_sub(prefix_len + swatch_len + badge_len + 2);
-
-                let display_name =
-                    if theme_kind.name().len() > available_for_name && available_for_name > 4 {
-                        format!("{}…", &theme_kind.name()[..available_for_name - 1])
-                    } else {
-                        theme_kind.name().to_string()
-                    };
-
-                let pad_len = row_width
-                    .saturating_sub(prefix_len + swatch_len + display_name.len() + badge_len);
+                let display_name = truncate_with_ellipsis(theme_kind.name(), available_for_name);
+                let pad_len = row_width.saturating_sub(
+                    prefix_len + swatch_len + Span::raw(&display_name).width() + badge_len,
+                );
 
                 let line_style = if is_selected {
                     Style::default().bg(theme.bg_element)

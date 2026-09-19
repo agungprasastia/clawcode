@@ -259,7 +259,7 @@ fn worker_loop(
                         let _ = ctx.db.with(|db| {
                             db.finish_generation(ctx.generation_id, GenerationStatus::Failed, None)
                         });
-                        ctx.emit_status("failed");
+                        ctx.emit_status("failed", None);
                     }
                     ctx.deactivate();
                 }));
@@ -334,11 +334,12 @@ impl SharedGenerationCtx {
         });
     }
 
-    fn emit_status(&self, status: &str) {
-        self.emit(
-            "generation_finished",
-            &serde_json::json!({ "status": status }),
-        );
+    fn emit_status(&self, status: &str, finish_reason: Option<FinishReason>) {
+        let mut payload = serde_json::json!({ "status": status });
+        if let Some(reason) = finish_reason {
+            payload["finish_reason"] = serde_json::Value::String(format!("{reason:?}"));
+        }
+        self.emit("generation_finished", &payload);
     }
 
     fn emit_error(&self, message: &str) {
@@ -441,7 +442,10 @@ fn run_generation(
         .map(|m| (m.role.as_str(), m.content.as_str()))
         != Some(("user", prompt))
     {
-        let _ = ctx.writer.append(ctx.session_id, "user", prompt);
+        if !persist_message(ctx, "user", prompt) {
+            ctx.deactivate();
+            return;
+        }
         messages.push(crate::provider::ChatMessage {
             role: "user".to_string(),
             content: prompt.to_string(),
@@ -566,14 +570,15 @@ fn run_generation(
         }
 
         if cancel_requested(&ctx.db, ctx.generation_id) || provider_cancelled {
-            if !text.is_empty() {
-                let _ = ctx.writer.append(ctx.session_id, "assistant", &text);
+            if !text.is_empty() && !persist_message(ctx, "assistant", &text) {
+                ctx.deactivate();
+                return;
             }
             ctx.db.clear_last_error(ctx.session_id);
             let _ = ctx.db.with(|db| {
                 db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None)
             });
-            ctx.emit_status("cancelled");
+            ctx.emit_status("cancelled", None);
             ctx.deactivate();
             return;
         }
@@ -587,7 +592,10 @@ fn run_generation(
 
         if turn_tool_calls.is_empty() {
             if !text.trim().is_empty() {
-                let _ = ctx.writer.append(ctx.session_id, "assistant", &text);
+                if !persist_message(ctx, "assistant", &text) {
+                    ctx.deactivate();
+                    return;
+                }
                 ctx.emit("assistant_message", &serde_json::json!({ "content": text }));
                 break;
             }
@@ -624,7 +632,10 @@ fn run_generation(
             .collect();
 
         if !text.is_empty() {
-            let _ = ctx.writer.append(ctx.session_id, "assistant", &text);
+            if !persist_message(ctx, "assistant", &text) {
+                ctx.deactivate();
+                return;
+            }
             ctx.emit("assistant_message", &serde_json::json!({ "content": text }));
         }
 
@@ -700,7 +711,7 @@ fn run_generation(
         let _ = ctx
             .db
             .with(|db| db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None));
-        ctx.emit_status("cancelled");
+        ctx.emit_status("cancelled", None);
         ctx.deactivate();
         return;
     }
@@ -726,7 +737,10 @@ fn run_generation(
             metrics_json.as_deref(),
         )
     });
-    ctx.emit_status("completed");
+    ctx.emit_status(
+        "completed",
+        Some(final_finish_reason.unwrap_or(FinishReason::Stop)),
+    );
     ctx.deactivate();
 }
 
@@ -737,12 +751,23 @@ fn cancel_requested(db: &SharedDb, generation_id: i64) -> bool {
         .is_some_and(|status| status == GenerationStatus::Cancelling)
 }
 
+fn persist_message(ctx: &SharedGenerationCtx, role: &str, content: &str) -> bool {
+    match ctx.writer.append(ctx.session_id, role, content) {
+        Ok(()) => true,
+        Err(error) => {
+            ctx.db.last_error(ctx.session_id, &error);
+            fail_generation(ctx, &error);
+            false
+        }
+    }
+}
+
 fn fail_generation(ctx: &SharedGenerationCtx, message: &str) {
     let _ = ctx
         .db
         .with(|db| db.finish_generation(ctx.generation_id, GenerationStatus::Failed, None));
     ctx.emit_error(message);
-    ctx.emit_status("failed");
+    ctx.emit_status("failed", None);
 }
 
 /// Bus-only status ping (`seq = 0`, not persisted) for control acks.
@@ -813,6 +838,75 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct TextProvider;
+
+    impl Provider for TextProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("fake"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        fn send(&self, _request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            Ok(StreamResponse {
+                events: vec![
+                    StreamEvent::TextDelta("persist me".into()),
+                    StreamEvent::Finish {
+                        reason: FinishReason::Stop,
+                    },
+                ],
+            })
+        }
+    }
+
+    #[test]
+    fn failed_assistant_persistence_fails_generation() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("persistence_failure").unwrap();
+        let session_id = session.id;
+        // Existing prompt skips user persistence; missing writer session forces assistant append to fail.
+        db.append_message(session_id, "user", "hello").unwrap();
+        let bus = EventBus::new();
+        let (_sub_id, rx) = bus.subscribe(Some(session_id));
+        let writer = WriterHandle::spawn(Db::open_in_memory().unwrap());
+        let client = RuntimeClient::spawn(db, writer, Box::new(TextProvider), bus);
+
+        client
+            .start_generation(session_id, "plan", "fake", "text", "hello")
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let mut finished = None;
+        while start.elapsed() < std::time::Duration::from_secs(2) {
+            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+                && event.kind == "generation_finished"
+            {
+                finished = Some(event);
+                break;
+            }
+        }
+
+        let finished = finished.expect("generation must emit terminal status");
+        let generation_id = finished.generation_id.expect("generation id missing");
+        assert!(finished.payload_json.contains("failed"));
+        assert!(!finished.payload_json.contains("completed"));
+
+        let db = client.shutdown();
+        assert_eq!(
+            db.generation_status(generation_id).unwrap(),
+            Some(GenerationStatus::Failed)
+        );
+    }
+
     #[test]
     fn cancel_generation_marks_cancelled_not_completed() {
         let db = Db::open_in_memory().unwrap();
@@ -820,7 +914,9 @@ mod tests {
         let session_id = session.id;
         let bus = EventBus::new();
         let (_sub_id, rx) = bus.subscribe(Some(session_id));
-        let writer = WriterHandle::spawn(Db::open_in_memory().unwrap());
+        let writer_db = Db::open_in_memory().unwrap();
+        writer_db.create_session("cancel_test").unwrap();
+        let writer = WriterHandle::spawn(writer_db);
         let client = RuntimeClient::spawn(db, writer, Box::new(SlowProvider), bus);
 
         client
@@ -868,7 +964,9 @@ mod tests {
         let session_id = session.id;
         let bus = EventBus::new();
         let (_sub_id, rx) = bus.subscribe(Some(session_id));
-        let writer = WriterHandle::spawn(Db::open_in_memory().unwrap());
+        let writer_db = Db::open_in_memory().unwrap();
+        writer_db.create_session("concurrent_test").unwrap();
+        let writer = WriterHandle::spawn(writer_db);
         let client = RuntimeClient::spawn(db, writer, Box::new(SlowProvider), bus);
 
         client

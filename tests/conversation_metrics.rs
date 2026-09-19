@@ -265,3 +265,40 @@ fn events_emit_metrics_only_after_successful_terminal_finish() {
 
     assert!(matches!(events.last(), Some(ConversationEvent::Metrics(_))));
 }
+
+#[test]
+fn run_and_persist_reports_writer_commit_failure() {
+    let path = std::env::temp_dir().join(format!(
+        "clawcode-conversation-persist-failure-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let db = Db::open(&path).unwrap();
+    let session = db.create_session("test").unwrap();
+    let writer = WriterHandle::spawn(db);
+
+    let external = Db::open(&path).unwrap();
+    external.delete_session(session.id).unwrap();
+    drop(external);
+
+    let runtime = ConversationRuntime::new(FakeProvider {
+        response: StreamResponse {
+            events: vec![
+                StreamEvent::TextDelta("hello".into()),
+                StreamEvent::Finish {
+                    reason: FinishReason::Stop,
+                },
+            ],
+        },
+    });
+    let error = runtime
+        .run_and_persist(&request(), &writer, session.id)
+        .expect_err("failed persistence must be reported");
+    assert!(error.to_string().contains("FOREIGN KEY"));
+
+    let _ = writer.shutdown();
+    let _ = std::fs::remove_file(path);
+}

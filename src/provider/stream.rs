@@ -90,13 +90,27 @@ impl StreamSender {
                     .pending_delta
                     .lock()
                     .expect("stream state poisoned");
-                if pending.len() + delta.len() > MAX_COALESCED_DELTA_BYTES {
-                    let flushed = std::mem::take(&mut *pending);
-                    if self.sender.send(StreamEvent::TextDelta(flushed)).is_err() {
-                        return Err(mpsc::SendError(StreamEvent::TextDelta(delta)));
-                    }
+                if pending.len().saturating_add(delta.len()) <= MAX_COALESCED_DELTA_BYTES {
+                    pending.push_str(&delta);
+                    return Ok(());
                 }
-                pending.push_str(&delta);
+
+                let buffered = std::mem::take(&mut *pending);
+                if !buffered.is_empty() {
+                    self.sender.send(StreamEvent::TextDelta(buffered))?;
+                }
+                if delta.len() <= MAX_COALESCED_DELTA_BYTES {
+                    pending.push_str(&delta);
+                    return Ok(());
+                }
+
+                let mut remaining = delta.as_str();
+                while !remaining.is_empty() {
+                    let end = floor_char_boundary(remaining, MAX_COALESCED_DELTA_BYTES);
+                    let chunk = &remaining[..end];
+                    self.sender.send(StreamEvent::TextDelta(chunk.to_owned()))?;
+                    remaining = &remaining[end..];
+                }
                 Ok(())
             }
             event => {
@@ -124,6 +138,14 @@ impl StreamSender {
         }
         self.sender.send(StreamEvent::TextDelta(delta))
     }
+}
+
+fn floor_char_boundary(text: &str, max_bytes: usize) -> usize {
+    let mut end = text.len().min(max_bytes);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 #[cfg(test)]
@@ -156,5 +178,24 @@ mod tests {
         );
         sender.flush().unwrap();
         assert_eq!(stream.next().unwrap(), StreamEvent::TextDelta("y".into()));
+    }
+    #[test]
+    fn oversized_single_delta_is_chunked_without_empty_event() {
+        let (sender, mut stream) = ProviderStream::channel(4);
+        let delta = "🙂".repeat(MAX_COALESCED_DELTA_BYTES / "🙂".len() + 1);
+        sender.send(StreamEvent::TextDelta(delta.clone())).unwrap();
+        sender.flush().unwrap();
+        drop(sender);
+
+        let Some(StreamEvent::TextDelta(first)) = stream.next() else {
+            panic!("first text chunk missing");
+        };
+        let Some(StreamEvent::TextDelta(second)) = stream.next() else {
+            panic!("second text chunk missing");
+        };
+        assert!(!first.is_empty() && first.len() <= MAX_COALESCED_DELTA_BYTES);
+        assert!(!second.is_empty() && second.len() <= MAX_COALESCED_DELTA_BYTES);
+        assert_eq!(format!("{first}{second}"), delta);
+        assert!(stream.next().is_none());
     }
 }

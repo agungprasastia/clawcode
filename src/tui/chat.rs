@@ -1502,14 +1502,35 @@ pub fn format_transcript_lines_with_width(
     let mut in_box = false;
     let mut is_output_box = false;
     let mut in_shell_output = false;
+    let mut compaction_marker_seen = false;
+    let mut orphan_fence = false;
     for (i, line) in raw_lines.iter().enumerate() {
+        if *line == "[earlier transcript compacted]" {
+            compaction_marker_seen = true;
+            orphan_fence = false;
+            in_code_block = false;
+            in_thought = false;
+            in_box = false;
+            is_output_box = false;
+            in_shell_output = false;
+            lines.push(Line::from(Span::styled(
+                (*line).to_string(),
+                Style::default().fg(theme.dim),
+            )));
+            continue;
+        }
         if line.trim_start().starts_with("```") {
             if in_code_block {
                 in_code_block = false;
+                orphan_fence = false;
                 lines.push(Line::from(""));
             } else {
                 in_code_block = true;
                 let lang = line.trim_start().trim_start_matches('`').trim();
+                orphan_fence = compaction_marker_seen
+                    && lang.is_empty()
+                    && i > 0
+                    && !raw_lines[i - 1].trim().is_empty();
                 if !lang.is_empty() {
                     let header_line = Line::from(vec![
                         Span::raw("  "),
@@ -1521,6 +1542,16 @@ pub fn format_transcript_lines_with_width(
             continue;
         }
 
+        if orphan_fence
+            && line.strip_prefix("> ").is_some()
+            && (i == 0
+                || raw_lines[i - 1].trim().is_empty()
+                || raw_lines[i - 1].trim_start().starts_with("```")
+                || raw_lines[i - 1] == "[earlier transcript compacted]")
+        {
+            in_code_block = false;
+            orphan_fence = false;
+        }
         if in_code_block {
             let code_line = Line::from(vec![
                 Span::raw("  "),
@@ -3022,6 +3053,53 @@ mod tests {
             lines_exp
                 .iter()
                 .any(|l| l.spans.iter().any(|s| s.content == "      │ "))
+        );
+    }
+
+    #[test]
+    fn test_compact_visual_bug_reproduction() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+
+        let tail = "git status\n```\n> cioba shell lain nya\n\n$ git status -s\n  M README.md\n\n> tes lagi shell lain";
+        let compacted = format!("[earlier transcript compacted]\n{tail}");
+        let lines = format_transcript_lines_with_width(&compacted, &theme, mode_color, Some(80));
+
+        let has_prompt_card = lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content == "▌ "));
+        let has_literal_prompt = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains("> cioba shell lain nya"))
+        });
+        let marker = &lines[0];
+
+        assert!(
+            has_prompt_card,
+            "Prompt must render as card after compaction"
+        );
+        assert!(
+            !has_literal_prompt,
+            "Prompt must not render inside code card"
+        );
+        assert_eq!(marker.spans[0].style.fg, Some(theme.dim));
+    }
+
+    #[test]
+    fn test_code_block_prompt_like_line_stays_code() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let lines = format_transcript_lines("```rust\n> literal\n```", &theme, Color::Cyan);
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| { line.spans.iter().any(|span| span.content == "> literal") })
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.spans.iter().any(|span| span.content == "▌ "))
         );
     }
 }

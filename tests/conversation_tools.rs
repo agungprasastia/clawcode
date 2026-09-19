@@ -382,6 +382,26 @@ fn test_execute_tool_bash() {
     assert!(res.is_ok(), "bash execution failed: {:?}", res);
     assert!(res.unwrap().contains("clawcode_agent_test"));
 }
+#[test]
+fn test_execute_tool_bash_requires_approval_for_risky_commands() {
+    let (root, workspace) = workspace("bash-approval");
+    let marker = root.join("must-survive.txt");
+    fs::write(&marker, "preserve").unwrap();
+
+    let res = clawcode::conversation::tools::execute_tool(
+        &workspace,
+        Mode::Build,
+        "bash",
+        r#"{"command": "rm -rf must-survive.txt"}"#,
+    );
+
+    assert!(res.is_err(), "risky bash command must require approval");
+    assert!(
+        res.unwrap_err().to_lowercase().contains("approval"),
+        "error must explain approval requirement"
+    );
+    assert!(marker.exists(), "blocked command must not mutate workspace");
+}
 
 #[test]
 fn test_read_file_inline_selectors_and_formatting() {

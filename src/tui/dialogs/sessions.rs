@@ -17,6 +17,27 @@ pub struct SessionsDialogState {
     pub scroll_offset: usize,
 }
 
+fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
+    if Span::raw(text).width() <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let char_width = Span::raw(ch.to_string()).width();
+        if width + char_width > max_width.saturating_sub(1) {
+            break;
+        }
+        result.push(ch);
+        width += char_width;
+    }
+    result.push('…');
+    result
+}
+
 impl SessionsDialogState {
     pub fn new(items: Vec<Session>, active_session_id: Option<i64>) -> Self {
         let selected = active_session_id
@@ -360,22 +381,16 @@ pub fn render_sessions_dialog(
                 let ws_tag = format!("ws#{} ", session.workspace_id);
                 let id_tag = format!("#{} ", session.id);
                 let title_prefix = format!("{ws_tag}{id_tag}{pin_icon}");
-
                 let row_width = chunks[2].width as usize;
-                let prefix_len = cursor.len() + active_dot.len() + title_prefix.len();
-                let badge_len = badge.len();
+                let prefix_len = Span::raw(format!("{cursor}{active_dot}{title_prefix}")).width();
+                let badge_len = Span::raw(&badge).width();
                 let available_for_title = row_width.saturating_sub(prefix_len + badge_len + 2);
 
-                let display_title =
-                    if session.title.len() > available_for_title && available_for_title > 4 {
-                        format!("{}…", &session.title[..available_for_title - 1])
-                    } else {
-                        session.title.clone()
-                    };
+                let display_title = truncate_with_ellipsis(&session.title, available_for_title);
 
                 let display_full = format!("{title_prefix}{display_title}");
                 let pad_len = row_width.saturating_sub(
-                    cursor.len() + active_dot.len() + display_full.len() + badge_len,
+                    Span::raw(format!("{cursor}{active_dot}{display_full}")).width() + badge_len,
                 );
 
                 let line_style = if is_selected {
@@ -593,5 +608,35 @@ mod tests {
         assert_eq!(state.items.len(), 0);
         assert_eq!(state.selected, 0);
         assert_eq!(state.selected_session(), None);
+    }
+    #[test]
+    fn render_sessions_dialog_truncates_multibyte_title_at_narrow_width() {
+        let dialog = SessionsDialogState::new(
+            vec![Session {
+                id: 1,
+                title: "界".repeat(20),
+                workspace_id: 1,
+                status: SessionStatus::Idle,
+                pinned: false,
+            }],
+            None,
+        );
+        let theme = Theme::new();
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_sessions_dialog(frame, frame.area(), &dialog, None, &theme))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(content.contains("…"));
+        assert!(Span::raw(truncate_with_ellipsis(&"界".repeat(20), 10)).width() <= 10);
+        for y in 0..buffer.area.height {
+            let line: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            assert!(line.chars().count() <= buffer.area.width as usize);
+        }
     }
 }

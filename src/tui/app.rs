@@ -647,6 +647,8 @@ pub struct App {
     active_tool: Option<ActiveToolInfo>,
     tool_rows: Vec<ToolRow>,
     active_generation_id: Option<i64>,
+    ignored_generation_ids: HashSet<i64>,
+    pending_finish_reason: Option<FinishReason>,
     text_stream_active: bool,
     reasoning_buffer: String,
     reasoning_start: Option<std::time::Instant>,
@@ -739,6 +741,9 @@ impl App {
             active_tool: None,
             tool_rows: Vec::new(),
             active_generation_id: None,
+            ignored_generation_ids: HashSet::new(),
+            pending_finish_reason: None,
+            text_stream_active: false,
             reasoning_buffer: String::new(),
             reasoning_start: None,
             reasoning_duration: None,
@@ -748,7 +753,6 @@ impl App {
             expanded_tool_rows: HashSet::new(),
             thought_expanded: false,
             last_tool_row_clicks: RefCell::new(Vec::new()),
-            text_stream_active: false,
             current_plan: Vec::new(),
             last_popup_area: std::cell::Cell::new(None),
             last_quick_actions_area: std::cell::Cell::new(None),
@@ -758,6 +762,37 @@ impl App {
 
     pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
     pub const TRUNCATION_MARKER: &str = "[earlier transcript truncated]\n";
+
+    fn request_runtime_cancel(&self) {
+        if let Some(runtime) = self.runtime.as_ref()
+            && let Some(session_id) = self.active_session_id
+        {
+            let _ = runtime.cancel_generation(session_id);
+        }
+    }
+
+    fn reset_turn_view(&mut self, clear_transcript: bool) {
+        if clear_transcript {
+            self.transcript.clear();
+        }
+        self.typewriter.reset();
+        self.text_stream_active = false;
+        self.reasoning_buffer.clear();
+        self.reasoning_start = None;
+        self.reasoning_duration = None;
+        self.reasoning_active = false;
+        self.active_tool = None;
+        self.tool_rows.clear();
+        if let Some(generation_id) = self.active_generation_id.take() {
+            self.ignored_generation_ids.insert(generation_id);
+        }
+        self.stream_parts.clear();
+        self.stream_base_len = None;
+        self.expanded_tool_rows.clear();
+        self.thought_expanded = false;
+        self.current_plan.clear();
+        self.chat_scroll = 0;
+    }
 
     pub fn apply(&mut self, event: UiEvent) {
         if self.permission_dialog.is_some() {
@@ -1185,23 +1220,18 @@ impl App {
                 }
             }
             UiEvent::Input(Input::Cancel) => {
-                self.cancellation_pending = true;
-                self.active_tool = None;
-                self.tool_rows.clear();
-                self.active_generation_id = None;
-                if let Some(runtime) = self.runtime.as_ref()
-                    && let Some(session_id) = self.active_session_id
-                {
-                    let _ = runtime.cancel_generation(session_id);
+                if let Some(generation_id) = self.active_generation_id {
+                    self.ignored_generation_ids.insert(generation_id);
                 }
+                self.request_runtime_cancel();
+                self.reset_turn_view(false);
+                self.cancellation_pending = true;
+                self.status = ConversationStatus::Active;
             }
             UiEvent::Input(Input::Clear) => {
-                self.transcript.clear();
-                self.chat_scroll = 0;
+                self.request_runtime_cancel();
+                self.reset_turn_view(true);
                 self.status = ConversationStatus::Idle;
-                self.active_tool = None;
-                self.tool_rows.clear();
-                self.active_generation_id = None;
                 self.diagnostic = "screen cleared".to_string();
             }
             UiEvent::Input(Input::Character(character)) => {
@@ -2615,19 +2645,20 @@ impl App {
                 return;
             }
             if trimmed == "/clear" || trimmed == "/home" {
-                self.transcript.clear();
+                self.request_runtime_cancel();
+                self.reset_turn_view(true);
                 self.status = ConversationStatus::Idle;
-                self.active_tool = None;
-                self.tool_rows.clear();
-                self.active_generation_id = None;
                 self.diagnostic = "screen cleared".to_string();
                 return;
             }
             if trimmed == "/compact" {
+                self.request_runtime_cancel();
+                self.reset_turn_view(false);
+                self.status = ConversationStatus::Idle;
                 if self.transcript.len() > 1024 {
-                    let keep_bytes = 1024.min(self.transcript.len());
-                    let split_idx = self.transcript.len().saturating_sub(keep_bytes);
-                    let boundary = ceil_char_boundary(&self.transcript, split_idx);
+                    let split_idx = self.transcript.len() - 1024;
+                    let boundary = find_user_turn_boundary(&self.transcript, split_idx)
+                        .unwrap_or_else(|| ceil_char_boundary(&self.transcript, split_idx));
                     let tail = self.transcript[boundary..].to_string();
                     self.transcript = format!("[earlier transcript compacted]\n{tail}");
                     self.diagnostic = "session context compacted".to_string();
@@ -2724,13 +2755,11 @@ impl App {
     }
 
     pub fn submit_user_prompt(&mut self, prompt: &str) {
-        self.reasoning_active = false;
-        self.flush_reasoning();
-        self.flush_typewriter();
-        self.stream_parts.clear();
-        self.stream_base_len = None;
-        self.reasoning_start = None;
-        self.reasoning_duration = None;
+        if self.status == ConversationStatus::Active || self.active_generation_id.is_some() {
+            self.request_runtime_cancel();
+        }
+        self.reset_turn_view(false);
+        self.status = ConversationStatus::Idle;
         self.session_listings.clear();
         if self.active_session_id.is_none() {
             if let Some(runtime) = self.runtime.as_ref() {
@@ -2793,8 +2822,8 @@ impl App {
     }
 
     /// Drain pending runtime events into the live transcript view.
-    /// Unbounded growth is impossible: the bus prunes closed/full receivers,
-    /// and this drains to exhaustion each call.
+    /// The bounded bus applies backpressure and prunes closed receivers;
+    /// this drains pending events to exhaustion each call.
     pub fn poll_runtime(&mut self) -> bool {
         self.command_service.poll_refresh();
         if let Ok(models) = self.command_service.models()
@@ -2815,20 +2844,53 @@ impl App {
                 continue;
             }
             if event.kind == "generation_started" {
-                self.active_generation_id = event.generation_id;
+                let Some(generation_id) = event.generation_id else {
+                    continue;
+                };
+                if self.status != ConversationStatus::Active
+                    || self.ignored_generation_ids.contains(&generation_id)
+                    || self.active_generation_id.is_some()
+                {
+                    continue;
+                }
+                self.active_generation_id = Some(generation_id);
                 self.stream_parts.clear();
                 self.stream_base_len = Some(self.transcript.len());
                 self.reasoning_buffer.clear();
-                self.reasoning_start = None;
-                self.reasoning_duration = None;
-                self.reasoning_active = false;
-            } else if self
-                .active_generation_id
-                .is_some_and(|generation_id| event.generation_id != Some(generation_id))
-            {
-                continue;
+            } else {
+                let ignored_generation = event.generation_id.is_some_and(|generation_id| {
+                    self.ignored_generation_ids.contains(&generation_id)
+                });
+                let cancellation_completion = ignored_generation
+                    && event.kind == "generation_finished"
+                    && serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                        .ok()
+                        .and_then(|payload| {
+                            payload
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .map(|status| status == "cancelled")
+                        })
+                        .unwrap_or(false);
+                if (ignored_generation && !cancellation_completion)
+                    || self
+                        .active_generation_id
+                        .is_some_and(|active_generation_id| {
+                            event.generation_id != Some(active_generation_id)
+                        })
+                {
+                    continue;
+                }
             }
             match event.kind.as_str() {
+                "finish" => {
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                        && let Some(reason) = payload.get("reason").and_then(|v| v.as_str())
+                    {
+                        self.pending_finish_reason = parse_finish_reason(reason);
+                    }
+                }
                 "reasoning_delta" => {
                     if let Ok(payload) =
                         serde_json::from_str::<serde_json::Value>(&event.payload_json)
@@ -3565,10 +3627,17 @@ impl App {
                         && let Some(status) = payload.get("status").and_then(|v| v.as_str())
                     {
                         self.text_stream_active = false;
+                        let finish_reason = payload
+                            .get("finish_reason")
+                            .and_then(|v| v.as_str())
+                            .and_then(parse_finish_reason)
+                            .or_else(|| self.pending_finish_reason.take());
                         let target_status = match status {
                             "cancelled" => ConversationStatus::Cancelled,
                             "failed" => ConversationStatus::Error,
-                            _ => ConversationStatus::Finished(FinishReason::Stop),
+                            _ => ConversationStatus::Finished(
+                                finish_reason.unwrap_or(FinishReason::Stop),
+                            ),
                         };
                         if self.typewriter.is_typing() {
                             self.typewriter.set_pending_status(target_status);
@@ -3808,8 +3877,25 @@ impl App {
             &self.transcript,
             self.transcript.len().saturating_sub(retained_bytes),
         );
+
         self.transcript
             .replace_range(..start, Self::TRUNCATION_MARKER);
+    }
+}
+fn parse_finish_reason(value: &str) -> Option<FinishReason> {
+    if value.eq_ignore_ascii_case("stop") {
+        Some(FinishReason::Stop)
+    } else if value.eq_ignore_ascii_case("length") || value.eq_ignore_ascii_case("max_tokens") {
+        Some(FinishReason::Length)
+    } else if value.eq_ignore_ascii_case("tool_call")
+        || value.eq_ignore_ascii_case("tool_calls")
+        || value.eq_ignore_ascii_case("tool_use")
+    {
+        Some(FinishReason::ToolCall)
+    } else if value.eq_ignore_ascii_case("error") {
+        Some(FinishReason::Error)
+    } else {
+        None
     }
 }
 
@@ -3906,6 +3992,31 @@ impl UiEventQueue {
     }
 }
 
+fn find_user_turn_boundary(value: &str, cutoff: usize) -> Option<usize> {
+    let cutoff = floor_char_boundary(value, cutoff);
+    let mut in_code_block = false;
+    for line in value[..cutoff].split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+        }
+    }
+
+    let tail = &value[cutoff..];
+    let mut offset = 0;
+    for line in tail.split_inclusive('\n') {
+        let start = cutoff + offset;
+        let at_line_start = start == 0 || value.as_bytes()[start - 1] == b'\n';
+        if at_line_start && !in_code_block && line.starts_with("> ") {
+            return Some(start);
+        }
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+        }
+        offset += line.len();
+    }
+    None
+}
+
 pub(crate) fn floor_char_boundary(value: &str, index: usize) -> usize {
     let mut index = index.min(value.len());
     while !value.is_char_boundary(index) {
@@ -3945,6 +4056,25 @@ mod tests {
         assert_eq!(ceil_char_boundary(text, 4), 4);
         assert_eq!(ceil_char_boundary(text, text.len()), text.len());
         assert_eq!(ceil_char_boundary(text, text.len() + 100), text.len());
+    }
+    #[test]
+    fn test_compact_keeps_complete_utf8_user_turn() {
+        let mut app = App {
+            transcript: format!(
+                "old\n{}\n```rust\n> literal\n```\n> recent prompt\nassistant",
+                "x".repeat(1300)
+            ),
+            prompt: "/compact".to_string(),
+            ..App::default()
+        };
+
+        app.submit_prompt();
+
+        assert!(
+            app.transcript()
+                .starts_with("[earlier transcript compacted]\n> recent prompt\n")
+        );
+        assert!(app.transcript().is_char_boundary(app.transcript().len()));
     }
 
     #[test]
@@ -4191,5 +4321,263 @@ mod tests {
         app.handle_mouse_click(5, 15);
         assert!(!app.is_tool_expanded("bash-long"));
         assert_eq!(app.diagnostic(), "tool output collapsed");
+    }
+    #[test]
+    fn cancel_blocks_stale_same_generation_events() {
+        let mut app = App::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.set_runtime_receiver(rx);
+        app.submit_user_prompt("first");
+        let session_id = app.active_session_id().unwrap();
+
+        tx.send(RuntimeEvent {
+            session_id,
+            generation_id: Some(7),
+            seq: 1,
+            kind: "generation_started".into(),
+            payload_json: "{}".into(),
+        })
+        .unwrap();
+        app.poll_runtime();
+        assert_eq!(app.active_generation_id, Some(7));
+
+        app.apply(UiEvent::Input(Input::Cancel));
+        assert_eq!(app.conversation_status(), ConversationStatus::Active);
+
+        tx.send(RuntimeEvent {
+            session_id,
+            generation_id: Some(7),
+            seq: 2,
+            kind: "generation_started".into(),
+            payload_json: "{}".into(),
+        })
+        .unwrap();
+        tx.send(RuntimeEvent {
+            session_id,
+            generation_id: Some(7),
+            seq: 3,
+            kind: "text_delta".into(),
+            payload_json: serde_json::json!({"delta": "stale"}).to_string(),
+        })
+        .unwrap();
+        app.poll_runtime();
+
+        assert_eq!(app.conversation_status(), ConversationStatus::Active);
+        assert_eq!(app.active_generation_id, None);
+        assert!(app.stream_parts.is_empty());
+        assert!(!app.transcript().contains("stale"));
+    }
+
+    #[test]
+    fn generation_started_does_not_bypass_generation_mismatch_guard() {
+        let mut app = App::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.set_runtime_receiver(rx);
+        app.submit_user_prompt("first");
+        let session_id = app.active_session_id().unwrap();
+
+        for (seq, generation_id, kind, payload_json) in [
+            (1, 7, "generation_started", "{}".to_string()),
+            (
+                2,
+                7,
+                "text_delta",
+                serde_json::json!({"delta": "kept"}).to_string(),
+            ),
+            (3, 8, "generation_started", "{}".to_string()),
+        ] {
+            tx.send(RuntimeEvent {
+                session_id,
+                generation_id: Some(generation_id),
+                seq,
+                kind: kind.into(),
+                payload_json,
+            })
+            .unwrap();
+        }
+        app.poll_runtime();
+
+        assert_eq!(app.active_generation_id, Some(7));
+        assert!(matches!(app.stream_parts.as_slice(), [StreamPart::Text(text)] if text == "kept"));
+    }
+
+    #[test]
+    fn cancelled_generation_followed_by_prompt_starts_fresh_active_turn() {
+        let mut app = App::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.set_runtime_receiver(rx);
+        app.submit_user_prompt("first");
+        let session_id = app.active_session_id().unwrap();
+        tx.send(RuntimeEvent {
+            session_id,
+            generation_id: Some(7),
+            seq: 1,
+            kind: "generation_started".into(),
+            payload_json: "{}".into(),
+        })
+        .unwrap();
+        app.poll_runtime();
+        app.apply(UiEvent::Input(Input::Cancel));
+
+        app.submit_user_prompt("second");
+        assert_eq!(app.conversation_status(), ConversationStatus::Active);
+
+        tx.send(RuntimeEvent {
+            session_id,
+            generation_id: Some(7),
+            seq: 2,
+            kind: "text_delta".into(),
+            payload_json: serde_json::json!({"delta": "stale"}).to_string(),
+        })
+        .unwrap();
+        tx.send(RuntimeEvent {
+            session_id,
+            generation_id: Some(8),
+            seq: 3,
+            kind: "generation_started".into(),
+            payload_json: "{}".into(),
+        })
+        .unwrap();
+        tx.send(RuntimeEvent {
+            session_id,
+            generation_id: Some(8),
+            seq: 4,
+            kind: "text_delta".into(),
+            payload_json: serde_json::json!({"delta": "fresh"}).to_string(),
+        })
+        .unwrap();
+        app.poll_runtime();
+
+        assert_eq!(app.conversation_status(), ConversationStatus::Active);
+        assert_eq!(app.active_generation_id, Some(8));
+        assert!(matches!(app.stream_parts.as_slice(), [StreamPart::Text(text)] if text == "fresh"));
+    }
+
+    #[test]
+    fn clear_and_commands_reset_all_turn_view_state() {
+        for command in ["/clear", "/home", "/compact"] {
+            let mut app = App {
+                transcript: "x".repeat(2048),
+                prompt: command.to_string(),
+                status: ConversationStatus::Active,
+                active_generation_id: Some(7),
+                text_stream_active: true,
+                stream_parts: vec![StreamPart::Text("stale".into())],
+                stream_base_len: Some(1),
+                reasoning_buffer: "thinking".into(),
+                reasoning_start: Some(std::time::Instant::now()),
+                reasoning_duration: Some(std::time::Duration::from_secs(1)),
+                reasoning_active: true,
+                current_plan: vec![("step".into(), "pending".into())],
+                chat_scroll: 9,
+                thought_expanded: true,
+                expanded_tool_rows: HashSet::from(["call".into()]),
+                ..App::default()
+            };
+            app.upsert_tool_row(
+                "call",
+                "bash",
+                ToolRowState::Running,
+                "echo stale".into(),
+                String::new(),
+                None,
+            );
+            app.active_tool = Some(ActiveToolInfo {
+                name: "bash".into(),
+                desc: "echo stale".into(),
+                started_at: std::time::Instant::now(),
+            });
+
+            app.submit_prompt();
+
+            assert!(app.stream_parts.is_empty(), "{command}");
+            assert_eq!(app.stream_base_len, None, "{command}");
+            assert!(!app.typewriter.is_active(), "{command}");
+            assert!(!app.text_stream_active, "{command}");
+            assert!(
+                app.reasoning_buffer.is_empty(),
+                "{command}: {:?}",
+                app.reasoning_buffer
+            );
+            assert!(app.reasoning_start.is_none(), "{command}");
+            assert!(app.reasoning_duration.is_none(), "{command}");
+            assert!(!app.reasoning_active, "{command}");
+            assert!(app.active_tool.is_none(), "{command}");
+            assert!(app.tool_rows.is_empty(), "{command}");
+            assert!(app.expanded_tool_rows.is_empty(), "{command}");
+            assert!(!app.thought_expanded, "{command}");
+            assert!(app.current_plan.is_empty(), "{command}");
+            assert_eq!(app.chat_scroll, 0, "{command}");
+        }
+    }
+
+    #[test]
+    fn fresh_prompt_after_cancel_accepts_prompt_submitted() {
+        let mut app = App::default();
+        app.submit_user_prompt("first");
+        app.status = ConversationStatus::Cancelled;
+        app.active_generation_id = Some(7);
+        app.text_stream_active = true;
+        app.stream_parts = vec![StreamPart::Text("stale".into())];
+        app.stream_base_len = Some(1);
+        app.reasoning_buffer = "thinking".into();
+        app.reasoning_active = true;
+        app.current_plan = vec![("step".into(), "pending".into())];
+        app.thought_expanded = true;
+        app.upsert_tool_row(
+            "call",
+            "bash",
+            ToolRowState::Running,
+            "echo stale".into(),
+            String::new(),
+            None,
+        );
+
+        app.submit_user_prompt("fresh");
+
+        assert_eq!(app.conversation_status(), ConversationStatus::Active);
+        assert_eq!(app.active_generation_id, None);
+        assert!(app.stream_parts.is_empty());
+        assert!(app.tool_rows.is_empty());
+        assert!(app.current_plan.is_empty());
+        assert!(!app.thought_expanded);
+        assert!(!app.text_stream_active);
+    }
+
+    #[test]
+    fn runtime_finish_reason_survives_generation_finished() {
+        let mut app = App::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.set_runtime_receiver(rx);
+        app.submit_user_prompt("finish with length");
+        let session_id = app.active_session_id().unwrap();
+        for (seq, kind, payload_json) in [
+            (1, "generation_started", "{}".to_string()),
+            (
+                2,
+                "finish",
+                serde_json::json!({"reason": "Length"}).to_string(),
+            ),
+            (
+                3,
+                "generation_finished",
+                serde_json::json!({"status": "completed", "finish_reason": "Length"}).to_string(),
+            ),
+        ] {
+            tx.send(RuntimeEvent {
+                session_id,
+                generation_id: Some(1),
+                seq,
+                kind: kind.into(),
+                payload_json,
+            })
+            .unwrap();
+        }
+        app.poll_runtime();
+
+        assert_eq!(
+            app.conversation_status(),
+            ConversationStatus::Finished(FinishReason::Length)
+        );
     }
 }

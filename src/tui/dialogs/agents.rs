@@ -17,6 +17,27 @@ pub struct AgentItem {
     pub shortcut: Option<String>,
 }
 
+fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
+    if Span::raw(text).width() <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let char_width = Span::raw(ch.to_string()).width();
+        if width + char_width > max_width.saturating_sub(1) {
+            break;
+        }
+        result.push(ch);
+        width += char_width;
+    }
+    result.push('…');
+    result
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentsDialogState {
     pub items: Vec<AgentItem>,
@@ -278,18 +299,13 @@ pub fn render_agents_dialog(
                 .as_deref()
                 .map(|s| format!("[{s}]"))
                 .unwrap_or_default();
-
             let row_width = chunks[2].width as usize;
-            let prefix_len = cursor.len() + active_dot.len();
-            let badge_len = shortcut_badge.len();
+            let prefix_len = Span::raw(format!("{cursor}{active_dot}")).width();
+            let badge_len = Span::raw(&shortcut_badge).width();
             let available_for_name = row_width.saturating_sub(prefix_len + badge_len + 2);
-            let display_name = if agent.name.len() > available_for_name && available_for_name > 4 {
-                format!("{}…", &agent.name[..available_for_name - 1])
-            } else {
-                agent.name.clone()
-            };
-
-            let pad_len = row_width.saturating_sub(prefix_len + display_name.len() + badge_len);
+            let display_name = truncate_with_ellipsis(&agent.name, available_for_name);
+            let pad_len =
+                row_width.saturating_sub(prefix_len + Span::raw(&display_name).width() + badge_len);
 
             let line_style = if is_selected {
                 Style::default().bg(theme.bg_element)
@@ -308,14 +324,9 @@ pub fn render_agents_dialog(
                 .style(line_style),
             );
 
-            // Description line
             let desc_pad = "      ";
-            let avail_desc = row_width.saturating_sub(desc_pad.len());
-            let display_desc = if agent.description.len() > avail_desc && avail_desc > 4 {
-                format!("{}…", &agent.description[..avail_desc - 1])
-            } else {
-                agent.description.clone()
-            };
+            let avail_desc = row_width.saturating_sub(Span::raw(desc_pad).width());
+            let display_desc = truncate_with_ellipsis(&agent.description, avail_desc);
 
             lines.push(
                 Line::from(vec![

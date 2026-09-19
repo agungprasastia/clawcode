@@ -85,9 +85,9 @@ impl EventBus {
             .retain(|subscriber| subscriber.id != id);
     }
 
-    /// Push an event to matching subscribers. Never blocks: a subscriber
-    /// whose queue is full or whose receiver was dropped is pruned here and
-    /// must replay from the log to catch up.
+    /// Push an event to matching subscribers. Matching subscribers apply
+    /// backpressure instead of being disconnected when their queue is full.
+    /// A dropped receiver is pruned here.
     pub fn publish(&self, event: RuntimeEvent) {
         let mut subscribers = self
             .inner
@@ -96,7 +96,7 @@ impl EventBus {
             .unwrap_or_else(|p| p.into_inner());
         subscribers.retain(|subscriber| {
             if subscriber.session_id.is_none_or(|s| s == event.session_id) {
-                subscriber.sender.try_send(event.clone()).is_ok()
+                subscriber.sender.send(event.clone()).is_ok()
             } else {
                 true
             }

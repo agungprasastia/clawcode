@@ -937,16 +937,20 @@ pub fn execute_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Missing required argument 'command'".to_string())?;
 
-            if mode == Mode::Plan {
-                let decision = workspace
-                    .validate_shell(mode, ".", command_str)
-                    .unwrap_or(crate::workspace::PolicyDecision::ApprovalRequired);
-                if matches!(decision, crate::workspace::PolicyDecision::Denied) {
+            let decision = workspace
+                .validate_shell(mode, ".", command_str)
+                .unwrap_or(crate::workspace::PolicyDecision::ApprovalRequired);
+            match decision {
+                crate::workspace::PolicyDecision::Denied => {
                     return Err(
                         "Command execution denied in PLAN mode. Switch to BUILD mode (Tab) to execute modifying commands."
                             .to_string(),
                     );
                 }
+                crate::workspace::PolicyDecision::ApprovalRequired => {
+                    return Err("Command execution requires approval before execution.".to_string());
+                }
+                crate::workspace::PolicyDecision::Allowed => {}
             }
 
             let output = if cfg!(windows) {

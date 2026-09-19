@@ -1,7 +1,7 @@
 //! Multiworkspace foundation & runtime integration tests (M10).
 //! Validates migration v1->v2, interrupted generation recovery, generation
-//! lifecycle, monotonic events, pinned ordering, EventBus bounded dropping,
-//! WriterHandle append_event, and workspace isolation.
+//! lifecycle, monotonic events, pinned ordering, EventBus backpressure and
+//! subscriber pruning, WriterHandle append_event, and workspace isolation.
 
 use clawcode::persistence::{Db, GenerationStatus, SessionStatus, WriterHandle};
 use clawcode::provider::{
@@ -309,7 +309,7 @@ fn pinned_ordering_and_toggling_in_workspace() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. EventBus bounded drop and subscriber pruning
+// 6. EventBus backpressure and subscriber pruning
 // ---------------------------------------------------------------------------
 #[test]
 fn event_bus_bounded_drop_and_subscriber_pruning() {
@@ -359,6 +359,64 @@ fn event_bus_bounded_drop_and_subscriber_pruning() {
         kind: "test".into(),
         payload_json: "{}".into(),
     });
+}
+
+#[test]
+fn event_bus_backpressures_instead_of_disconnect_on_full_queue() {
+    let bus = EventBus::new();
+    let (_sub_id, rx) = bus.subscribe(Some(1));
+
+    for seq in 0..1_024 {
+        bus.publish(RuntimeEvent {
+            seq,
+            session_id: 1,
+            generation_id: None,
+            kind: "delta".into(),
+            payload_json: "{}".into(),
+        });
+    }
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let producer_bus = bus.clone();
+    let producer = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        producer_bus.publish(RuntimeEvent {
+            seq: 1_024,
+            session_id: 1,
+            generation_id: None,
+            kind: "delta".into(),
+            payload_json: "{}".into(),
+        });
+        done_tx.send(()).unwrap();
+    });
+
+    started_rx.recv().unwrap();
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err()
+    );
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+            .seq,
+        0
+    );
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok()
+    );
+    producer.join().unwrap();
+    let mut last_seq = 0;
+    for _ in 1..=1_024 {
+        last_seq = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+            .seq;
+    }
+    assert_eq!(last_seq, 1_024);
 }
 
 // ---------------------------------------------------------------------------

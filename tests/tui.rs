@@ -243,7 +243,7 @@ fn retained_transcript_is_bounded_with_visible_truncation_marker() {
 }
 
 #[test]
-fn runtime_step_prioritizes_translated_cancel_and_quit_during_stream_flood() {
+fn runtime_step_keeps_bare_q_as_prompt_text_during_stream_flood() {
     let mut app = App::default();
     let mut events = UiEventQueue::new(8);
     for _ in 0..10_000 {
@@ -276,7 +276,8 @@ fn runtime_step_prioritizes_translated_cancel_and_quit_during_stream_flood() {
     )
     .unwrap();
 
-    assert!(!app.is_running());
+    assert!(app.is_running());
+    assert_eq!(app.prompt(), "q");
     assert!(events.is_empty());
 }
 
