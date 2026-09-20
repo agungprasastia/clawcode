@@ -165,15 +165,30 @@ pub fn render_skills_dialog(
         ])
         .split(inner);
 
-    let filter_line = Line::from(vec![
-        Span::styled("Search: ", Style::default().fg(theme.dim)),
-        Span::styled(
-            &dialog.filter,
-            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("█", Style::default().fg(theme.teal)),
-    ]);
-    frame.render_widget(Paragraph::new(filter_line), chunks[0]);
+    let search_line = if dialog.filter.is_empty() {
+        Line::from(vec![
+            Span::styled("Filter: ", Style::default().fg(theme.dim)),
+            Span::styled(
+                "type to filter skills...",
+                Style::default()
+                    .fg(theme.quiet)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                "Filter: ",
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &dialog.filter,
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(theme.teal)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(search_line), chunks[0]);
 
     let divider = "─".repeat(inner.width as usize);
     frame.render_widget(
@@ -247,7 +262,28 @@ pub fn render_skills_dialog(
     }
     frame.render_widget(Paragraph::new(list_lines), list_area);
 
-    if let Some(selected_skill) = dialog.selected_skill() {
+    if filtered.is_empty() {
+        let empty_lines = vec![
+            Line::from(Span::styled(
+                "No skills discovered",
+                Style::default().fg(theme.dim),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Place SKILL.md in:",
+                Style::default().fg(theme.quiet),
+            )),
+            Line::from(Span::styled(
+                "  • ~/.agents/skills/<name>/SKILL.md",
+                Style::default().fg(theme.dim),
+            )),
+            Line::from(Span::styled(
+                "  • .agents/skills/<name>/SKILL.md",
+                Style::default().fg(theme.dim),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(empty_lines), preview_area);
+    } else if let Some(selected_skill) = dialog.selected_skill() {
         let source_str = match selected_skill.source {
             SkillSource::Project => "Project skill",
             SkillSource::Global => "Global skill",

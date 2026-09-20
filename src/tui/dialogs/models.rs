@@ -147,13 +147,11 @@ pub fn render_models_dialog(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.amber))
+        .border_style(Style::default().fg(theme.teal))
         .style(Style::default().bg(theme.panel))
         .title(Span::styled(
             title_text,
-            Style::default()
-                .fg(theme.amber)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
         ));
     frame.render_widget(block, dialog_area);
 
@@ -181,7 +179,7 @@ pub fn render_models_dialog(
 
     let search_line = if dialog.filter.is_empty() {
         Line::from(vec![
-            Span::styled("Search: ", Style::default().fg(theme.dim)),
+            Span::styled("Filter: ", Style::default().fg(theme.dim)),
             Span::styled(
                 "type to filter...",
                 Style::default()
@@ -192,16 +190,14 @@ pub fn render_models_dialog(
     } else {
         Line::from(vec![
             Span::styled(
-                "Search: ",
-                Style::default()
-                    .fg(theme.amber)
-                    .add_modifier(Modifier::BOLD),
+                "Filter: ",
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 &dialog.filter,
                 Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("█", Style::default().fg(theme.amber)),
+            Span::styled("█", Style::default().fg(theme.teal)),
         ])
     };
     frame.render_widget(Paragraph::new(search_line), chunks[0]);
@@ -249,9 +245,7 @@ pub fn render_models_dialog(
                 let active_dot = if is_active { "● " } else { "  " };
 
                 let cursor_style = if is_selected {
-                    Style::default()
-                        .fg(theme.amber)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };

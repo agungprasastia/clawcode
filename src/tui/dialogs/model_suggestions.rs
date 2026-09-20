@@ -74,9 +74,7 @@ pub fn render_model_suggestions_popup(
             let active_dot = if is_active { "● " } else { "  " };
 
             let cursor_style = if is_selected {
-                Style::default()
-                    .fg(theme.amber)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -90,9 +88,7 @@ pub fn render_model_suggestions_popup(
             };
 
             let name_style = if is_selected {
-                Style::default()
-                    .fg(theme.amber)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
             } else if is_active {
                 Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)
             } else {
@@ -121,13 +117,11 @@ pub fn render_model_suggestions_popup(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.amber))
+        .border_style(Style::default().fg(theme.teal))
         .style(Style::default().bg(theme.bg_element))
         .title(Span::styled(
             " Select Model (↑/↓ navigate, Tab/Enter select) ",
-            Style::default()
-                .fg(theme.amber)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
         ));
 
     frame.render_widget(Paragraph::new(items).block(block), popup_area);

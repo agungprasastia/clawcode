@@ -843,7 +843,7 @@ fn models_dialog_renders_centered_with_selection_indicators() {
     // Title and count
     assert!(text.contains("Select Model"));
     // Search filter bar
-    assert!(text.contains("Search:"));
+    assert!(text.contains("Filter:"));
     // Active / cursor glyphs
     assert!(text.contains("›"));
     assert!(text.contains("●"));
