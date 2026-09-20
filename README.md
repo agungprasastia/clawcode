@@ -1,79 +1,25 @@
-# Clawcode
+<div align="center">
 
-```text
-  ____ _                         _      
- / ___| | __ ___      _____ ___   __| | ___ 
-| |   | |/ _` \ \ /\ / / __/ _ \ / _` |/ _ \
-| |___| | (_| |\ V  V / (_| (_) | (_| |  __/
- \____|_|\__,_| \_/\_/ \___\___/ \__,_|\___|
-```
+![Clawcode](assets/clawcode-logo.svg)
 
 [![Rust](https://img.shields.io/badge/rust-1.98.0%2B-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![Edition](https://img.shields.io/badge/edition-2024-blue.svg?style=flat-square)](https://doc.rust-lang.org/edition-guide/)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg?style=flat-square&logo=githubactions)](.github/workflows/ci.yml)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-informational.svg?style=flat-square)]()
-[![Runtime](https://img.shields.io/badge/runtime-sync%20worker%20(zero--async)-success.svg?style=flat-square)]()
-[![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue.svg?style=flat-square)](LICENSE)
+[![CI](https://github.com/agungprasastia/clawcode/actions/workflows/ci.yml/badge.svg)](https://github.com/agungprasastia/clawcode/actions/workflows/ci.yml)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-informational.svg?style=flat-square)](#system-requirements)
+[![Runtime](https://img.shields.io/badge/runtime-fully%20synchronous-success.svg?style=flat-square)](#system-architecture)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
-**Clawcode** is a high-performance terminal AI coding assistant built in Rust. Designed for developers with a keyboard-first philosophy, zero-async runtime overhead, safe transactional file mutations, side-by-side visual diff inspection, and session persistence powered by SQLite (WAL mode).
+**A terminal-native AI coding assistant, built in Rust.**
 
----
+</div>
 
-## Terminal UI Preview
-
-```text
-┌───────────────────────────────────────────────────────────────────────────┐
-│ clawcode v0.1.0 │ git:main │ provider:anthropic │ model:claude-3-7-sonnet │
-├─────────────────────────────────────────────┬─────────────────────────────┤
-│ TRANSCRIPT                                  │ TASK PLAN                   │
-│                                             │                             │
-│ User: Update authentication middleware      │ [x] Inspect src/auth.rs     │
-│                                             │ [>] Validate token expiry   │
-│ Assistant: Adding token verification...     │ [ ] Verify unit tests       │
-│                                             │                             │
-│ • Edit src/auth.rs (+2 -1)                  │                             │
-│      12   fn verify_token(t: &str) -> bool {│                             │
-│      13 -     t.len() > 10                  │                             │
-│      13 +     let exp = parse_expiry(t)?;   │                             │
-│      14 +     exp > Utc::now().timestamp()  │                             │
-│      15   }                                 │                             │
-├─────────────────────────────────────────────┴─────────────────────────────┤
-│ [BUILD] > Enter prompt or /command (Ctrl+X: WhichKey)       Tokens: 4.2k│
-└───────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Table of Contents
-
-- [Terminal UI Preview](#terminal-ui-preview)
-- [System Architecture](#system-architecture)
-- [Key Features](#key-features)
-- [System Requirements](#system-requirements)
-- [Installation & Quick Start](#installation--quick-start)
-  - [Building from Source](#building-from-source)
-  - [API Key Configuration](#api-key-configuration)
-  - [Running the Application](#running-the-application)
-- [System Configuration (`clawcode.jsonc`)](#system-configuration-clawcodejsonc)
-- [Navigation & TUI Commands](#navigation--tui-commands)
-  - [Slash Commands](#slash-commands)
-  - [Keyboard Shortcuts](#keyboard-shortcuts)
-  - [WhichKey Quick Menu (`Ctrl+X`)](#whichkey-quick-menu-ctrlx)
-  - [Built-in Agent Profiles](#built-in-agent-profiles)
-  - [Built-in Themes](#built-in-themes)
-- [12 Built-in AI Agent Tools Specification](#12-built-in-ai-agent-tools-specification)
-- [BUILD Mode Transactional Workflow](#build-mode-transactional-workflow)
-  - [Side-by-Side Visual Diff](#side-by-side-visual-diff)
-- [Quality Assurance & Benchmarks](#quality-assurance--benchmarks)
-- [Packaging & Release Distribution](#packaging--release-distribution)
-- [Architecture Scope & Non-Goals](#architecture-scope--non-goals)
-- [License](#license)
+Clawcode pairs a keyboard-first interface with a fully synchronous runtime, transactional file mutations with automatic rollback, an inline side-by-side diff viewer, and durable session history backed by SQLite in WAL mode.
 
 ---
 
 ## System Architecture
 
-Clawcode is optimized with zero external async runtime dependencies (zero `tokio` or `async-std`). All system coordination runs on a synchronous worker thread using standard Rust communication channels (`std::sync::mpsc`) and a thread-safe event bus.
+Clawcode carries no external async runtime dependency. Every subsystem is coordinated from a single-threaded UI event loop plus a pool of synchronous worker threads, communicating exclusively through standard-library channels (`std::sync::mpsc`) and a lightweight, thread-safe event bus.
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -98,35 +44,35 @@ Clawcode is optimized with zero external async runtime dependencies (zero `tokio
       └─────────────────┘     └─────────────────┘     └───────────────────────┘
 ```
 
-Core Architectural Principles:
-- **Zero-Async Overhead**: Eliminates coroutine/async runtime overhead for minimal latency and a compact memory footprint.
-- **Atomic File Transactions**: File modifications use sibling temporary files with atomic replacement and instant rollback on interruption.
-- **Strict Bounded Resources**: Enforces bounds on transcript memory (256 KiB) and stream buffers (64 KiB), strictly truncating on valid UTF-8 character boundaries.
+Core architectural principles:
+- **Zero-async overhead**: no coroutine or async-executor scheduling cost, keeping latency low and memory usage predictable.
+- **Atomic file transactions**: every write goes through a sibling temporary file and an atomic rename, with automatic rollback if the write is interrupted.
+- **Isolated persistence connections**: the runtime, background writer, and CLI command service each own a dedicated SQLite connection opened against the same WAL-mode database file, avoiding lock contention on the render loop.
+- **Strict bounded resources**: transcript memory and provider stream buffers are hard-capped, with all truncation performed on valid UTF-8 character boundaries.
 
 ---
 
 ## Key Features
 
-- **Fast Initialization & Offline-First**: Instant TUI startup (≤100 ms target) without blocking network calls. Persistent local model metadata cache with stale-while-revalidate strategy and exponential backoff handling.
-- **Dual Execution Modes**:
-  - `PLAN`: Read-only investigation and planning mode. Safe exploration with no risk of accidental code changes or dangerous shell command execution.
-  - `BUILD`: Active transactional mutation pipeline (`validate` → `snapshot` → `diff` → `policy` → `apply`) with checkpoint rollback support and SHA-256 hash validation.
-- **Visual Side-by-Side Diff**: Two-column split-view diff presentation directly in the transcript for code edits (`edit_file`), complete with original line numbering and contrasting color markers.
-- **Provider Agnostic**:
-  - Native Anthropic Messages API adapter (`/v1/messages`).
-  - OpenAI & OpenAI-compatible providers (`/chat/completions`: OpenRouter, DeepSeek, vLLM, Groq, Mistral).
-  - Local offline model execution via Ollama (`/api/chat`).
-- **Quiet Editorial TUI**: Ratatui-based interface focused on code readability, resize-aware rendering, and WhichKey modal navigation (`Ctrl+X`).
-- **12 Built-in AI Agent Tools**: Autonomous tool suite for file hierarchy inspection, surgical text replacement, real-time web search, sandboxed shell execution, and multi-step plan tracking.
-- **Protected Workspace Sandboxing**: Canonical path resolution sandboxing prevents directory traversal attacks and symlink breakouts.
-- **SQLite Session Persistence**: Managed SQLite connection pool in WAL (Write-Ahead Logging) mode persists conversation transcripts, token usage metrics, and recovery snapshots.
+- **Fast, offline-first startup**: the TUI is designed to render its first frame quickly, with no blocking network calls at launch.
+- **Dual execution modes**:
+  - `PLAN`: read-only investigation and planning. File writes are rejected outright, and shell commands that would mutate the workspace are denied.
+  - `BUILD`: the active mutation pipeline (validate → snapshot → diff → policy → apply), with checkpointed undo/redo and SHA-256 integrity checks on every snapshot.
+- **Inline side-by-side diff**: file edits made through `edit_file` render as a two-column split view directly in the transcript, with original line numbers and clear add/remove markers.
+- **Provider-agnostic by design**: a native Anthropic Messages API adapter, an OpenAI-compatible adapter usable with any endpoint that speaks the `/chat/completions` protocol (OpenAI, OpenRouter, Groq, DeepSeek, and others), and a local Ollama adapter for fully offline inference.
+- **Quiet, editorial interface**: a Ratatui-based UI focused on code readability, resize-aware layout, and a discoverable `WhichKey` shortcut menu (`Ctrl+X`).
+- **Built-in autonomous tool suite**: file inspection, surgical text editing, live web search and fetch, sandboxed shell execution, a project skill library, and multi-step plan tracking, all callable by the assistant.
+- **Sandboxed workspace access**: canonical path resolution rejects directory traversal and symlink escapes outside the project root.
+- **Session persistence and recovery**: an SQLite database in WAL mode stores conversation transcripts, tool call history, and generation state, and automatically recovers sessions that were interrupted mid-turn.
+- **Interactive Git panel**: a `/git` dialog surfaces working-tree status and diffs without leaving the TUI.
+- **Skill library**: reusable, project-scoped instruction snippets can be loaded into the conversation with `/skill <name>`.
 
 ---
 
 ## System Requirements
 
-- **Rust**: Version `1.98.0` or newer (pinned via `rust-toolchain.toml`).
-- **Operating System**: Windows 10/11, Linux (major distributions with glibc or musl), or macOS (Apple Silicon / Intel).
+- **Rust**: version `1.98.0` or newer (pinned via `rust-toolchain.toml`).
+- **Operating system**: Windows 10/11, Linux (major distributions, glibc or musl), or macOS (Apple Silicon or Intel).
 
 ---
 
@@ -136,21 +82,21 @@ Core Architectural Principles:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/owner/clawcode.git
+git clone https://github.com/agungprasastia/clawcode.git
 cd clawcode
 
-# 2. Build optimized release binary
+# 2. Build the optimized release binary
 cargo build --release --locked
 ```
 
-The compiled binary will be located at `target/release/clawcode` (or `target\release\clawcode.exe` on Windows).
+The compiled binary is placed at `target/release/clawcode` (or `target\release\clawcode.exe` on Windows).
 
 ### API Key Configuration
 
-Configure environment variables for your chosen LLM provider:
+Set the environment variable that matches your chosen provider:
 
 ```bash
-# OpenAI or OpenAI-compatible endpoint
+# OpenAI or an OpenAI-compatible endpoint
 export OPENAI_API_KEY="sk-..."
 
 # Anthropic Claude
@@ -159,17 +105,17 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 # OpenRouter
 export OPENROUTER_API_KEY="sk-or-..."
 
-# Ollama Endpoint (optional, default: http://localhost:11434)
+# Ollama endpoint (optional, default: http://localhost:11434)
 export OLLAMA_HOST="http://localhost:11434"
 ```
 
 ### Running the Application
 
 ```bash
-# Launch interactive TUI
+# Launch the interactive TUI
 cargo run
 
-# Check application release version
+# Print the release version
 cargo run -- --version
 
 # Run non-interactive commands directly (CLI mode)
@@ -185,28 +131,24 @@ cargo run -- /new "Refactor Middleware"
 
 ## System Configuration (`clawcode.jsonc`)
 
-Clawcode supports layered configuration in JSONC format (JSON with comments and trailing commas):
+Clawcode reads layered configuration in JSONC format (JSON with comments):
 
-1. **Global Configuration**: `~/.config/clawcode/clawcode.json` (system-wide user defaults).
-2. **Project Configuration**: `.clawcode/clawcode.json` (workspace root, overrides global preferences).
+1. **Global configuration**: `~/.config/clawcode/config.jsonc` (user-wide defaults, resolved through the platform's XDG config directory).
+2. **Project configuration**: `.clawcode/config.jsonc` at the workspace root, which overrides matching global values.
 
 ### Example `clawcode.jsonc`
 
 ```jsonc
 {
-  "$schema": "https://clawcode.dev/schema/v1.json",
   "schema_version": 1,
   "model": "claude-3-7-sonnet-20250219",
   "endpoint": "https://api.anthropic.com/v1",
 
   // Plaintext API keys are rejected by the config validator.
-  // Use 'env:VAR_NAME' or 'credential:KEYRING_ID' prefix
+  // Use an 'env:VAR_NAME' or 'credential:KEYRING_ID' prefix instead.
   "api_key": "env:ANTHROPIC_API_KEY",
 
-  // Active TUI color scheme
-  "theme": "clawcode-dark",
-
-  // Custom LLM provider endpoint configuration
+  // Custom or additional provider endpoints
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -218,132 +160,142 @@ Clawcode supports layered configuration in JSONC format (JSON with comments and 
         }
       }
     }
+  },
+
+  // Per-agent overrides (plan, build, review, compact)
+  "agents": {
+    "review": {
+      "model": "claude-3-7-sonnet-20250219",
+      "temperature": 0
+    }
   }
 }
 ```
 
-> **Precise Diagnostics**: Syntax errors in configuration files report 1-based line and column coordinates for quick troubleshooting.
+> **Precise diagnostics**: configuration syntax errors report 1-based line and column coordinates to make troubleshooting fast.
 
 ---
 
-## Navigation & TUI Commands
+## Navigation & TUI
 
 ### Slash Commands
 
 | Command | Description |
 | :--- | :--- |
-| `/plan` | Switch to **PLAN** mode (read-only, safe exploration without mutations). |
-| `/build` | Switch to **BUILD** mode (active transactional mutation execution). |
-| `/connect [provider]` | Connect to default provider or a specific provider (`openai`, `anthropic`, `ollama`). |
-| `/model <id>` | Change active model (or open model picker dialog if no parameter is provided). |
-| `/models` | Open model selection dialog. |
-| `/models refresh` | Force model rediscovery from provider servers. |
-| `/agents` | Open agent profile selection dialog (`plan`, `build`, `review`, `compact`). |
-| `/themes` | Open theme picker dialog. |
+| `/plan` | Switch to **PLAN** mode (read-only, safe exploration). |
+| `/build` | Switch to **BUILD** mode (active transactional execution). |
+| `/connect [provider]` | Connect to the default provider or a specific one (`openai`, `anthropic`, `ollama`, `openrouter`, `groq`, `deepseek`, `gemini`). |
+| `/model <id>` | Change the active model, with autocomplete suggestions as you type. |
+| `/models` | Open the model selection dialog. |
+| `/models refresh` | Force model rediscovery from the provider. |
+| `/agents` | Open the agent profile dialog (`plan`, `build`, `review`, `compact`). |
+| `/themes` | Open the theme picker dialog. |
 | `/theme <name>` | Switch theme directly (e.g. `/theme catppuccin`). |
-| `/new <title>` | Create a new session with the specified title. |
-| `/sessions` | Open session history dialog. |
-| `/clear` / `/home` | Clear active transcript display on screen. |
-| `/compact` | Compact conversation history transcript to conserve context tokens. |
-| `/copy` | Copy full transcript of active session to system clipboard. |
-| `/status` | Show runtime metrics, connection diagnostics, and token usage details. |
-| `/keys` | Open keyboard shortcuts cheatsheet (`WhichKey`). |
-| `/help` | Display quick reference guide for all supported commands. |
-| `/exit` | Save active session to SQLite database and quit application. |
+| `/git` | Open the interactive Git status and diff dialog. |
+| `/skills` | Open the skill library picker. |
+| `/skill <name> [prompt]` | Load a named skill's instructions into the conversation, optionally with an extra prompt. |
+| `/new <title>` | Create a new session with the given title. |
+| `/sessions` | Open the session history dialog. |
+| `/clear` / `/home` | Clear the transcript on screen. |
+| `/compact` | Compact the conversation transcript to conserve context tokens. |
+| `/copy` | Copy the active transcript (or current status, if empty) to the system clipboard. |
+| `/status` | Show runtime metrics, connection diagnostics, and token usage. |
+| `/keys` | Open the keyboard shortcuts cheatsheet (`WhichKey`). |
+| `/help` | Display a quick reference of all supported commands. |
+| `/exit` | Save the active session and quit the application. |
 
 ### Keyboard Shortcuts
 
 | Key Combination | Action |
 | :--- | :--- |
-| `Tab` / `Shift+Tab` | Instant toggle between **PLAN** and **BUILD** modes. |
-| `Ctrl+C` | Interrupt active model streaming or cancel running tool process. |
-| `Ctrl+L` | Clear transcript display on screen. |
-| `Ctrl+X` | Open quick shortcut menu (**WhichKey**). |
-| `Ctrl+V` | Paste text from clipboard into prompt input. |
-| `Esc` / `q` | Close active modal dialog / cancel current action. |
-| `PageUp` / `PageDown` | Scroll transcript one full page up / down. |
-| `Shift+Up` / `Shift+Down` | Scroll transcript line by line. |
-| `Up` / `Down` | Navigate prompt history or selection items in modal dialogs. |
-| `Enter` | Submit prompt instruction / confirm dialog selection. |
+| `Tab` / `Shift+Tab` | Toggle between **PLAN** and **BUILD** modes. |
+| `Ctrl+C` | Cancel the active turn or running tool call. |
+| `Ctrl+L` | Clear the transcript on screen. |
+| `Ctrl+X` | Toggle the quick shortcut menu (**WhichKey**). |
+| `Ctrl+V` | Paste text from the clipboard into the prompt input. |
+| `Esc` | Dismiss the active dialog or panel (with no modal open, this quits the app). |
+| `PageUp` / `PageDown` | Scroll the transcript one page up / down. |
+| `Shift+Up` / `Shift+Down` (or `Ctrl+`/`Alt+` + arrow) | Scroll the transcript line by line. |
+| `Up` / `Down` | Navigate prompt history, or move the selection inside dialogs. |
+| `Home` / `End` | Jump to the start / end of the input line. |
+| `Enter` | Submit the prompt, or confirm the selected dialog item. |
 
 ### WhichKey Quick Menu (`Ctrl+X`)
 
-Pressing `Ctrl+X` opens the quick action menu:
+Pressing `Ctrl+X` opens a quick action popup; the next key press is routed straight to the matching action.
 
-| Key | Action / Dialog |
+| Key | Action |
 | :---: | :--- |
-| `a` | Open **Agents** dialog |
-| `m` | Open **Models** dialog |
-| `t` | Open **Themes** dialog |
-| `s` | Open runtime **Status** summary dialog |
-| `p` | Switch mode to **PLAN** |
-| `b` | Switch mode to **BUILD** |
-| `c` | Clear chat transcript on screen |
+| `a` | Open the **Agents** dialog. |
+| `t` | Open the **Themes** dialog. |
+| `m` | Open the **Models** dialog. |
+| `s` | Open the runtime **Status** dialog. |
+| `r` | Open the **Sessions** dialog. |
+| `p` | Switch mode to **PLAN**. |
+| `b` | Switch mode to **BUILD**. |
+| `c` | Clear the chat transcript on screen. |
 
 ### Built-in Agent Profiles
 
-| Agent Profile | Default Mode | Description & Focus |
+| Agent Profile | Default Mode | Focus |
 | :--- | :---: | :--- |
 | **Plan Agent** | `PLAN` | Safe repository exploration, architectural analysis, and task planning. |
 | **Build Agent** | `BUILD` | Autonomous code editing, tool execution, and verified mutations. |
-| **Review Agent** | `PLAN` | Source code quality audits, security review, and PR evaluations. |
-| **Compact Agent** | `BUILD` | Token-efficient execution with terse responses and low latency. |
+| **Review Agent** | `PLAN` | Source code quality audits, security review, and PR readiness checks. |
+| **Compact Agent** | `BUILD` | Terse output, minimal token usage, and low-latency execution. |
 
 ### Built-in Themes
 
-Clawcode provides 8 built-in color schemes:
-
 | Theme ID | Theme Name | Visual Characteristics |
 | :--- | :--- | :--- |
-| `clawcode-dark` | **Clawcode Dark** *(Default)* | High-contrast amber & teal accents over deep charcoal background. |
-| `crabcode-orange` | **Crabcode Orange** | Warm orange ember and coral reef gradients. |
-| `catppuccin` | **Catppuccin Mocha** | Soothing pastel palette of mauve, sapphire, and mocha. |
-| `dracula` | **Dracula** | High-contrast nocturnal purple, pink, and cyan accents. |
-| `nord` | **Nord** | Cool Arctic blue, teal, and polar night palette. |
-| `gruvbox` | **Gruvbox Dark** | Retro warm dark wood, cream, and orange accents. |
-| `tokyo-night` | **Tokyo Night** | Metropolitan night vibes with indigo and neon blue tones. |
-| `monokai` | **Monokai** | Legendary charcoal gray palette with green, yellow, and magenta accents. |
+| `clawcode-dark` | **Clawcode Dark** *(Default)* | Amber and teal accents on a deep charcoal background. |
+| `catppuccin` | **Catppuccin Mocha** | Pastel mauve, sapphire, and mocha surface tones. |
+| `dracula` | **Dracula** | Vibrant purple, pink, and cyan gothic palette. |
+| `nord` | **Nord** | Arctic frost blue, teal, and polar night tones. |
+| `gruvbox` | **Gruvbox Dark** | Retro warm yellow, aqua, and earthy brown accents. |
+| `tokyo-night` | **Tokyo Night** | Midnight blue with neon cyan and magenta highlights. |
+| `monokai` | **Monokai** | Vivid yellow, green, and retro charcoal palette. |
 
 ---
 
-## 12 Built-in AI Agent Tools Specification
+## Built-in AI Agent Tools
 
-Clawcode's autonomous system provides 12 core tools with isolated access permissions per mode:
+Clawcode exposes 12 tools to the assistant, with access to mutating tools gated by the active mode:
 
 | Tool Name | Allowed Modes | Scope & Function |
 | :--- | :---: | :--- |
-| `read_file` | PLAN / BUILD | Read file contents with precise line selectors (`offset`, `limit`, inline `path:10-50`). |
-| `list_dir` | PLAN / BUILD | List directory and file structure within workspace. |
-| `glob_search` | PLAN / BUILD | Search files matching glob patterns (e.g. `**/*.rs`, `src/**/*.json`). |
-| `grep_search` | PLAN / BUILD | Fast case-insensitive text pattern search across project files. |
-| `write_file` | BUILD | Create new file or overwrite entire file content from scratch. |
-| `edit_file` | BUILD | Surgical file modification via exact literal string replacement. |
-| `bash` | BUILD | Execute shell commands in workspace root within sandbox bounds. |
-| `websearch` | PLAN / BUILD | Real-time web search via DuckDuckGo Instant Answers. |
-| `webfetch` | PLAN / BUILD | Fetch web content over HTTP/HTTPS and strip markup tags to clean text. |
-| `skill` | PLAN / BUILD | Load domain-specific instruction module from `skills/` directory. |
-| `question` | PLAN / BUILD | Prompt user with structured clarifying questions and predefined options. |
-| `update_plan` | PLAN / BUILD | Update multi-step execution plan checklist (*pending*, *in_progress*, *completed*). |
+| `read_file` | PLAN / BUILD | Read file contents with pagination or inline selectors (`path:10-50`, `path:10+20`, `path:-40`, `path:raw`). |
+| `list_dir` | PLAN / BUILD | List directory contents within the workspace. |
+| `glob_search` | PLAN / BUILD | Find files matching a glob pattern (e.g. `**/*.rs`). |
+| `grep_search` | PLAN / BUILD | Case-insensitive text search across project files. |
+| `write_file` | BUILD | Create a new file. Blocked in PLAN mode. |
+| `edit_file` | BUILD | Modify an existing file via exact literal substring replacement. Blocked in PLAN mode. |
+| `bash` | PLAN / BUILD | Run a shell command in the workspace root; read-only commands are allowed in PLAN, mutating commands require BUILD mode and, depending on policy, explicit approval. |
+| `websearch` | PLAN / BUILD | Search the web for documentation, references, or error solutions. |
+| `webfetch` | PLAN / BUILD | Fetch a web page by URL and return readable content. |
+| `skill` | PLAN / BUILD | Load a named instruction module from the project's skill library. |
+| `question` | PLAN / BUILD | Ask the user a clarifying question, optionally with predefined options. |
+| `update_plan` | PLAN / BUILD | Update the structured multi-step execution plan (`pending`, `in_progress`, `completed`). |
 
 ---
 
 ## BUILD Mode Transactional Workflow
 
-Every mutation in **BUILD** mode passes through an atomic verification pipeline:
+Every mutation submitted in **BUILD** mode passes through an atomic pipeline:
 
 ```text
 Mutation Request ──► Validate ──► Snapshot ──► Diff Review ──► Policy Check ──► Apply / Revert
 ```
 
-1. **Validate**: Verifies canonical target file path to prevent directory traversal and symlink escapes outside the workspace.
-2. **Snapshot**: Saves current file state into SQLite database alongside SHA-256 checksum hash to support undo/redo rollbacks.
-3. **Diff Review**: Computes line-by-line modification delta before applying changes.
-4. **Policy Check**: Evaluates security policies. Destructive operations or mutations outside the workspace require explicit user confirmation.
-5. **Apply / Revert**: Writes modifications using a sibling temporary file and replaces atomically. If an error occurs, automatic rollback triggers immediately.
+1. **Validate**: resolves the target path against the workspace root, rejecting directory traversal and symlink escapes.
+2. **Snapshot**: captures the file's current and proposed state along with a SHA-256 checksum, recorded on an undo/redo stack.
+3. **Diff Review**: computes the line-by-line change before anything is written.
+4. **Policy Check**: evaluates the operation; overwriting an existing file or running a mutating shell command may require explicit user approval, and disallowed operations are denied outright.
+5. **Apply / Revert**: writes through a sibling temporary file and an atomic rename. If any mutation in the batch fails, previously applied changes in that batch are rolled back automatically.
 
 ### Side-by-Side Visual Diff
 
-When `edit_file` runs, the transcript displays a two-column split-view diff:
+When `edit_file` runs, the transcript renders a two-column split view of the change:
 
 ```text
 • Edit src/main.rs (+1 -1)
@@ -356,16 +308,16 @@ When `edit_file` runs, the transcript displays a two-column split-view diff:
 
 ## Quality Assurance & Benchmarks
 
-The entire repository is validated against strict quality standards:
+The repository is validated against the following commands:
 
 ```bash
-# 1. Check standard code formatting
+# 1. Check code formatting
 cargo fmt --all -- --check
 
 # 2. Static linting (strict mode, zero warnings allowed)
 cargo clippy --all-targets --all-features --locked -- -D warnings
 
-# 3. Run full unit and integration test suite
+# 3. Run the full unit and integration test suite
 cargo test --all-targets --all-features --locked
 
 # 4. Run performance benchmarks (render latency & first-frame throughput)
@@ -377,31 +329,31 @@ cargo bench --bench first_frame
 
 ## Packaging & Release Distribution
 
-Automated build scripts compile release binary artifacts and generate SHA-256 checksum files:
+Build scripts compile release binary artifacts and generate SHA-256 checksum files:
 
 - **Windows (PowerShell)**:
   ```powershell
   pwsh -File scripts/package.ps1
   ```
-- **Linux / macOS (POSIX Shell)**:
+- **Linux / macOS (POSIX shell)**:
   ```bash
   sh scripts/package.sh
   ```
 
-Complete documentation on reproducible build procedures is available in [`docs/reproducible-builds.md`](docs/reproducible-builds.md).
+Reproducible build documentation is available in [`docs/reproducible-builds.md`](docs/reproducible-builds.md).
 
 ---
 
 ## Architecture Scope & Non-Goals
 
-Clawcode is intentionally designed as a standalone, portable, instant terminal binary. The following are deliberate non-goals:
-- Separate background daemon processes.
-- Third-party runtime plugin systems.
-- Web client interfaces or desktop GUI wrappers.
-- Custom adapter drivers for endpoints already compliant with the OpenAI protocol specification.
+Clawcode is intentionally designed as a standalone, portable terminal binary. The following are deliberate non-goals:
+- A separate background daemon process.
+- A third-party runtime plugin system.
+- A web client interface or desktop GUI wrapper.
+- Custom adapters for endpoints that are already compliant with the OpenAI protocol; the generic OpenAI-compatible adapter handles those.
 
 ---
 
 ## License
 
-Distributed under dual [MIT](LICENSE) or Apache-2.0 license terms. See `LICENSE` for details.
+Clawcode is distributed under the [MIT License](LICENSE).
