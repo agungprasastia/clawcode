@@ -1,3 +1,4 @@
+use super::tool_rows::ToolRowUpdate;
 use super::util::*;
 use super::*;
 
@@ -243,25 +244,25 @@ fn test_delete_session_in_sessions_dialog() {
 #[test]
 fn test_tool_row_expandable_and_click() {
     let mut app = App::default();
-    app.upsert_tool_row(
-        "bash-short",
-        "bash",
-        ToolRowState::Running,
-        "echo 1".to_string(),
-        String::new(),
-        None,
-    );
+    app.upsert_tool_row(ToolRowUpdate {
+        call_id: "bash-short",
+        name: "bash",
+        state: ToolRowState::Running,
+        desc: "echo 1".to_string(),
+        arguments: String::new(),
+        metadata: None,
+    });
     app.complete_tool_row("bash-short", "bash", true, "line 1\nline 2");
     assert!(!app.tool_rows[0].expandable);
 
-    app.upsert_tool_row(
-        "bash-long",
-        "bash",
-        ToolRowState::Running,
-        "echo many".to_string(),
-        String::new(),
-        None,
-    );
+    app.upsert_tool_row(ToolRowUpdate {
+        call_id: "bash-long",
+        name: "bash",
+        state: ToolRowState::Running,
+        desc: "echo many".to_string(),
+        arguments: String::new(),
+        metadata: None,
+    });
     let long_output = (1..=12)
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()
@@ -467,14 +468,14 @@ fn clear_and_commands_reset_all_turn_view_state() {
             expanded_tool_rows: HashSet::from(["call".into()]),
             ..App::default()
         };
-        app.upsert_tool_row(
-            "call",
-            "bash",
-            ToolRowState::Running,
-            "echo stale".into(),
-            String::new(),
-            None,
-        );
+        app.upsert_tool_row(ToolRowUpdate {
+            call_id: "call",
+            name: "bash",
+            state: ToolRowState::Running,
+            desc: "echo stale".into(),
+            arguments: String::new(),
+            metadata: None,
+        });
         app.active_tool = Some(ActiveToolInfo {
             name: "bash".into(),
             desc: "echo stale".into(),
@@ -521,14 +522,14 @@ fn fresh_prompt_after_cancel_accepts_prompt_submitted() {
     app.reasoning_active = true;
     app.current_plan = vec![("step".into(), "pending".into())];
     app.thought_expanded = true;
-    app.upsert_tool_row(
-        "call",
-        "bash",
-        ToolRowState::Running,
-        "echo stale".into(),
-        String::new(),
-        None,
-    );
+    app.upsert_tool_row(ToolRowUpdate {
+        call_id: "call",
+        name: "bash",
+        state: ToolRowState::Running,
+        desc: "echo stale".into(),
+        arguments: String::new(),
+        metadata: None,
+    });
 
     app.submit_user_prompt("fresh");
 

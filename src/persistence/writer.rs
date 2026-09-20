@@ -3,7 +3,7 @@
 
 use crate::persistence::db::{
     ContextEpoch, Db, InputDelivery, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, Message,
-    SessionInput, ToolCall, ToolCallStatus,
+    NewToolCall, SessionInput, ToolCall, ToolCallStatus,
 };
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -155,14 +155,14 @@ impl WriterHandle {
                         flush_batch(&mut db, &mut pending);
                         flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
-                            db.create_tool_call(
+                            db.create_tool_call(NewToolCall {
                                 session_id,
                                 generation_id,
                                 assistant_message_id,
-                                &call_id,
-                                &tool_name,
-                                &arguments,
-                            )
+                                call_id: &call_id,
+                                tool_name: &tool_name,
+                                arguments: &arguments,
+                            })
                             .map_err(|error| error.to_string()),
                         );
                     }
@@ -315,14 +315,14 @@ impl WriterHandle {
                             flush_batch(&mut db, &mut pending);
                             flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
-                                db.create_tool_call(
+                                db.create_tool_call(NewToolCall {
                                     session_id,
                                     generation_id,
                                     assistant_message_id,
-                                    &call_id,
-                                    &tool_name,
-                                    &arguments,
-                                )
+                                    call_id: &call_id,
+                                    tool_name: &tool_name,
+                                    arguments: &arguments,
+                                })
                                 .map_err(|error| error.to_string()),
                             );
                         }
@@ -517,31 +517,22 @@ impl WriterHandle {
         reply_rx.recv().map_err(|error| error.to_string())?
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_tool_call(
-        &self,
-        session_id: i64,
-        generation_id: i64,
-        assistant_message_id: i64,
-        call_id: &str,
-        tool_name: &str,
-        arguments: &str,
-    ) -> Result<(ToolCall, i64), String> {
-        if arguments.len() > MAX_TOOL_OUTPUT_BYTES {
+    pub fn create_tool_call(&self, tool: NewToolCall<'_>) -> Result<(ToolCall, i64), String> {
+        if tool.arguments.len() > MAX_TOOL_OUTPUT_BYTES {
             return Err(format!(
                 "tool arguments too large: {} bytes (max {MAX_TOOL_OUTPUT_BYTES})",
-                arguments.len()
+                tool.arguments.len()
             ));
         }
         let (reply_tx, reply_rx) = mpsc::channel();
         self.sender()?
             .try_send(Command::CreateToolCall {
-                session_id,
-                generation_id,
-                assistant_message_id,
-                call_id: call_id.to_string(),
-                tool_name: tool_name.to_string(),
-                arguments: arguments.to_string(),
+                session_id: tool.session_id,
+                generation_id: tool.generation_id,
+                assistant_message_id: tool.assistant_message_id,
+                call_id: tool.call_id.to_string(),
+                tool_name: tool.tool_name.to_string(),
+                arguments: tool.arguments.to_string(),
                 reply: reply_tx,
             })
             .map_err(|error| error.to_string())?;

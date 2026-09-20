@@ -91,15 +91,15 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
     let mut tool_row_lines = Vec::new();
     let mut lines = if !app.stream_parts().is_empty() {
         let mut ordered = Vec::new();
-        append_stream_parts(
-            &mut ordered,
-            app.stream_parts(),
+        let mut ctx = ChatRenderContext {
+            lines: &mut ordered,
             app,
             theme,
             mode_color,
-            chunks[1].width,
-            &mut tool_row_lines,
-        );
+            width: chunks[1].width,
+            tool_row_lines: &mut tool_row_lines,
+        };
+        append_stream_parts(&mut ctx, app.stream_parts());
         ordered
     } else {
         let mut ordered = format_transcript_lines_with_width(
@@ -310,111 +310,134 @@ fn indent_assistant_line(line: &mut Line<'static>) {
     line.spans.insert(0, Span::raw("   "));
 }
 
-#[allow(clippy::too_many_arguments)]
-fn append_stream_parts(
-    lines: &mut Vec<Line<'static>>,
-    parts: &[StreamPart],
-    app: &App,
-    theme: &Theme,
+struct ChatRenderContext<'a> {
+    lines: &'a mut Vec<Line<'static>>,
+    app: &'a App,
+    theme: &'a Theme,
     mode_color: Color,
     width: u16,
-    tool_row_lines: &mut Vec<(String, usize)>,
-) {
+    tool_row_lines: &'a mut Vec<(String, usize)>,
+}
+
+fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
     for part in parts {
         match part {
             StreamPart::User(prompt) => {
-                let card_width = if width > 2 {
-                    (width.saturating_sub(2) as usize).max(20)
+                let card_width = if ctx.width > 2 {
+                    (ctx.width.saturating_sub(2) as usize).max(20)
                 } else {
-                    width as usize
+                    ctx.width as usize
                 };
                 let p_lines: Vec<&str> = prompt.lines().collect();
                 if p_lines.is_empty() {
                     let content_line = Line::from(vec![
                         Span::styled(
                             "▌ ",
-                            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(ctx.mode_color)
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             String::new(),
-                            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(ctx.theme.ink)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]);
-                    lines.push(pad_card_line(content_line, card_width, theme.bg_element));
+                    ctx.lines.push(pad_card_line(
+                        content_line,
+                        card_width,
+                        ctx.theme.bg_element,
+                    ));
                 } else {
                     for (idx, pline) in p_lines.iter().enumerate() {
                         let prefix = if idx == 0 { "▌ " } else { "  " };
                         let content_line = Line::from(vec![
                             Span::styled(
                                 prefix,
-                                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(ctx.mode_color)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
                                 (*pline).to_string(),
-                                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(ctx.theme.ink)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                         ]);
-                        lines.push(pad_card_line(content_line, card_width, theme.bg_element));
+                        ctx.lines.push(pad_card_line(
+                            content_line,
+                            card_width,
+                            ctx.theme.bg_element,
+                        ));
                     }
                 }
-                lines.push(Line::from(""));
+                ctx.lines.push(Line::from(""));
             }
             StreamPart::Text(text) => {
-                let mut rendered =
-                    format_transcript_lines_with_width(text, theme, mode_color, Some(width));
+                let mut rendered = format_transcript_lines_with_width(
+                    text,
+                    ctx.theme,
+                    ctx.mode_color,
+                    Some(ctx.width),
+                );
                 for line in &mut rendered {
                     indent_assistant_line(line);
                 }
-                lines.extend(rendered);
+                ctx.lines.extend(rendered);
             }
             StreamPart::Reasoning(text) => {
                 let dur_str = format!(
                     "{:.1}s",
-                    app.reasoning_elapsed_seconds().unwrap_or(0.1).max(0.1)
+                    ctx.app.reasoning_elapsed_seconds().unwrap_or(0.1).max(0.1)
                 );
-                if app.is_reasoning() {
-                    lines.push(Line::from(vec![
+                if ctx.app.is_reasoning() {
+                    ctx.lines.push(Line::from(vec![
                         Span::raw("   "),
                         Span::styled(
-                            format!("{} Thinking", app.wave_spinner().compact_frame()),
+                            format!("{} Thinking", ctx.app.wave_spinner().compact_frame()),
                             Style::default()
-                                .fg(theme.amber)
+                                .fg(ctx.theme.amber)
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ]));
                 } else {
-                    tool_row_lines.push(("__thought__".to_string(), lines.len()));
-                    if app.is_thought_expanded() {
-                        lines.push(Line::from(vec![
+                    let line_count = ctx.lines.len();
+                    ctx.tool_row_lines
+                        .push(("__thought__".to_string(), line_count));
+                    if ctx.app.is_thought_expanded() {
+                        ctx.lines.push(Line::from(vec![
                             Span::raw("   "),
                             Span::styled(
                                 format!("- Thought for {dur_str}"),
-                                Style::default().fg(theme.amber),
+                                Style::default().fg(ctx.theme.amber),
                             ),
                         ]));
                         for l in text.lines() {
-                            lines.push(Line::from(vec![
+                            ctx.lines.push(Line::from(vec![
                                 Span::raw("      │ "),
-                                Span::styled(l.to_string(), Style::default().fg(theme.quiet)),
+                                Span::styled(l.to_string(), Style::default().fg(ctx.theme.quiet)),
                             ]));
                         }
                     } else {
-                        lines.push(Line::from(vec![
+                        ctx.lines.push(Line::from(vec![
                             Span::raw("   "),
                             Span::styled(
                                 format!("+ Thought for {dur_str}"),
-                                Style::default().fg(theme.amber),
+                                Style::default().fg(ctx.theme.amber),
                             ),
                         ]));
                     }
-                    lines.push(Line::from(""));
+                    ctx.lines.push(Line::from(""));
                 }
             }
             StreamPart::Tool(call_id) => {
+                let app = ctx.app;
                 let Some(row) = app.tool_rows().iter().find(|row| row.call_id == *call_id) else {
                     continue;
                 };
-                render_tool_card_or_row(lines, row, app, theme, mode_color, width, tool_row_lines);
+                render_tool_card_or_row(ctx, row);
             }
         }
     }
@@ -485,16 +508,13 @@ pub fn strip_ansi_codes(s: &str) -> String {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_shell_card(
-    lines: &mut Vec<Line<'static>>,
-    row: &ToolRow,
-    app: &App,
-    theme: &Theme,
-    mode_color: Color,
-    width: u16,
-    tool_row_lines: &mut Vec<(String, usize)>,
-) {
+fn render_shell_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
+    let lines = &mut *ctx.lines;
+    let app = ctx.app;
+    let theme = ctx.theme;
+    let mode_color = ctx.mode_color;
+    let width = ctx.width;
+    let tool_row_lines = &mut *ctx.tool_row_lines;
     let card_width = (width as usize).saturating_sub(2).max(20);
     let cmd = shell_command(row);
     let is_running = matches!(row.state, ToolRowState::Pending | ToolRowState::Running);
@@ -696,16 +716,13 @@ fn extract_diff_lines(row: &ToolRow) -> Vec<crate::tui::diff::DiffLine> {
     Vec::new()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_diff_card(
-    lines: &mut Vec<Line<'static>>,
-    row: &ToolRow,
-    app: &App,
-    theme: &Theme,
-    mode_color: Color,
-    width: u16,
-    tool_row_lines: &mut Vec<(String, usize)>,
-) {
+fn render_diff_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
+    let lines = &mut *ctx.lines;
+    let app = ctx.app;
+    let theme = ctx.theme;
+    let mode_color = ctx.mode_color;
+    let width = ctx.width;
+    let tool_row_lines = &mut *ctx.tool_row_lines;
     let card_width = (width as usize).saturating_sub(2).max(20);
     let mut title = tool_row_detail(row);
     if row.state == ToolRowState::Failed {
@@ -890,38 +907,27 @@ fn render_diff_card(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_tool_card_or_row(
-    lines: &mut Vec<Line<'static>>,
-    row: &ToolRow,
-    app: &App,
-    theme: &Theme,
-    mode_color: Color,
-    width: u16,
-    tool_row_lines: &mut Vec<(String, usize)>,
-) {
+fn render_tool_card_or_row(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
     if matches!(row.name.as_str(), "bash" | "sh") {
-        render_shell_card(lines, row, app, theme, mode_color, width, tool_row_lines);
+        render_shell_card(ctx, row);
     } else if matches!(
         row.name.as_str(),
         "edit_file" | "edit" | "patch" | "apply_patch"
     ) {
-        render_diff_card(lines, row, app, theme, mode_color, width, tool_row_lines);
+        render_diff_card(ctx, row);
     } else {
-        render_generic_tool_card(lines, row, app, theme, mode_color, width, tool_row_lines);
+        render_generic_tool_card(ctx, row);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_generic_tool_card(
-    lines: &mut Vec<Line<'static>>,
-    row: &ToolRow,
-    app: &App,
-    theme: &Theme,
-    mode_color: Color,
-    width: u16,
-    tool_row_lines: &mut Vec<(String, usize)>,
-) {
+fn render_generic_tool_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
+    let lines = &mut *ctx.lines;
+    let app = ctx.app;
+    let theme = ctx.theme;
+    let mode_color = ctx.mode_color;
+    let width = ctx.width;
+    let tool_row_lines = &mut *ctx.tool_row_lines;
+
     lines.push(compact_tool_line(row, app, theme, mode_color, width));
     tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
 
@@ -1831,15 +1837,15 @@ mod tests {
             expandable: false,
         };
         let app = App::default();
-        render_shell_card(
-            &mut lines,
-            &row,
-            &app,
-            &theme,
-            Color::Cyan,
-            60,
-            &mut tool_lines,
-        );
+        let mut ctx = ChatRenderContext {
+            lines: &mut lines,
+            app: &app,
+            theme: &theme,
+            mode_color: Color::Cyan,
+            width: 60,
+            tool_row_lines: &mut tool_lines,
+        };
+        render_shell_card(&mut ctx, &row);
         let card_width = 58;
         assert_eq!(lines.len(), 6);
         assert_eq!(lines[0].width(), card_width);
@@ -1878,15 +1884,15 @@ mod tests {
             started_at: std::time::Instant::now(),
             expandable: true,
         };
-        render_shell_card(
-            &mut lines1,
-            &row1,
-            &app,
-            &theme,
-            Color::Cyan,
-            60,
-            &mut tool_lines,
-        );
+        let mut ctx1 = ChatRenderContext {
+            lines: &mut lines1,
+            app: &app,
+            theme: &theme,
+            mode_color: Color::Cyan,
+            width: 60,
+            tool_row_lines: &mut tool_lines,
+        };
+        render_shell_card(&mut ctx1, &row1);
         let hint_line1 = lines1.iter().find(|l| {
             l.spans
                 .iter()
@@ -1918,15 +1924,15 @@ mod tests {
             started_at: std::time::Instant::now(),
             expandable: true,
         };
-        render_shell_card(
-            &mut lines2,
-            &row2,
-            &app,
-            &theme,
-            Color::Cyan,
-            60,
-            &mut tool_lines,
-        );
+        let mut ctx2 = ChatRenderContext {
+            lines: &mut lines2,
+            app: &app,
+            theme: &theme,
+            mode_color: Color::Cyan,
+            width: 60,
+            tool_row_lines: &mut tool_lines,
+        };
+        render_shell_card(&mut ctx2, &row2);
         let hint_line2 = lines2.iter().find(|l| {
             l.spans
                 .iter()
@@ -1965,15 +1971,15 @@ mod tests {
             expandable: false,
         };
         let app = App::default();
-        render_diff_card(
-            &mut lines,
-            &row,
-            &app,
-            &theme,
-            Color::Cyan,
-            70,
-            &mut tool_lines,
-        );
+        let mut ctx = ChatRenderContext {
+            lines: &mut lines,
+            app: &app,
+            theme: &theme,
+            mode_color: Color::Cyan,
+            width: 70,
+            tool_row_lines: &mut tool_lines,
+        };
+        render_diff_card(&mut ctx, &row);
         let card_width = 68;
         for line in &lines[..lines.len() - 1] {
             assert_eq!(line.width(), card_width);
@@ -2106,15 +2112,15 @@ mod tests {
         ];
         let mut lines = Vec::new();
         let mut tool_lines = Vec::new();
-        append_stream_parts(
-            &mut lines,
-            &parts,
-            &app,
-            &theme,
+        let mut ctx = ChatRenderContext {
+            lines: &mut lines,
+            app: &app,
+            theme: &theme,
             mode_color,
-            80,
-            &mut tool_lines,
-        );
+            width: 80,
+            tool_row_lines: &mut tool_lines,
+        };
+        append_stream_parts(&mut ctx, &parts);
         assert!(
             lines
                 .iter()
@@ -2171,15 +2177,15 @@ mod tests {
         let app = App::default();
         let theme = ThemeKind::ClawcodeDark.to_theme();
         let mut tool_lines = Vec::new();
-        render_shell_card(
-            &mut lines,
-            &row,
-            &app,
-            &theme,
-            Color::Cyan,
-            60,
-            &mut tool_lines,
-        );
+        let mut ctx = ChatRenderContext {
+            lines: &mut lines,
+            app: &app,
+            theme: &theme,
+            mode_color: Color::Cyan,
+            width: 60,
+            tool_row_lines: &mut tool_lines,
+        };
+        render_shell_card(&mut ctx, &row);
         let output_line = lines
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.contains(".agents")));
@@ -2220,15 +2226,15 @@ mod tests {
         // Collapsed by default
         let mut lines = Vec::new();
         let mut tool_lines = Vec::new();
-        append_stream_parts(
-            &mut lines,
-            &parts,
-            &app,
-            &theme,
+        let mut ctx = ChatRenderContext {
+            lines: &mut lines,
+            app: &app,
+            theme: &theme,
             mode_color,
-            80,
-            &mut tool_lines,
-        );
+            width: 80,
+            tool_row_lines: &mut tool_lines,
+        };
+        append_stream_parts(&mut ctx, &parts);
         assert!(tool_lines.iter().any(|(id, _)| id == "__thought__"));
         let thought_header = lines.iter().find(|l| {
             l.spans
@@ -2247,15 +2253,15 @@ mod tests {
         assert!(app.is_thought_expanded());
         let mut lines_exp = Vec::new();
         let mut tool_lines_exp = Vec::new();
-        append_stream_parts(
-            &mut lines_exp,
-            &parts,
-            &app,
-            &theme,
+        let mut ctx_exp = ChatRenderContext {
+            lines: &mut lines_exp,
+            app: &app,
+            theme: &theme,
             mode_color,
-            80,
-            &mut tool_lines_exp,
-        );
+            width: 80,
+            tool_row_lines: &mut tool_lines_exp,
+        };
+        append_stream_parts(&mut ctx_exp, &parts);
         let expanded_header = lines_exp.iter().find(|l| {
             l.spans
                 .iter()

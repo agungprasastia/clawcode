@@ -1,4 +1,6 @@
-use super::tool_rows::{ActiveToolInfo, ToolRowState, tool_names_match, tool_target_and_verbs};
+use super::tool_rows::{
+    ActiveToolInfo, ToolRowState, ToolRowUpdate, tool_names_match, tool_target_and_verbs,
+};
 use super::util::{bounded, parse_plan_items};
 use super::{App, ConversationStatus, MAX_DIAGNOSTIC_BYTES, MAX_TOOL_ARGUMENT_BYTES, StreamPart};
 use crate::provider::FinishReason;
@@ -157,14 +159,14 @@ impl App {
                         .map(ToString::to_string)
                         .unwrap_or_else(|| format!("{name}:{}", event.seq));
                     self.push_tool_part(call_id.clone());
-                    self.upsert_tool_row(
-                        &call_id,
+                    self.upsert_tool_row(ToolRowUpdate {
+                        call_id: &call_id,
                         name,
-                        ToolRowState::Pending,
-                        "preparing arguments...".to_string(),
-                        String::new(),
-                        payload.get("metadata").cloned(),
-                    );
+                        state: ToolRowState::Pending,
+                        desc: "preparing arguments...".to_string(),
+                        arguments: String::new(),
+                        metadata: payload.get("metadata").cloned(),
+                    });
                 }
             }
             "tool_call_delta" => {
@@ -261,14 +263,14 @@ impl App {
                         .unwrap_or_else(|| format!("inline:{}:{}", name, event.seq));
                     self.push_tool_part(call_id.clone());
                     let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
-                    self.upsert_tool_row(
-                        &call_id,
+                    self.upsert_tool_row(ToolRowUpdate {
+                        call_id: &call_id,
                         name,
-                        ToolRowState::Running,
-                        desc.clone(),
+                        state: ToolRowState::Running,
+                        desc: desc.clone(),
                         arguments,
-                        payload.get("metadata").cloned(),
-                    );
+                        metadata: payload.get("metadata").cloned(),
+                    });
                     self.active_tool = Some(ActiveToolInfo {
                         name: name.to_string(),
                         desc,
@@ -363,14 +365,14 @@ impl App {
                         || (!call_id.is_empty()
                             && self.tool_rows.iter().any(|row| row.call_id == call_id));
                     if !had_row {
-                        self.upsert_tool_row(
-                            &part_id,
+                        self.upsert_tool_row(ToolRowUpdate {
+                            call_id: &part_id,
                             name,
-                            ToolRowState::Running,
-                            target.clone(),
-                            args.map(serde_json::Value::to_string).unwrap_or_default(),
-                            payload.get("metadata").cloned(),
-                        );
+                            state: ToolRowState::Running,
+                            desc: target.clone(),
+                            arguments: args.map(serde_json::Value::to_string).unwrap_or_default(),
+                            metadata: payload.get("metadata").cloned(),
+                        });
                     } else if let Some(row) =
                         self.tool_rows.iter_mut().find(|row| row.call_id == part_id)
                     {
@@ -514,18 +516,18 @@ impl App {
                         let args = payload.get("arguments");
                         let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
                         let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
-                        self.upsert_tool_row(
+                        self.upsert_tool_row(ToolRowUpdate {
                             call_id,
-                            tool_name,
-                            if success {
+                            name: tool_name,
+                            state: if success {
                                 ToolRowState::Completed
                             } else {
                                 ToolRowState::Failed
                             },
                             desc,
                             arguments,
-                            None,
-                        );
+                            metadata: None,
+                        });
                         self.complete_tool_row(call_id, tool_name, success, output);
                     }
                     self.push_tool_part(call_id.to_string());

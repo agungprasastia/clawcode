@@ -8,7 +8,8 @@
 use super::coordinator::{SessionConfig, SessionCoordinator, WakeOutcome};
 use super::{EventBus, RuntimeEvent};
 use crate::persistence::{
-    Db, GenerationStatus, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, ToolCallStatus, WriterHandle,
+    Db, GenerationStatus, MAX_MESSAGE_BYTES, MAX_TOOL_OUTPUT_BYTES, NewToolCall, ToolCallStatus,
+    WriterHandle,
 };
 use crate::provider::{FinishReason, Provider, StreamEvent, StreamRequest};
 use std::collections::VecDeque;
@@ -1284,14 +1285,14 @@ fn run_generation(
                 return;
             }
 
-            let (created_call, created_seq) = match ctx.writer.create_tool_call(
-                ctx.session_id,
-                ctx.generation_id,
-                assistant_message.id,
+            let (created_call, created_seq) = match ctx.writer.create_tool_call(NewToolCall {
+                session_id: ctx.session_id,
+                generation_id: ctx.generation_id,
+                assistant_message_id: assistant_message.id,
                 call_id,
                 tool_name,
-                args_str,
-            ) {
+                arguments: args_str,
+            }) {
                 Ok(value) => value,
                 Err(error) => {
                     fail_generation(ctx, &error);
@@ -1870,14 +1871,14 @@ mod tests {
         let writer = WriterHandle::spawn(db);
         let assistant = writer.append_message(session.id, "assistant", "").unwrap();
         let (created, _) = writer
-            .create_tool_call(
-                session.id,
-                generation.id,
-                assistant.id,
-                "call-panic",
-                "read_file",
-                "{}",
-            )
+            .create_tool_call(NewToolCall {
+                session_id: session.id,
+                generation_id: generation.id,
+                assistant_message_id: assistant.id,
+                call_id: "call-panic",
+                tool_name: "read_file",
+                arguments: "{}",
+            })
             .unwrap();
         let (running, _) = writer.start_tool_call(created.id).unwrap();
 

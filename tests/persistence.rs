@@ -1,4 +1,6 @@
-use clawcode::persistence::{Db, InputDelivery, InputStatus, MAX_MESSAGE_BYTES, WriterHandle};
+use clawcode::persistence::{
+    Db, InputDelivery, InputStatus, MAX_MESSAGE_BYTES, NewToolCall, WriterHandle,
+};
 use std::path::PathBuf;
 
 fn temp_db_path(tag: &str) -> PathBuf {
@@ -283,47 +285,47 @@ fn call_id_reuses_across_assistant_messages_but_not_same_owner() {
         .unwrap();
     let writer = WriterHandle::spawn(db);
     writer
-        .create_tool_call(
-            first_session.id,
-            first_generation.id,
-            first_assistant.id,
-            "same-call",
-            "read_file",
-            "{}",
-        )
+        .create_tool_call(NewToolCall {
+            session_id: first_session.id,
+            generation_id: first_generation.id,
+            assistant_message_id: first_assistant.id,
+            call_id: "same-call",
+            tool_name: "read_file",
+            arguments: "{}",
+        })
         .unwrap();
     writer
-        .create_tool_call(
-            first_session.id,
-            first_generation.id,
-            second_assistant.id,
-            "same-call",
-            "read_file",
-            "{}",
-        )
+        .create_tool_call(NewToolCall {
+            session_id: first_session.id,
+            generation_id: first_generation.id,
+            assistant_message_id: second_assistant.id,
+            call_id: "same-call",
+            tool_name: "read_file",
+            arguments: "{}",
+        })
         .unwrap();
     assert!(
         writer
-            .create_tool_call(
-                first_session.id,
-                first_generation.id,
-                first_assistant.id,
-                "same-call",
-                "read_file",
-                "{}",
-            )
+            .create_tool_call(NewToolCall {
+                session_id: first_session.id,
+                generation_id: first_generation.id,
+                assistant_message_id: first_assistant.id,
+                call_id: "same-call",
+                tool_name: "read_file",
+                arguments: "{}",
+            })
             .is_err()
     );
     assert!(
         writer
-            .create_tool_call(
-                first_session.id,
-                first_generation.id,
-                other_assistant.id,
-                "cross-parent",
-                "read_file",
-                "{}",
-            )
+            .create_tool_call(NewToolCall {
+                session_id: first_session.id,
+                generation_id: first_generation.id,
+                assistant_message_id: other_assistant.id,
+                call_id: "cross-parent",
+                tool_name: "read_file",
+                arguments: "{}",
+            })
             .is_err()
     );
     let db = writer.shutdown().unwrap();
@@ -342,14 +344,14 @@ fn tool_call_arguments_respect_existing_storage_bound() {
     let oversized = "x".repeat(clawcode::persistence::MAX_TOOL_OUTPUT_BYTES + 1);
     assert!(
         writer
-            .create_tool_call(
-                session.id,
-                generation.id,
-                assistant.id,
-                "call-too-large",
-                "read_file",
-                &oversized,
-            )
+            .create_tool_call(NewToolCall {
+                session_id: session.id,
+                generation_id: generation.id,
+                assistant_message_id: assistant.id,
+                call_id: "call-too-large",
+                tool_name: "read_file",
+                arguments: &oversized,
+            })
             .is_err()
     );
     let db = writer.shutdown().unwrap();
@@ -431,14 +433,14 @@ fn tool_call_identity_and_settlement_use_assistant_message_id() {
         .append_message(session.id, "assistant", "")
         .expect("assistant message must commit before tool call");
     let (created, created_seq) = writer
-        .create_tool_call(
-            session.id,
-            generation.id,
-            assistant.id,
-            "call-7",
-            "read_file",
-            r#"{"path":"README.md"}"#,
-        )
+        .create_tool_call(NewToolCall {
+            session_id: session.id,
+            generation_id: generation.id,
+            assistant_message_id: assistant.id,
+            call_id: "call-7",
+            tool_name: "read_file",
+            arguments: r#"{"path":"README.md"}"#,
+        })
         .expect("tool identity must commit");
     assert_eq!(created.assistant_message_id, assistant.id);
     assert_eq!(created.generation_id, generation.id);
@@ -496,14 +498,14 @@ fn failed_tool_settlement_does_not_claim_success() {
     let writer = WriterHandle::spawn(db);
     let assistant = writer.append_message(session.id, "assistant", "").unwrap();
     let (created, _) = writer
-        .create_tool_call(
-            session.id,
-            generation.id,
-            assistant.id,
-            "call-9",
-            "read_file",
-            "{}",
-        )
+        .create_tool_call(NewToolCall {
+            session_id: session.id,
+            generation_id: generation.id,
+            assistant_message_id: assistant.id,
+            call_id: "call-9",
+            tool_name: "read_file",
+            arguments: "{}",
+        })
         .unwrap();
     writer.start_tool_call(created.id).unwrap();
 
@@ -552,27 +554,27 @@ fn tool_call_creation_rejects_non_assistant_roles() {
 
     assert!(
         writer
-            .create_tool_call(
-                session.id,
-                generation.id,
-                user_msg.id,
-                "call-user",
-                "read_file",
-                "{}",
-            )
+            .create_tool_call(NewToolCall {
+                session_id: session.id,
+                generation_id: generation.id,
+                assistant_message_id: user_msg.id,
+                call_id: "call-user",
+                tool_name: "read_file",
+                arguments: "{}",
+            })
             .is_err()
     );
 
     assert!(
         writer
-            .create_tool_call(
-                session.id,
-                generation.id,
-                tool_msg.id,
-                "call-tool",
-                "read_file",
-                "{}",
-            )
+            .create_tool_call(NewToolCall {
+                session_id: session.id,
+                generation_id: generation.id,
+                assistant_message_id: tool_msg.id,
+                call_id: "call-tool",
+                tool_name: "read_file",
+                arguments: "{}",
+            })
             .is_err()
     );
 
@@ -591,14 +593,14 @@ fn tool_call_settlement_transitions_enforce_running_status() {
     let assistant = writer.append_message(session.id, "assistant", "").unwrap();
 
     let (created_1, _) = writer
-        .create_tool_call(
-            session.id,
-            generation.id,
-            assistant.id,
-            "call-1",
-            "read_file",
-            "{}",
-        )
+        .create_tool_call(NewToolCall {
+            session_id: session.id,
+            generation_id: generation.id,
+            assistant_message_id: assistant.id,
+            call_id: "call-1",
+            tool_name: "read_file",
+            arguments: "{}",
+        })
         .unwrap();
     // created -> completed rejected
     assert!(
@@ -637,14 +639,14 @@ fn tool_call_settlement_transitions_enforce_running_status() {
     );
 
     let (created_2, _) = writer
-        .create_tool_call(
-            session.id,
-            generation.id,
-            assistant.id,
-            "call-2",
-            "read_file",
-            "{}",
-        )
+        .create_tool_call(NewToolCall {
+            session_id: session.id,
+            generation_id: generation.id,
+            assistant_message_id: assistant.id,
+            call_id: "call-2",
+            tool_name: "read_file",
+            arguments: "{}",
+        })
         .unwrap();
     writer.start_tool_call(created_2.id).unwrap();
     // running -> completed allowed
@@ -662,14 +664,14 @@ fn tool_call_settlement_transitions_enforce_running_status() {
     );
 
     let (created_3, _) = writer
-        .create_tool_call(
-            session.id,
-            generation.id,
-            assistant.id,
-            "call-3",
-            "read_file",
-            "{}",
-        )
+        .create_tool_call(NewToolCall {
+            session_id: session.id,
+            generation_id: generation.id,
+            assistant_message_id: assistant.id,
+            call_id: "call-3",
+            tool_name: "read_file",
+            arguments: "{}",
+        })
         .unwrap();
     writer.start_tool_call(created_3.id).unwrap();
     // running -> cancelled allowed

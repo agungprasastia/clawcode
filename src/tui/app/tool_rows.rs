@@ -13,6 +13,15 @@ pub enum ToolRowState {
     Failed,
 }
 
+pub(crate) struct ToolRowUpdate<'a> {
+    pub call_id: &'a str,
+    pub name: &'a str,
+    pub state: ToolRowState,
+    pub desc: String,
+    pub arguments: String,
+    pub metadata: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolRow {
     pub call_id: String,
@@ -383,16 +392,15 @@ impl App {
             .map(|(id, _)| id.clone())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn upsert_tool_row(
-        &mut self,
-        call_id: &str,
-        name: &str,
-        state: ToolRowState,
-        desc: String,
-        arguments: String,
-        metadata: Option<serde_json::Value>,
-    ) {
+    pub(crate) fn upsert_tool_row(&mut self, update: ToolRowUpdate<'_>) {
+        let ToolRowUpdate {
+            call_id,
+            name,
+            state,
+            desc,
+            arguments,
+            metadata,
+        } = update;
         if let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == call_id) {
             row.name = name.to_string();
             row.state = state;

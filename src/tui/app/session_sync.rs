@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use super::runtime_bridge::parse_finish_reason;
-use super::tool_rows::{ToolRow, ToolRowState, tool_target_and_verbs};
+use super::tool_rows::{ToolRow, ToolRowState, ToolRowUpdate, tool_target_and_verbs};
 use super::util::bounded;
 use super::{App, ConversationStatus, MAX_DIAGNOSTIC_BYTES, StreamPart};
 use crate::provider::FinishReason;
@@ -132,14 +132,14 @@ impl App {
                     } else {
                         "tool"
                     };
-                    self.upsert_tool_row(
-                        &call_id,
-                        tool_name,
-                        ToolRowState::Completed,
-                        trimmed.to_string(),
-                        String::new(),
-                        None,
-                    );
+                    self.upsert_tool_row(ToolRowUpdate {
+                        call_id: &call_id,
+                        name: tool_name,
+                        state: ToolRowState::Completed,
+                        desc: trimmed.to_string(),
+                        arguments: String::new(),
+                        metadata: None,
+                    });
                     if let Some(row) = self.tool_rows.iter_mut().find(|r| r.call_id == call_id) {
                         row.output = trimmed.to_string();
                         row.expandable = row.compute_expandable();
@@ -235,14 +235,14 @@ impl App {
                     let args = payload.get("arguments");
                     let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
                     let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
-                    self.upsert_tool_row(
+                    self.upsert_tool_row(ToolRowUpdate {
                         call_id,
-                        tool_name,
-                        ToolRowState::Pending,
+                        name: tool_name,
+                        state: ToolRowState::Pending,
                         desc,
                         arguments,
-                        None,
-                    );
+                        metadata: None,
+                    });
                     self.push_tool_part(call_id.to_string());
                 }
             }
@@ -260,14 +260,14 @@ impl App {
                     let args = payload.get("arguments");
                     let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
                     let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
-                    self.upsert_tool_row(
+                    self.upsert_tool_row(ToolRowUpdate {
                         call_id,
-                        tool_name,
-                        ToolRowState::Running,
+                        name: tool_name,
+                        state: ToolRowState::Running,
                         desc,
                         arguments,
-                        None,
-                    );
+                        metadata: None,
+                    });
                     self.push_tool_part(call_id.to_string());
                 }
             }
@@ -293,18 +293,18 @@ impl App {
                         let args = payload.get("arguments");
                         let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
                         let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
-                        self.upsert_tool_row(
+                        self.upsert_tool_row(ToolRowUpdate {
                             call_id,
-                            tool_name,
-                            if success {
+                            name: tool_name,
+                            state: if success {
                                 ToolRowState::Completed
                             } else {
                                 ToolRowState::Failed
                             },
                             desc,
                             arguments,
-                            None,
-                        );
+                            metadata: None,
+                        });
                         self.complete_tool_row(call_id, tool_name, success, output);
                     }
                     self.push_tool_part(call_id.to_string());
@@ -328,18 +328,18 @@ impl App {
                         let args = payload.get("arguments");
                         let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
                         let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
-                        self.upsert_tool_row(
+                        self.upsert_tool_row(ToolRowUpdate {
                             call_id,
-                            tool_name,
-                            if success {
+                            name: tool_name,
+                            state: if success {
                                 ToolRowState::Completed
                             } else {
                                 ToolRowState::Failed
                             },
                             desc,
                             arguments,
-                            None,
-                        );
+                            metadata: None,
+                        });
                         self.complete_tool_row(call_id, tool_name, success, output);
                     }
                     self.push_tool_part(call_id.to_string());

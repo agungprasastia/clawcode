@@ -87,7 +87,6 @@ impl UiEventQueue {
         drained
     }
 
-    #[allow(dead_code)]
     pub(crate) fn clear(&mut self) {
         self.quit = false;
         self.cancel = false;

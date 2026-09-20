@@ -172,6 +172,16 @@ pub struct ToolCall {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewToolCall<'a> {
+    pub session_id: i64,
+    pub generation_id: i64,
+    pub assistant_message_id: i64,
+    pub call_id: &'a str,
+    pub tool_name: &'a str,
+    pub arguments: &'a str,
+}
+
 /// Durable Context Epoch boundary stored in `context_epochs`.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ContextEpoch {
@@ -605,16 +615,18 @@ impl Db {
     }
 
     /// Atomically create a durable call identity and its lifecycle event.
-    #[allow(clippy::too_many_arguments)]
     pub fn create_tool_call(
         &self,
-        session_id: i64,
-        generation_id: i64,
-        assistant_message_id: i64,
-        call_id: &str,
-        tool_name: &str,
-        arguments: &str,
+        tool: NewToolCall<'_>,
     ) -> Result<(ToolCall, i64), rusqlite::Error> {
+        let NewToolCall {
+            session_id,
+            generation_id,
+            assistant_message_id,
+            call_id,
+            tool_name,
+            arguments,
+        } = tool;
         ensure_tool_text_size(arguments)?;
         let tx = self.write_transaction()?;
         let owns_message: bool = tx.query_row(
