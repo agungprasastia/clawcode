@@ -430,7 +430,7 @@ impl App {
                 self.request_runtime_cancel();
                 self.reset_turn_view(false);
                 self.cancellation_pending = true;
-                self.status = ConversationStatus::Active;
+                self.status = ConversationStatus::Cancelled;
             }
             Input::Clear => {
                 self.request_runtime_cancel();

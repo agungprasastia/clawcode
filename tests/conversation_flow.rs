@@ -60,7 +60,7 @@ fn scripted_commands_run_through_runtime_step() {
     )
     .unwrap();
     assert!(app.take_cancellation());
-    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+    assert_eq!(app.conversation_status(), ConversationStatus::Cancelled);
 
     type_text(&mut app, &mut events, "/exit");
     submit(&mut app, &mut events);

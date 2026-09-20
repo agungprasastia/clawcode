@@ -4963,3 +4963,265 @@ fn restore_session_from_database_formats_tool_messages_as_clean_cards() {
     assert!(text.contains("Updated Plan"));
     assert!(text.contains("read Cargo.toml output"));
 }
+
+#[test]
+fn cancel_discards_buffered_stream_deltas_without_transcript_leak() {
+    let mut app = App::default();
+    let mut events = UiEventQueue::new(10);
+
+    // Initial prompt submitted so transcript has baseline content
+    app.submit_user_prompt("my initial prompt");
+    let baseline_transcript = app.transcript().to_string();
+
+    // Set a running tool row
+    app.set_tool_rows_for_test(vec![clawcode::tui::ToolRow {
+        call_id: "tool-1".to_string(),
+        name: "bash".to_string(),
+        desc: "executing command".to_string(),
+        arguments: "{}".to_string(),
+        output: String::new(),
+        state: clawcode::tui::ToolRowState::Running,
+        arguments_complete: true,
+        metadata: None,
+        started_at: std::time::Instant::now(),
+        expandable: false,
+    }]);
+    assert!(app.is_streaming_active());
+
+    // Push stream deltas and Cancel into events queue
+    events.push(UiEvent::StreamDelta("leaked stream chunk 1".to_string()));
+    events.push(UiEvent::StreamDelta("leaked stream chunk 2".to_string()));
+    events.push(UiEvent::Input(Input::Cancel));
+
+    // apply_pending pops Cancel, sets status Cancelled, calls events.clear()
+    assert!(app.apply_pending(&mut events));
+
+    assert_eq!(
+        app.conversation_status(),
+        clawcode::tui::ConversationStatus::Cancelled
+    );
+    assert!(!app.transcript().contains("leaked stream chunk"));
+    assert_eq!(app.transcript(), baseline_transcript);
+    assert!(events.is_empty(), "buffered deltas must be cleared");
+    assert_eq!(
+        app.tool_rows()[0].state,
+        clawcode::tui::ToolRowState::Failed
+    );
+    assert!(!app.is_streaming_active(), "spinner should stop");
+
+    // Subsequent drain is empty; no chunk leaked
+    assert!(!app.apply_pending(&mut events));
+    assert!(!app.transcript().contains("leaked stream chunk"));
+}
+
+#[test]
+fn rapid_cancel_stress_test_maintains_consistent_state() {
+    let mut app = App::default();
+    let mut events = UiEventQueue::new(16);
+
+    for i in 0..50 {
+        // Submit prompt
+        app.submit_user_prompt(&format!("rapid prompt {i}"));
+        assert_eq!(
+            app.conversation_status(),
+            clawcode::tui::ConversationStatus::Active
+        );
+
+        // Add tool row in Running or Pending state
+        app.set_tool_rows_for_test(vec![clawcode::tui::ToolRow {
+            call_id: format!("tool-{i}"),
+            name: "tool".to_string(),
+            desc: format!("tool run {i}"),
+            arguments: "{}".to_string(),
+            output: String::new(),
+            state: if i % 2 == 0 {
+                clawcode::tui::ToolRowState::Running
+            } else {
+                clawcode::tui::ToolRowState::Pending
+            },
+            arguments_complete: true,
+            metadata: None,
+            started_at: std::time::Instant::now(),
+            expandable: false,
+        }]);
+        assert!(app.is_streaming_active());
+
+        // Push stream delta and Cancel
+        let stale_delta = format!("stale chunk {i}");
+        events.push(UiEvent::StreamDelta(stale_delta.clone()));
+        events.push(UiEvent::Input(Input::Cancel));
+
+        // Apply pending
+        assert!(app.apply_pending(&mut events));
+
+        // Verify state consistency
+        assert_eq!(
+            app.conversation_status(),
+            clawcode::tui::ConversationStatus::Cancelled,
+            "status must be Cancelled on iteration {i}"
+        );
+        assert!(
+            !app.is_streaming_active(),
+            "no stuck active spinners on iteration {i}"
+        );
+        assert!(
+            !app.is_typing(),
+            "typewriter must not be typing on iteration {i}"
+        );
+        assert!(
+            !app.transcript().contains(&stale_delta),
+            "no leaked delta on iteration {i}"
+        );
+        assert!(events.is_empty(), "queue must be cleared on iteration {i}");
+        assert!(
+            app.tool_rows().iter().all(|r| !matches!(
+                r.state,
+                clawcode::tui::ToolRowState::Pending | clawcode::tui::ToolRowState::Running
+            )),
+            "no tool row pending or running on iteration {i}"
+        );
+    }
+}
+
+#[test]
+fn multi_turn_conversation_persistence_10_turns_reloads_cleanly() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("clawcode-test-multiturn-{nonce}.db"));
+    let db = clawcode::persistence::Db::open(&path).expect("runtime db");
+    let session = db.create_session("multi-turn").unwrap();
+    let session_id = session.id;
+
+    let other_session = db.create_session("other-session").unwrap();
+    db.append_message(other_session.id, "user", "Other user question")
+        .unwrap();
+    db.append_message(other_session.id, "assistant", "Other assistant answer")
+        .unwrap();
+
+    // Store 12 turns (user + assistant = 24 messages, plus corresponding generation events)
+    for i in 0..12 {
+        let user_prompt = format!("User turn {i} question about Rust");
+        let assistant_reply = format!("Assistant turn {i} explanation with details");
+        db.append_message(session_id, "user", &user_prompt).unwrap();
+        db.append_message(session_id, "assistant", &assistant_reply)
+            .unwrap();
+
+        db.append_event(
+            session_id,
+            None,
+            "user_message",
+            &serde_json::json!({ "content": user_prompt }).to_string(),
+        )
+        .unwrap();
+        db.append_event(
+            session_id,
+            None,
+            "assistant_message",
+            &serde_json::json!({ "content": assistant_reply }).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[derive(Debug)]
+    struct TestDummyProvider;
+    impl clawcode::provider::Provider for TestDummyProvider {
+        fn id(&self) -> &clawcode::provider::ProviderId {
+            static ID: std::sync::LazyLock<clawcode::provider::ProviderId> =
+                std::sync::LazyLock::new(|| clawcode::provider::ProviderId::new("test-dummy"));
+            &ID
+        }
+        fn capabilities(&self) -> clawcode::provider::ProviderCapabilities {
+            clawcode::provider::ProviderCapabilities {
+                streaming: false,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<clawcode::provider::ModelInfo> {
+            Vec::new()
+        }
+        fn send(
+            &self,
+            _: &clawcode::provider::StreamRequest,
+        ) -> Result<clawcode::provider::StreamResponse, clawcode::provider::ProviderError> {
+            Ok(clawcode::provider::StreamResponse { events: Vec::new() })
+        }
+    }
+
+    let writer = clawcode::persistence::WriterHandle::spawn(
+        clawcode::persistence::Db::open(&path).expect("writer db"),
+    );
+
+    let mut app = App::default();
+    let service_db = clawcode::persistence::Db::open(&path).expect("service db");
+    app.set_command_service(clawcode::cli::CommandService::with_db(
+        clawcode::cli::CliDiscovery::new(),
+        service_db,
+    ));
+    app.attach_runtime(db, writer, Box::new(TestDummyProvider));
+    // Switch to session: hydrations + replay_events_after
+    app.switch_session(session_id);
+    assert_eq!(app.active_session_id(), Some(session_id));
+
+    // Verify all 12 turns present in transcript without gaps or duplicates
+    for i in 0..12 {
+        let user_str = format!("User turn {i} question about Rust");
+        let asst_str = format!("Assistant turn {i} explanation with details");
+        assert!(
+            app.transcript().contains(&user_str),
+            "missing user turn {i}"
+        );
+        assert!(
+            app.transcript().contains(&asst_str),
+            "missing assistant turn {i}"
+        );
+
+        let user_count = app.transcript().matches(&user_str).count();
+        let asst_count = app.transcript().matches(&asst_str).count();
+        assert_eq!(user_count, 1, "duplicate user turn {i}");
+        assert_eq!(asst_count, 1, "duplicate assistant turn {i}");
+    }
+
+    // Switch to other session
+    app.switch_session(other_session.id);
+    assert_eq!(app.active_session_id(), Some(other_session.id));
+    assert!(app.transcript().contains("Other user question"));
+    assert!(!app.transcript().contains("User turn 0 question"));
+
+    // Switch back to multi-turn session
+    app.switch_session(session_id);
+    assert_eq!(app.active_session_id(), Some(session_id));
+
+    // Verify all turns still intact with no duplicate messages after round-trip switch
+    for i in 0..12 {
+        let user_str = format!("User turn {i} question about Rust");
+        let asst_str = format!("Assistant turn {i} explanation with details");
+        assert!(
+            app.transcript().contains(&user_str),
+            "missing user turn {i} after switch"
+        );
+        assert!(
+            app.transcript().contains(&asst_str),
+            "missing assistant turn {i} after switch"
+        );
+
+        let user_count = app.transcript().matches(&user_str).count();
+        let asst_count = app.transcript().matches(&asst_str).count();
+        assert_eq!(user_count, 1, "duplicate user turn {i} after switch");
+        assert_eq!(asst_count, 1, "duplicate assistant turn {i} after switch");
+    }
+
+    // Verify replay_events_after returns events in strict sequential order without gaps
+    let events = app
+        .runtime()
+        .expect("runtime client")
+        .replay_events_after(session_id, -1)
+        .expect("replay succeeds");
+    assert_eq!(events.len(), 24, "12 turns * 2 events");
+    for (idx, event) in events.iter().enumerate() {
+        assert_eq!(event.seq, idx as i64, "sequential seq without gaps");
+    }
+
+    let _ = std::fs::remove_file(&path);
+}

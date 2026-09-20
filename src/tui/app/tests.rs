@@ -323,7 +323,7 @@ fn cancel_blocks_stale_same_generation_events() {
     assert_eq!(app.active_generation_id, Some(7));
 
     app.apply(UiEvent::Input(Input::Cancel));
-    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+    assert_eq!(app.conversation_status(), ConversationStatus::Cancelled);
 
     tx.send(RuntimeEvent {
         session_id,
@@ -343,7 +343,7 @@ fn cancel_blocks_stale_same_generation_events() {
     .unwrap();
     app.poll_runtime();
 
-    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+    assert_eq!(app.conversation_status(), ConversationStatus::Cancelled);
     assert_eq!(app.active_generation_id, None);
     assert_eq!(app.stream_parts, vec![StreamPart::User("first".into())]);
     assert!(!app.transcript().contains("stale"));

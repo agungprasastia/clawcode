@@ -21,6 +21,11 @@ impl App {
             self.tool_rows.clear();
             self.expanded_tool_rows.clear();
         }
+        for row in &mut self.tool_rows {
+            if matches!(row.state, ToolRowState::Pending | ToolRowState::Running) {
+                row.state = ToolRowState::Failed;
+            }
+        }
         self.stream_base_len = None;
         self.typewriter.reset();
         self.text_stream_active = false;

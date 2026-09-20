@@ -317,8 +317,9 @@ impl App {
             && self.themes_dialog.is_none()
             && self.status_dialog.is_none()
             && !self.which_key.visible;
+        let cancelling = event == UiEvent::Input(Input::Cancel);
         self.apply(event);
-        if quitting {
+        if quitting || cancelling {
             events.clear();
         } else {
             let pending = events.drain();

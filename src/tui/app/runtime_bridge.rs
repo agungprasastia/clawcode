@@ -57,6 +57,9 @@ impl App {
     pub fn set_runtime_receiver(&mut self, receiver: std::sync::mpsc::Receiver<RuntimeEvent>) {
         self.runtime_events = Some(receiver);
     }
+    pub fn runtime(&self) -> Option<&RuntimeClient> {
+        self.runtime.as_ref()
+    }
 
     pub fn set_command_service(
         &mut self,
