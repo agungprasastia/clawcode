@@ -23,8 +23,9 @@ use crate::runtime::RuntimeEvent;
 use crate::runtime::client::RuntimeClient;
 
 use super::dialogs::{
-    AgentsDialogState, ModelsDialogState, PermissionDecision, PermissionDialogState,
-    QuestionDialogState, SessionsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState,
+    AgentsDialogState, GitDialogState, ModelsDialogState, PermissionDecision,
+    PermissionDialogState, QuestionDialogState, SessionsDialogState, SkillsDialogState,
+    StatusDialogState, ThemesDialogState, WhichKeyState,
 };
 use super::home::HomeState;
 
@@ -117,24 +118,17 @@ pub struct App {
     sessions: std::collections::HashMap<i64, ClientSessionState>,
     /// Snapshot shown by the /sessions panel.
     session_listings: Vec<crate::persistence::Session>,
-    /// Active interactive permission dialog, if security approval is required.
     permission_dialog: Option<PermissionDialogState>,
-    /// Last decision recorded from the permission dialog.
     last_permission_decision: Option<PermissionDecision>,
-    /// Active interactive question dialog, if agent asks a clarifying question.
     question_dialog: Option<QuestionDialogState>,
-    /// Last user answer to a question dialog.
     last_question_answer: Option<String>,
-    /// Active interactive sessions selection dialog, if opened.
     sessions_dialog: Option<SessionsDialogState>,
-    /// Active interactive model selection dialog, if opened.
     models_dialog: Option<ModelsDialogState>,
-    /// Active interactive agent mode selection dialog, if opened.
     agents_dialog: Option<AgentsDialogState>,
-    /// Active interactive theme selection dialog, if opened.
     themes_dialog: Option<ThemesDialogState>,
-    /// Active interactive system status dialog, if opened.
     status_dialog: Option<StatusDialogState>,
+    git_dialog: Option<GitDialogState>,
+    skills_dialog: Option<SkillsDialogState>,
     /// Active theme color scheme.
     theme: crate::tui::ThemeKind,
     /// Quick keyboard shortcuts popup status.
@@ -226,6 +220,8 @@ impl App {
             agents_dialog: None,
             themes_dialog: None,
             status_dialog: None,
+            git_dialog: None,
+            skills_dialog: None,
             theme: crate::tui::ThemeKind::default(),
             which_key: WhichKeyState::default(),
             available_models,
@@ -578,8 +574,6 @@ impl App {
                 self.diagnostic = format!("{} model(s)", models.len());
             }
             CommandOutput::Sessions(sessions) => {
-                // Grouped per workspace for the /sessions panel; rendering
-                // order matches the panel layout (workspace, then sessions).
                 self.diagnostic = format!("{} session(s) — press Esc to close", sessions.len());
                 self.session_listings = sessions.clone();
                 self.sessions_dialog =

@@ -59,6 +59,21 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
         template: "/status",
     },
     CommandSuggestion {
+        name: "/git",
+        description: "Interactive git status, diff viewer & staging",
+        template: "/git",
+    },
+    CommandSuggestion {
+        name: "/skills",
+        description: "Interactive skill picker & library",
+        template: "/skills",
+    },
+    CommandSuggestion {
+        name: "/skill ",
+        description: "Load and invoke a specific skill",
+        template: "/skill ",
+    },
+    CommandSuggestion {
         name: "/connect",
         description: "Connect configured AI provider",
         template: "/connect",

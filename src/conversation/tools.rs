@@ -1812,34 +1812,16 @@ pub fn execute_skill(
     }
 
     let ws_root = workspace.root_path();
-    let candidates = [
-        ws_root.join("skills").join(trimmed_name).join("SKILL.md"),
-        ws_root.join("skills").join(format!("{trimmed_name}.md")),
-        ws_root
-            .join("crabcode")
-            .join("skills")
-            .join(trimmed_name)
-            .join("SKILL.md"),
-        PathBuf::from("skills").join(trimmed_name).join("SKILL.md"),
-        PathBuf::from("skills").join(format!("{trimmed_name}.md")),
-        PathBuf::from("crabcode")
-            .join("skills")
-            .join(trimmed_name)
-            .join("SKILL.md"),
-    ];
+    let store = crate::workspace::skills::SkillStore::load(ws_root);
 
-    for candidate in &candidates {
-        if candidate.is_file()
-            && let Ok(content) = std::fs::read_to_string(candidate)
-        {
-            return Ok(format!(
-                "<skill_content name=\"{trimmed_name}\">\n{}\n</skill_content>",
-                content.trim()
-            ));
-        }
+    if let Some(skill) = store.get(trimmed_name) {
+        return Ok(format!(
+            "<skill_content name=\"{trimmed_name}\">\n{}\n</skill_content>",
+            skill.instructions.trim()
+        ));
     }
 
-    let available = list_available_skills(ws_root);
+    let available: Vec<String> = store.all().iter().map(|s| s.name.clone()).collect();
     if available.is_empty() {
         Err(format!(
             "Skill \"{trimmed_name}\" not found. No skills are currently available."
@@ -1853,40 +1835,8 @@ pub fn execute_skill(
 }
 
 pub fn list_available_skills(ws_root: &Path) -> Vec<String> {
-    let mut skills = Vec::new();
-    let check_dirs = [
-        ws_root.join("skills"),
-        ws_root.join("crabcode").join("skills"),
-        PathBuf::from("skills"),
-        PathBuf::from("crabcode").join("skills"),
-    ];
-
-    for dir in &check_dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    if path.join("SKILL.md").is_file()
-                        && let Some(dir_name) = path.file_name().and_then(|n| n.to_str())
-                    {
-                        skills.push(dir_name.to_string());
-                    }
-                } else if path.is_file()
-                    && let Some(ext) = path.extension().and_then(|e| e.to_str())
-                    && ext.eq_ignore_ascii_case("md")
-                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                    && !stem.eq_ignore_ascii_case("SKILL")
-                    && !stem.eq_ignore_ascii_case("README")
-                {
-                    skills.push(stem.to_string());
-                }
-            }
-        }
-    }
-
-    skills.sort();
-    skills.dedup();
-    skills
+    let store = crate::workspace::skills::SkillStore::load(ws_root);
+    store.all().iter().map(|s| s.name.clone()).collect()
 }
 
 const MAX_WALK_DEPTH: usize = 32;

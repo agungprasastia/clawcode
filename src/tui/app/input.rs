@@ -192,6 +192,42 @@ impl App {
                 self.open_status_dialog();
                 return;
             }
+            if trimmed == "/git" {
+                self.open_git_dialog();
+                return;
+            }
+            if trimmed == "/skills" || trimmed == "/skill" {
+                self.open_skills_dialog();
+                return;
+            }
+            if let Some(arg) = trimmed.strip_prefix("/skill ") {
+                let mut parts = arg.trim().splitn(2, |c: char| c.is_whitespace());
+                let skill_name = parts.next().unwrap_or("").trim();
+                let extra = parts.next().unwrap_or("").trim();
+                if skill_name.is_empty() {
+                    self.open_skills_dialog();
+                    return;
+                }
+                let project_root =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let store = crate::workspace::skills::SkillStore::load(&project_root);
+                if let Some(skill) = store.get(skill_name) {
+                    let prompt_text = if extra.is_empty() {
+                        format!("[Skill: {}]\n{}", skill.name, skill.instructions)
+                    } else {
+                        format!(
+                            "[Skill: {}]\n{}\n\n{}",
+                            skill.name, skill.instructions, extra
+                        )
+                    };
+                    self.submit_user_prompt(&prompt_text);
+                    self.diagnostic = format!("skill loaded: {}", skill.name);
+                } else {
+                    self.diagnostic =
+                        format!("skill not found: {skill_name} (run /skills to list)");
+                }
+                return;
+            }
             if trimmed == "/clear" || trimmed == "/home" {
                 self.request_runtime_cancel();
                 self.reset_turn_view(true);

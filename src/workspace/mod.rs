@@ -2,6 +2,7 @@ mod files;
 mod policy;
 mod root;
 mod shell;
+pub mod skills;
 mod snapshot;
 
 use crate::core::error::{Diagnostic, ErrorCategory};
@@ -13,6 +14,7 @@ pub use files::{FileSystem, RealFileSystem};
 pub use policy::{Mode, Operation, Policy, PolicyDecision, Risk};
 pub use root::WorkspaceRoot;
 pub use shell::classify_shell;
+pub use skills::{SkillItem, SkillSource, SkillStore};
 pub use snapshot::{Diff, FileState, Snapshot, SnapshotId, SnapshotStore};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -8,7 +8,10 @@ mod shell;
 
 pub use clipboard::{BackendClipboard, ClipboardBackend, SystemClipboard, trim_clipboard_newlines};
 pub use credentials::UnsupportedCredentialStore;
-pub use git::{get_branch_for_path, get_current_branch, is_git_repo};
+pub use git::{
+    GitFileChange, commit, get_branch_for_path, get_current_branch, get_diff, get_status,
+    is_git_repo, stage_file, unstage_file,
+};
 pub use shell::PathShellDiscovery;
 
 pub const MAX_CLIPBOARD_BYTES: usize = 1_048_576;

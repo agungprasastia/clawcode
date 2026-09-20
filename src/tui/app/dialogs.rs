@@ -1,8 +1,9 @@
 use super::util::{bounded, is_sensitive_command, split_provider_model};
 use super::{App, ConversationMode, ConversationStatus, Input, MAX_IDENTITY_BYTES, UiEvent};
 use crate::tui::dialogs::{
-    AgentsDialogState, ModelsDialogState, PermissionDecision, PermissionDialogState,
-    QuestionDialogState, SessionsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState,
+    AgentsDialogState, GitDialogState, ModelsDialogState, PermissionDecision,
+    PermissionDialogState, QuestionDialogState, SessionsDialogState, SkillsDialogState,
+    StatusDialogState, ThemesDialogState, WhichKeyState,
 };
 
 impl App {
@@ -176,27 +177,84 @@ impl App {
         &mut self.which_key
     }
 
+    pub fn git_dialog(&self) -> Option<&GitDialogState> {
+        self.git_dialog.as_ref()
+    }
+
+    pub fn git_dialog_mut(&mut self) -> Option<&mut GitDialogState> {
+        self.git_dialog.as_mut()
+    }
+
+    pub fn open_git_dialog(&mut self) {
+        let repo_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        self.git_dialog = Some(GitDialogState::new(repo_path));
+        self.diagnostic = "Git status & staging (Esc to close)".to_string();
+    }
+
+    pub fn close_git_dialog(&mut self) {
+        self.git_dialog = None;
+    }
+
+    pub fn skills_dialog(&self) -> Option<&SkillsDialogState> {
+        self.skills_dialog.as_ref()
+    }
+
+    pub fn skills_dialog_mut(&mut self) -> Option<&mut SkillsDialogState> {
+        self.skills_dialog.as_mut()
+    }
+
+    pub fn open_skills_dialog(&mut self) {
+        let repo_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let store = crate::workspace::skills::SkillStore::load(&repo_path);
+        let items: Vec<crate::workspace::skills::SkillItem> =
+            store.all().into_iter().cloned().collect();
+        self.skills_dialog = Some(SkillsDialogState::new(items));
+        self.diagnostic = "Skills library (Esc to close)".to_string();
+    }
+
+    pub fn close_skills_dialog(&mut self) {
+        self.skills_dialog = None;
+    }
+
     pub(crate) fn handle_dialog_input(&mut self, event: &UiEvent) -> bool {
+        let has_dialog = self.permission_dialog.is_some()
+            || self.question_dialog.is_some()
+            || self.which_key.visible
+            || self.status_dialog.is_some()
+            || self.sessions_dialog.is_some()
+            || self.agents_dialog.is_some()
+            || self.themes_dialog.is_some()
+            || self.models_dialog.is_some()
+            || self.git_dialog.is_some()
+            || self.skills_dialog.is_some();
+        if !has_dialog {
+            return false;
+        }
+        match event {
+            UiEvent::Resize { .. } => return true,
+            UiEvent::StreamDelta(delta) => {
+                self.transcript.push_str(delta);
+                self.truncate_transcript();
+                return true;
+            }
+            _ => {}
+        }
+
         if self.permission_dialog.is_some() {
             match event {
-                UiEvent::Input(Input::Left)
-                | UiEvent::Input(Input::Up)
-                | UiEvent::Input(Input::Character('h'))
-                | UiEvent::Input(Input::Character('k')) => {
+                UiEvent::Input(Input::Left | Input::Up | Input::Character('h' | 'k')) => {
                     if let Some(dialog) = &mut self.permission_dialog {
                         dialog.previous();
                     }
                 }
-                UiEvent::Input(Input::Right)
-                | UiEvent::Input(Input::Down)
-                | UiEvent::Input(Input::ToggleMode)
-                | UiEvent::Input(Input::Character('l'))
-                | UiEvent::Input(Input::Character('j')) => {
+                UiEvent::Input(
+                    Input::Right | Input::Down | Input::ToggleMode | Input::Character('l' | 'j'),
+                ) => {
                     if let Some(dialog) = &mut self.permission_dialog {
                         dialog.next();
                     }
                 }
-                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
+                UiEvent::Input(Input::Quit | Input::Cancel) => {
                     self.last_permission_decision = Some(PermissionDecision::Deny);
                     self.diagnostic = "Permission denied".to_string();
                     self.permission_dialog = None;
@@ -224,14 +282,12 @@ impl App {
 
         if self.question_dialog.is_some() {
             match event {
-                UiEvent::Input(Input::Up) | UiEvent::Input(Input::ScrollUp) => {
+                UiEvent::Input(Input::Up | Input::ScrollUp) => {
                     if let Some(dialog) = &mut self.question_dialog {
                         dialog.previous();
                     }
                 }
-                UiEvent::Input(Input::Down)
-                | UiEvent::Input(Input::ScrollDown)
-                | UiEvent::Input(Input::ToggleMode) => {
+                UiEvent::Input(Input::Down | Input::ScrollDown | Input::ToggleMode) => {
                     if let Some(dialog) = &mut self.question_dialog {
                         dialog.next();
                     }
@@ -268,14 +324,9 @@ impl App {
         }
 
         if self.which_key.visible {
+            self.which_key.hide();
             match event {
-                UiEvent::Input(Input::WhichKey)
-                | UiEvent::Input(Input::Quit)
-                | UiEvent::Input(Input::Cancel) => {
-                    self.which_key.hide();
-                }
                 UiEvent::Input(Input::Character('a')) => {
-                    self.which_key.hide();
                     let current = match self.mode {
                         ConversationMode::Plan => "plan",
                         ConversationMode::Build => "build",
@@ -283,61 +334,33 @@ impl App {
                     self.agents_dialog = Some(AgentsDialogState::new(current));
                 }
                 UiEvent::Input(Input::Character('t')) => {
-                    self.which_key.hide();
                     self.themes_dialog = Some(ThemesDialogState::new(self.theme));
                 }
                 UiEvent::Input(Input::Character('m')) => {
-                    self.which_key.hide();
                     let models = self.available_models.clone();
                     self.models_dialog = Some(ModelsDialogState::new(models, &self.model));
                 }
-                UiEvent::Input(Input::Character('p')) => {
-                    self.which_key.hide();
-                    self.set_mode(ConversationMode::Plan);
-                }
-                UiEvent::Input(Input::Character('b')) => {
-                    self.which_key.hide();
-                    self.set_mode(ConversationMode::Build);
-                }
-                UiEvent::Input(Input::Character('s')) => {
-                    self.which_key.hide();
-                    self.open_status_dialog();
-                }
-                UiEvent::Input(Input::Character('r')) => {
-                    self.which_key.hide();
-                    self.open_sessions_dialog();
-                }
+                UiEvent::Input(Input::Character('p')) => self.set_mode(ConversationMode::Plan),
+                UiEvent::Input(Input::Character('b')) => self.set_mode(ConversationMode::Build),
+                UiEvent::Input(Input::Character('s')) => self.open_status_dialog(),
+                UiEvent::Input(Input::Character('r')) => self.open_sessions_dialog(),
                 UiEvent::Input(Input::Character('c')) => {
-                    self.which_key.hide();
                     self.transcript.clear();
                     self.status = ConversationStatus::Idle;
                     self.diagnostic = "screen cleared".to_string();
                 }
-                UiEvent::Input(Input::ToggleMode) => {
-                    self.which_key.hide();
-                    self.toggle_mode();
-                }
-                _ => {
-                    self.which_key.hide();
-                }
+                UiEvent::Input(Input::ToggleMode) => self.toggle_mode(),
+                _ => {}
             }
             return true;
         }
 
         if self.status_dialog.is_some() {
-            match event {
-                UiEvent::Input(Input::Quit)
-                | UiEvent::Input(Input::Cancel)
-                | UiEvent::Input(Input::Submit)
-                | UiEvent::Input(Input::Clear) => {
-                    self.status_dialog = None;
-                }
-                UiEvent::Resize { .. } => {}
-                UiEvent::StreamDelta(delta) => {
-                    self.transcript.push_str(delta);
-                    self.truncate_transcript();
-                }
-                _ => {}
+            if matches!(
+                event,
+                UiEvent::Input(Input::Quit | Input::Cancel | Input::Submit | Input::Clear)
+            ) {
+                self.status_dialog = None;
             }
             return true;
         }
@@ -378,16 +401,14 @@ impl App {
                         dialog.pop_char();
                     }
                 }
-                UiEvent::Input(Input::Up)
-                | UiEvent::Input(Input::ScrollUp)
-                | UiEvent::Input(Input::PageUp) => {
+                UiEvent::Input(Input::Up | Input::ScrollUp | Input::PageUp) => {
                     if let Some(dialog) = &mut self.sessions_dialog {
                         dialog.previous();
                     }
                 }
-                UiEvent::Input(Input::Down)
-                | UiEvent::Input(Input::ScrollDown)
-                | UiEvent::Input(Input::PageDown) => {
+                UiEvent::Input(
+                    Input::Down | Input::ScrollDown | Input::PageDown | Input::ToggleMode,
+                ) => {
                     if let Some(dialog) = &mut self.sessions_dialog {
                         dialog.next();
                     }
@@ -405,184 +426,156 @@ impl App {
                     self.sessions_dialog = None;
                     self.session_listings.clear();
                 }
-                UiEvent::Input(Input::ToggleMode) => {
-                    if let Some(dialog) = &mut self.sessions_dialog {
-                        dialog.next();
-                    }
-                }
-                UiEvent::Resize { .. } => {}
-                UiEvent::StreamDelta(delta) => {
-                    self.transcript.push_str(delta);
-                    self.truncate_transcript();
-                }
                 _ => {}
             }
             return true;
         }
 
         if self.agents_dialog.is_some() {
-            match event {
-                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
-                    self.agents_dialog = None;
+            let mut chosen = None;
+            if let Some(d) = &mut self.agents_dialog {
+                match event {
+                    UiEvent::Input(Input::Quit | Input::Cancel) => self.agents_dialog = None,
+                    UiEvent::Input(Input::Character(c)) => d.push_char(*c),
+                    UiEvent::Input(Input::Backspace) => d.pop_char(),
+                    UiEvent::Input(Input::Up | Input::ScrollUp | Input::PageUp) => d.previous(),
+                    UiEvent::Input(
+                        Input::Down | Input::ScrollDown | Input::PageDown | Input::ToggleMode,
+                    ) => d.next(),
+                    UiEvent::Input(Input::Submit) => chosen = d.selected_agent().cloned(),
+                    _ => {}
                 }
-                UiEvent::Input(Input::Character(character)) => {
-                    if let Some(dialog) = &mut self.agents_dialog {
-                        dialog.push_char(*character);
-                    }
+            }
+            if matches!(event, UiEvent::Input(Input::Submit)) {
+                self.agents_dialog = None;
+                if let Some(agent) = chosen {
+                    self.set_mode(agent.mode);
+                    self.diagnostic = format!("agent selected: {}", agent.name);
                 }
-                UiEvent::Input(Input::Backspace) => {
-                    if let Some(dialog) = &mut self.agents_dialog {
-                        dialog.pop_char();
-                    }
-                }
-                UiEvent::Input(Input::Up)
-                | UiEvent::Input(Input::ScrollUp)
-                | UiEvent::Input(Input::PageUp) => {
-                    if let Some(dialog) = &mut self.agents_dialog {
-                        dialog.previous();
-                    }
-                }
-                UiEvent::Input(Input::Down)
-                | UiEvent::Input(Input::ScrollDown)
-                | UiEvent::Input(Input::PageDown) => {
-                    if let Some(dialog) = &mut self.agents_dialog {
-                        dialog.next();
-                    }
-                }
-                UiEvent::Input(Input::Submit) => {
-                    let chosen_agent = self
-                        .agents_dialog
-                        .as_ref()
-                        .and_then(|d| d.selected_agent().cloned());
-                    self.agents_dialog = None;
-                    if let Some(chosen) = chosen_agent {
-                        self.set_mode(chosen.mode);
-                        self.diagnostic = format!("agent selected: {}", chosen.name);
-                    }
-                }
-                UiEvent::Input(Input::ToggleMode) => {
-                    if let Some(dialog) = &mut self.agents_dialog {
-                        dialog.next();
-                    }
-                }
-                UiEvent::Resize { .. } => {}
-                UiEvent::StreamDelta(delta) => {
-                    self.transcript.push_str(delta);
-                    self.truncate_transcript();
-                }
-                _ => {}
             }
             return true;
         }
 
         if self.themes_dialog.is_some() {
-            match event {
-                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
-                    self.themes_dialog = None;
+            let mut chosen = None;
+            if let Some(d) = &mut self.themes_dialog {
+                match event {
+                    UiEvent::Input(Input::Quit | Input::Cancel) => self.themes_dialog = None,
+                    UiEvent::Input(Input::Character(c)) => d.push_char(*c),
+                    UiEvent::Input(Input::Backspace) => d.pop_char(),
+                    UiEvent::Input(Input::Up | Input::ScrollUp | Input::PageUp) => d.previous(),
+                    UiEvent::Input(
+                        Input::Down | Input::ScrollDown | Input::PageDown | Input::ToggleMode,
+                    ) => d.next(),
+                    UiEvent::Input(Input::Submit) => chosen = d.selected_theme(),
+                    _ => {}
                 }
-                UiEvent::Input(Input::Character(character)) => {
-                    if let Some(dialog) = &mut self.themes_dialog {
-                        dialog.push_char(*character);
-                    }
+            }
+            if matches!(event, UiEvent::Input(Input::Submit)) {
+                self.themes_dialog = None;
+                if let Some(theme) = chosen {
+                    self.set_theme(theme);
+                    self.diagnostic = format!("theme switched to: {}", theme.name());
                 }
-                UiEvent::Input(Input::Backspace) => {
-                    if let Some(dialog) = &mut self.themes_dialog {
-                        dialog.pop_char();
-                    }
-                }
-                UiEvent::Input(Input::Up)
-                | UiEvent::Input(Input::ScrollUp)
-                | UiEvent::Input(Input::PageUp) => {
-                    if let Some(dialog) = &mut self.themes_dialog {
-                        dialog.previous();
-                    }
-                }
-                UiEvent::Input(Input::Down)
-                | UiEvent::Input(Input::ScrollDown)
-                | UiEvent::Input(Input::PageDown) => {
-                    if let Some(dialog) = &mut self.themes_dialog {
-                        dialog.next();
-                    }
-                }
-                UiEvent::Input(Input::Submit) => {
-                    if let Some(dialog) = &self.themes_dialog
-                        && let Some(chosen) = dialog.selected_theme()
-                    {
-                        self.set_theme(chosen);
-                        self.diagnostic = format!("theme switched to: {}", chosen.name());
-                    }
-                    self.themes_dialog = None;
-                }
-                UiEvent::Input(Input::ToggleMode) => {
-                    if let Some(dialog) = &mut self.themes_dialog {
-                        dialog.next();
-                    }
-                }
-                UiEvent::Resize { .. } => {}
-                UiEvent::StreamDelta(delta) => {
-                    self.transcript.push_str(delta);
-                    self.truncate_transcript();
-                }
-                _ => {}
             }
             return true;
         }
 
         if self.models_dialog.is_some() {
-            match event {
-                UiEvent::Input(Input::Quit) | UiEvent::Input(Input::Cancel) => {
-                    self.models_dialog = None;
+            let mut chosen = None;
+            if let Some(d) = &mut self.models_dialog {
+                match event {
+                    UiEvent::Input(Input::Quit | Input::Cancel) => self.models_dialog = None,
+                    UiEvent::Input(Input::Character(c)) => d.push_char(*c),
+                    UiEvent::Input(Input::Backspace) => d.pop_char(),
+                    UiEvent::Input(Input::Up | Input::ScrollUp | Input::PageUp) => d.previous(),
+                    UiEvent::Input(
+                        Input::Down | Input::ScrollDown | Input::PageDown | Input::ToggleMode,
+                    ) => d.next(),
+                    UiEvent::Input(Input::Submit) => chosen = d.selected_model().cloned(),
+                    _ => {}
                 }
-                UiEvent::Input(Input::Character(character)) => {
-                    if let Some(dialog) = &mut self.models_dialog {
-                        dialog.push_char(*character);
+            }
+            if matches!(event, UiEvent::Input(Input::Submit)) {
+                self.models_dialog = None;
+                if let Some(m) = chosen {
+                    let chosen_id = m.id;
+                    if let Some((provider, model)) = split_provider_model(&chosen_id) {
+                        self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
+                        self.model = bounded(model.to_string(), MAX_IDENTITY_BYTES);
+                    } else {
+                        self.model = bounded(chosen_id.clone(), MAX_IDENTITY_BYTES);
+                    }
+                    self.diagnostic = format!("model switched to: {chosen_id}");
+                }
+            }
+            return true;
+        }
+
+        if self.git_dialog.is_some() {
+            let mut close = false;
+            let mut status_update = None;
+            if let Some(dialog) = &mut self.git_dialog {
+                if dialog.commit_mode {
+                    match event {
+                        UiEvent::Input(Input::Quit | Input::Cancel) => dialog.exit_commit_mode(),
+                        UiEvent::Input(Input::Submit) => match dialog.commit() {
+                            Ok(msg) => status_update = Some(format!("git: {msg}")),
+                            Err(err) => status_update = Some(format!("git error: {err}")),
+                        },
+                        UiEvent::Input(Input::Character(ch)) => dialog.push_commit_char(*ch),
+                        UiEvent::Input(Input::Backspace) => dialog.pop_commit_char(),
+                        UiEvent::Paste(text) => dialog.push_commit_str(text),
+                        _ => {}
+                    }
+                } else {
+                    match event {
+                        UiEvent::Input(Input::Quit | Input::Cancel) => close = true,
+                        UiEvent::Input(Input::Up | Input::ScrollUp) => dialog.previous(),
+                        UiEvent::Input(Input::Down | Input::ScrollDown) => dialog.next(),
+                        UiEvent::Input(Input::PageUp) => dialog.scroll_diff_up(5),
+                        UiEvent::Input(Input::PageDown) => dialog.scroll_diff_down(5),
+                        UiEvent::Input(Input::Character(' ')) => dialog.toggle_stage(),
+                        UiEvent::Input(Input::Character('c' | 'C')) => dialog.enter_commit_mode(),
+                        _ => {}
                     }
                 }
-                UiEvent::Input(Input::Backspace) => {
-                    if let Some(dialog) = &mut self.models_dialog {
-                        dialog.pop_char();
-                    }
-                }
-                UiEvent::Input(Input::Up)
-                | UiEvent::Input(Input::ScrollUp)
-                | UiEvent::Input(Input::PageUp) => {
-                    if let Some(dialog) = &mut self.models_dialog {
-                        dialog.previous();
-                    }
-                }
-                UiEvent::Input(Input::Down)
-                | UiEvent::Input(Input::ScrollDown)
-                | UiEvent::Input(Input::PageDown) => {
-                    if let Some(dialog) = &mut self.models_dialog {
-                        dialog.next();
-                    }
-                }
-                UiEvent::Input(Input::Submit) => {
-                    if let Some(dialog) = &self.models_dialog
-                        && let Some(chosen) = dialog.selected_model()
-                    {
-                        let chosen_id = chosen.id.clone();
-                        if let Some((provider, model)) = split_provider_model(&chosen_id) {
-                            self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
-                            self.model = bounded(model.to_string(), MAX_IDENTITY_BYTES);
-                        } else {
-                            self.model = bounded(chosen_id.clone(), MAX_IDENTITY_BYTES);
+            }
+            if close {
+                self.close_git_dialog();
+            }
+            if let Some(status) = status_update {
+                self.diagnostic = status;
+            }
+            return true;
+        }
+
+        if self.skills_dialog.is_some() {
+            let mut chosen_skill = None;
+            if let Some(dialog) = &mut self.skills_dialog {
+                match event {
+                    UiEvent::Input(Input::Quit | Input::Cancel) => self.skills_dialog = None,
+                    UiEvent::Input(Input::Character(c)) => dialog.push_char(*c),
+                    UiEvent::Input(Input::Backspace) => dialog.pop_char(),
+                    UiEvent::Input(Input::Up | Input::ScrollUp) => dialog.previous(),
+                    UiEvent::Input(Input::Down | Input::ScrollDown) => dialog.next(),
+                    UiEvent::Input(Input::PageUp) => dialog.scroll_preview_up(5),
+                    UiEvent::Input(Input::PageDown) => dialog.scroll_preview_down(5),
+                    UiEvent::Input(Input::Submit) => {
+                        if let Some(skill) = dialog.selected_skill() {
+                            chosen_skill = Some(skill.name.clone());
                         }
-                        self.diagnostic = format!("model switched to: {chosen_id}");
                     }
-                    self.models_dialog = None;
+                    _ => {}
                 }
-                UiEvent::Input(Input::ToggleMode) => {
-                    if let Some(dialog) = &mut self.models_dialog {
-                        dialog.next();
-                    }
+            }
+            if matches!(event, UiEvent::Input(Input::Submit)) {
+                self.skills_dialog = None;
+                if let Some(name) = chosen_skill {
+                    self.prompt = format!("/skill {name}");
+                    self.cursor_position = self.prompt.len();
+                    self.diagnostic = format!("skill selected: {name}");
                 }
-                UiEvent::Resize { .. } => {}
-                UiEvent::StreamDelta(delta) => {
-                    self.transcript.push_str(delta);
-                    self.truncate_transcript();
-                }
-                _ => {}
             }
             return true;
         }
