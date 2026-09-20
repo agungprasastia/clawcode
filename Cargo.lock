@@ -227,6 +227,7 @@ dependencies = [
  "sha2",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "ureq",
 ]
 

@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::App;
 use super::app::{StreamPart, ToolRow, ToolRowState};
@@ -323,6 +324,9 @@ fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
     for part in parts {
         match part {
             StreamPart::User(prompt) => {
+                if !ctx.lines.is_empty() {
+                    ctx.lines.push(Line::from(""));
+                }
                 let card_width = if ctx.width > 2 {
                     (ctx.width.saturating_sub(2) as usize).max(20)
                 } else {
@@ -350,27 +354,33 @@ fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
                         ctx.theme.bg_element,
                     ));
                 } else {
-                    for (idx, pline) in p_lines.iter().enumerate() {
-                        let prefix = if idx == 0 { "▌ " } else { "  " };
-                        let content_line = Line::from(vec![
-                            Span::styled(
-                                prefix,
-                                Style::default()
-                                    .fg(ctx.mode_color)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                (*pline).to_string(),
-                                Style::default()
-                                    .fg(ctx.theme.ink)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]);
-                        ctx.lines.push(pad_card_line(
-                            content_line,
-                            card_width,
-                            ctx.theme.bg_element,
-                        ));
+                    let content_width = card_width.saturating_sub(2);
+                    let mut is_first = true;
+                    for pline in &p_lines {
+                        let wrapped = wrap_line_to_width(pline, content_width);
+                        for wline in wrapped {
+                            let prefix = if is_first { "▌ " } else { "  " };
+                            is_first = false;
+                            let content_line = Line::from(vec![
+                                Span::styled(
+                                    prefix,
+                                    Style::default()
+                                        .fg(ctx.mode_color)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    wline,
+                                    Style::default()
+                                        .fg(ctx.theme.ink)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]);
+                            ctx.lines.push(pad_card_line(
+                                content_line,
+                                card_width,
+                                ctx.theme.bg_element,
+                            ));
+                        }
                     }
                 }
                 ctx.lines.push(Line::from(""));
@@ -385,7 +395,11 @@ fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
                 for line in &mut rendered {
                     indent_assistant_line(line);
                 }
+                let has_rendered = !rendered.is_empty();
                 ctx.lines.extend(rendered);
+                if has_rendered {
+                    ctx.lines.push(Line::from(""));
+                }
             }
             StreamPart::Reasoning(text) => {
                 let dur_str = format!(
@@ -482,6 +496,93 @@ fn pad_card_line(mut line: Line<'static>, card_width: usize, bg: Color) -> Line<
         ));
     }
     line.style(Style::default().bg(bg))
+}
+
+/// Pre-wrap a text line into chunks that each fit within `max_width` display columns.
+/// Breaks on word boundaries when possible, hard-breaks otherwise.
+fn wrap_line_to_width(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+    if UnicodeWidthStr::width(text) <= max_width {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width: usize = 0;
+    for word in WordSplitter::new(text) {
+        let w = UnicodeWidthStr::width(word.as_str());
+        if current_width + w <= max_width {
+            current.push_str(&word);
+            current_width += w;
+        } else if w > max_width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            let trimmed = word.strip_prefix(' ').unwrap_or(&word);
+            for ch in trimmed.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if current_width + cw > max_width && !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                    current_width = 0;
+                }
+                current.push(ch);
+                current_width += cw;
+            }
+        } else {
+            lines.push(std::mem::take(&mut current));
+            let trimmed = word.strip_prefix(' ').unwrap_or(&word);
+            current.push_str(trimmed);
+            current_width = UnicodeWidthStr::width(trimmed);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// Iterator that yields words with their trailing/leading whitespace preserved.
+/// Splits on word boundaries (space transitions) for wrap purposes.
+struct WordSplitter<'a> {
+    text: &'a str,
+    pos: usize,
+}
+
+impl<'a> WordSplitter<'a> {
+    fn new(text: &'a str) -> Self {
+        Self { text, pos: 0 }
+    }
+}
+
+impl<'a> Iterator for WordSplitter<'a> {
+    type Item = String;
+    fn next(&mut self) -> Option<String> {
+        if self.pos >= self.text.len() {
+            return None;
+        }
+        let rest = &self.text[self.pos..];
+        let chars: Vec<char> = rest.chars().collect();
+        let mut end = 0;
+        // Consume leading spaces
+        while end < chars.len() && chars[end] == ' ' {
+            end += 1;
+        }
+        // Consume non-space chars
+        while end < chars.len() && chars[end] != ' ' {
+            end += 1;
+        }
+        if end == 0 {
+            return None;
+        }
+        let word: String = chars[..end].iter().collect();
+        self.pos += word.len();
+        Some(word)
+    }
 }
 
 fn empty_card_line(card_width: usize, bg: Color) -> Line<'static> {

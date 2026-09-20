@@ -104,10 +104,18 @@ pub fn run() -> io::Result<()> {
         .terminal
         .draw(|frame| render::render(frame, &app))?;
     while app.is_running() {
-        let input = event::poll(INPUT_POLL_INTERVAL)?
+        let first = event::poll(INPUT_POLL_INTERVAL)?
             .then(event::read)
             .transpose()?;
-        runtime_step(&mut app, &mut events, input, |app| {
+        if let Some(ev) = first.and_then(input::translate) {
+            events.push(ev);
+        }
+        while event::poll(Duration::ZERO)? {
+            if let Some(ev) = input::translate(event::read()?) {
+                events.push(ev);
+            }
+        }
+        process_pending(&mut app, &mut events, |app| {
             terminal
                 .terminal
                 .draw(|frame| render::render(frame, app))
