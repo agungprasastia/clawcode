@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::App;
-use super::app::{StreamPart, ToolRow, ToolRowState};
+use super::app::{StreamPart, ToolRow, ToolRowState, tool_pending_label, tool_uses_generic_detail};
 use super::render::{
     identity_label, mode_label, render_command_popup, render_hints_row, render_input_card,
     status_label,
@@ -320,6 +320,33 @@ struct ChatRenderContext<'a> {
     tool_row_lines: &'a mut Vec<(String, usize)>,
 }
 
+/// OpenCode derives a compact reasoning title from a leading `**bold**`
+/// paragraph. The title is only recognised when it ends at a paragraph
+/// boundary, so ordinary bold text inside the reasoning is not mistaken for
+/// a title.
+fn reasoning_title(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix("**")?;
+    let end = rest.find("**")?;
+    let title = rest[..end].trim();
+    let suffix = &rest[end + 2..];
+    if title.is_empty() || title.contains(['\n', '\r']) {
+        return None;
+    }
+    if !suffix.is_empty() && !suffix.starts_with("\n\n") && !suffix.starts_with("\r\n\r\n") {
+        return None;
+    }
+    Some(title)
+}
+
+fn reasoning_label(text: &str, done: bool) -> String {
+    let base = if done { "Thought" } else { "Thinking" };
+    match reasoning_title(text) {
+        Some(title) => format!("{base}: {}", truncate_tool_text(title, 60)),
+        None => base.to_string(),
+    }
+}
+
 fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
     for part in parts {
         match part {
@@ -402,49 +429,50 @@ fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
                 }
             }
             StreamPart::Reasoning(text) => {
-                let dur_str = format!(
-                    "{:.1}s",
-                    ctx.app.reasoning_elapsed_seconds().unwrap_or(0.1).max(0.1)
-                );
-                if ctx.app.is_reasoning() {
+                ctx.lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(
+                        format!(
+                            "{} {}",
+                            ctx.app.wave_spinner().compact_frame(),
+                            reasoning_label(text, false)
+                        ),
+                        Style::default()
+                            .fg(ctx.theme.amber)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+            StreamPart::ReasoningDone { text, duration } => {
+                let dur_str = format!("{:.1}s", duration.as_secs_f64().max(0.1));
+                let line_count = ctx.lines.len();
+                ctx.tool_row_lines
+                    .push(("__thought__".to_string(), line_count));
+                let label = reasoning_label(text, true);
+                if ctx.app.is_thought_expanded() {
                     ctx.lines.push(Line::from(vec![
                         Span::raw("   "),
                         Span::styled(
-                            format!("{} Thinking", ctx.app.wave_spinner().compact_frame()),
-                            Style::default()
-                                .fg(ctx.theme.amber)
-                                .add_modifier(Modifier::BOLD),
+                            format!("- {label} · {dur_str}"),
+                            Style::default().fg(ctx.theme.amber),
                         ),
                     ]));
-                } else {
-                    let line_count = ctx.lines.len();
-                    ctx.tool_row_lines
-                        .push(("__thought__".to_string(), line_count));
-                    if ctx.app.is_thought_expanded() {
+                    for l in text.lines() {
                         ctx.lines.push(Line::from(vec![
-                            Span::raw("   "),
-                            Span::styled(
-                                format!("- Thought for {dur_str}"),
-                                Style::default().fg(ctx.theme.amber),
-                            ),
-                        ]));
-                        for l in text.lines() {
-                            ctx.lines.push(Line::from(vec![
-                                Span::raw("      │ "),
-                                Span::styled(l.to_string(), Style::default().fg(ctx.theme.quiet)),
-                            ]));
-                        }
-                    } else {
-                        ctx.lines.push(Line::from(vec![
-                            Span::raw("   "),
-                            Span::styled(
-                                format!("+ Thought for {dur_str}"),
-                                Style::default().fg(ctx.theme.amber),
-                            ),
+                            Span::raw("      │ "),
+                            Span::styled(l.to_string(), Style::default().fg(ctx.theme.quiet)),
                         ]));
                     }
-                    ctx.lines.push(Line::from(""));
+                } else {
+                    ctx.lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(
+                            format!("+ {label} · {dur_str}"),
+                            Style::default().fg(ctx.theme.amber),
+                        ),
+                    ]));
                 }
+                ctx.lines.push(Line::from(""));
             }
             StreamPart::Tool(call_id) => {
                 let app = ctx.app;
@@ -459,7 +487,7 @@ fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
 
 fn shell_command(row: &ToolRow) -> String {
     if row.desc == "preparing arguments..." {
-        return "Preparing bash...".to_string();
+        return tool_pending_label(&row.name).to_string();
     }
     if !row.desc.is_empty() {
         let clean = row.desc.strip_prefix("$ ").unwrap_or(&row.desc).trim();
@@ -1032,7 +1060,106 @@ fn render_generic_tool_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
     lines.push(compact_tool_line(row, app, theme, mode_color, width));
     tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
 
-    append_specialized_detail(lines, row, theme, tool_row_lines);
+    let expanded = app.is_tool_expanded(&row.call_id);
+    append_specialized_detail(lines, row, theme, tool_row_lines, expanded);
+}
+
+fn append_generic_tool_detail(
+    lines: &mut Vec<Line<'static>>,
+    row: &ToolRow,
+    theme: &Theme,
+    tool_row_lines: &mut Vec<(String, usize)>,
+) {
+    let mut rendered = false;
+    if let Ok(serde_json::Value::Object(input)) =
+        serde_json::from_str::<serde_json::Value>(&row.arguments)
+    {
+        for (key, value) in input {
+            let value = match value {
+                serde_json::Value::String(text) => text,
+                other => other.to_string(),
+            };
+            let value = strip_ansi_codes(&value).replace('\n', " ");
+            lines.push(Line::from(vec![
+                Span::styled("      : ", Style::default().fg(theme.quiet)),
+                Span::styled(format!("{key}: "), Style::default().fg(theme.dim)),
+                Span::styled(value, Style::default().fg(theme.ink)),
+            ]));
+            tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+            rendered = true;
+        }
+    } else if !row.arguments.trim().is_empty() {
+        let arguments = strip_ansi_codes(&row.arguments).replace('\n', " ");
+        lines.push(Line::from(vec![
+            Span::styled("      : ", Style::default().fg(theme.quiet)),
+            Span::styled(arguments, Style::default().fg(theme.ink)),
+        ]));
+        tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+        rendered = true;
+    }
+
+    let output = strip_ansi_codes(&row.output);
+    let output_lines: Vec<&str> = output.trim().lines().collect();
+    for (index, line) in output_lines.iter().take(20).enumerate() {
+        let prefix = if index == 0 {
+            "      output: "
+        } else {
+            "              "
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default().fg(theme.quiet)),
+            Span::styled((*line).to_string(), Style::default().fg(theme.ink)),
+        ]));
+        tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+        rendered = true;
+    }
+    if output_lines.len() > 20 {
+        lines.push(Line::from(Span::styled(
+            format!("              … {} more lines", output_lines.len() - 20),
+            Style::default().fg(theme.dim),
+        )));
+        tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+    }
+
+    if !rendered {
+        lines.push(Line::from(Span::styled(
+            "      (no input or output)",
+            Style::default().fg(theme.dim),
+        )));
+        tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+    }
+}
+
+fn append_tool_output_detail(
+    lines: &mut Vec<Line<'static>>,
+    row: &ToolRow,
+    theme: &Theme,
+    tool_row_lines: &mut Vec<(String, usize)>,
+) {
+    let output = strip_ansi_codes(&row.output);
+    let output_lines: Vec<&str> = output.trim().lines().collect();
+    if output_lines.is_empty() {
+        return;
+    }
+    for (index, line) in output_lines.iter().take(20).enumerate() {
+        let prefix = if index == 0 {
+            "      failed: "
+        } else {
+            "              "
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default().fg(theme.quiet)),
+            Span::styled((*line).to_string(), Style::default().fg(theme.ink)),
+        ]));
+        tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+    }
+    if output_lines.len() > 20 {
+        lines.push(Line::from(Span::styled(
+            format!("              … {} more lines", output_lines.len() - 20),
+            Style::default().fg(theme.dim),
+        )));
+        tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+    }
 }
 
 fn append_specialized_detail(
@@ -1040,7 +1167,19 @@ fn append_specialized_detail(
     row: &ToolRow,
     theme: &Theme,
     tool_row_lines: &mut Vec<(String, usize)>,
+    expanded: bool,
 ) {
+    if tool_uses_generic_detail(&row.name) {
+        if expanded {
+            append_generic_tool_detail(lines, row, theme, tool_row_lines);
+        }
+        return;
+    }
+
+    if expanded && row.state == ToolRowState::Failed {
+        append_tool_output_detail(lines, row, theme, tool_row_lines);
+    }
+
     let terminal = row.state == ToolRowState::Completed || row.state == ToolRowState::Failed;
     if !terminal && !matches!(row.name.as_str(), "task" | "execute" | "update_plan") {
         return;
@@ -1185,7 +1324,7 @@ fn compact_tool_line(
 
     let (verb, mut target, detail): (&str, String, Option<String>) =
         if row.desc == "preparing arguments..." {
-            ("Preparing", format!("{}...", row.name), None)
+            (tool_pending_label(&row.name), String::new(), None)
         } else {
             let target_str = if row.desc.is_empty() {
                 row.arguments.clone()
@@ -1470,7 +1609,7 @@ pub(crate) fn visual_line_count(lines: &[Line], width: u16) -> usize {
 
 fn tool_row_detail(row: &ToolRow) -> String {
     if row.desc == "preparing arguments..." {
-        return format!("Preparing {}...", row.name);
+        return tool_pending_label(&row.name).to_string();
     }
     let target = if row.desc.is_empty() {
         row.arguments.clone()
@@ -2302,6 +2441,72 @@ mod tests {
     }
 
     #[test]
+    fn test_generic_tool_detail_expands_input_and_output() {
+        let mut app = App::default();
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mode_color = Color::Cyan;
+        let row = ToolRow {
+            call_id: "mcp-1".to_string(),
+            name: "mcp_lookup".to_string(),
+            desc: "needle".to_string(),
+            arguments: serde_json::json!({ "query": "needle", "limit": 2 }).to_string(),
+            output: "first result\nsecond result".to_string(),
+            state: ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: std::time::Instant::now(),
+            expandable: true,
+        };
+        assert!(row.compute_expandable());
+        app.set_tool_rows_for_test(vec![row]);
+        let parts = vec![StreamPart::Tool("mcp-1".to_string())];
+
+        let mut lines = Vec::new();
+        let mut tool_lines = Vec::new();
+        let mut ctx = ChatRenderContext {
+            lines: &mut lines,
+            app: &app,
+            theme: &theme,
+            mode_color,
+            width: 80,
+            tool_row_lines: &mut tool_lines,
+        };
+        append_stream_parts(&mut ctx, &parts);
+        assert!(!lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("output:"))
+        }));
+
+        app.toggle_tool_expanded("mcp-1");
+        let mut expanded = Vec::new();
+        let mut expanded_tool_lines = Vec::new();
+        let mut ctx = ChatRenderContext {
+            lines: &mut expanded,
+            app: &app,
+            theme: &theme,
+            mode_color,
+            width: 80,
+            tool_row_lines: &mut expanded_tool_lines,
+        };
+        append_stream_parts(&mut ctx, &parts);
+        let text = expanded
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("query: needle"), "{text}");
+        assert!(text.contains("limit: 2"), "{text}");
+        assert!(text.contains("output: first result"), "{text}");
+        assert!(text.contains("second result"), "{text}");
+    }
+
+    #[test]
     fn test_format_transcript_lines_thought_variants() {
         let theme = ThemeKind::ClawcodeDark.to_theme();
         let mode_color = Color::Cyan;
@@ -2322,7 +2527,10 @@ mod tests {
         let mut app = App::default();
         let theme = ThemeKind::ClawcodeDark.to_theme();
         let mode_color = Color::Cyan;
-        let parts = vec![StreamPart::Reasoning("Line one\nLine two".to_string())];
+        let parts = vec![StreamPart::ReasoningDone {
+            text: "Line one\nLine two".to_string(),
+            duration: std::time::Duration::from_millis(1200),
+        }];
 
         // Collapsed by default
         let mut lines = Vec::new();
@@ -2340,7 +2548,7 @@ mod tests {
         let thought_header = lines.iter().find(|l| {
             l.spans
                 .iter()
-                .any(|s| s.content.starts_with("+ Thought for "))
+                .any(|s| s.content.starts_with("+ Thought · "))
         });
         assert!(thought_header.is_some());
         assert!(
@@ -2366,7 +2574,7 @@ mod tests {
         let expanded_header = lines_exp.iter().find(|l| {
             l.spans
                 .iter()
-                .any(|s| s.content.starts_with("- Thought for "))
+                .any(|s| s.content.starts_with("- Thought · "))
         });
         assert!(expanded_header.is_some());
         assert!(
@@ -2384,6 +2592,50 @@ mod tests {
                 .iter()
                 .any(|l| l.spans.iter().any(|s| s.content == "      │ "))
         );
+    }
+
+    #[test]
+    fn test_reasoning_label_uses_opencode_title_rule() {
+        assert_eq!(
+            reasoning_label("**Surveying the repository**\n\nbody", false),
+            "Thinking: Surveying the repository"
+        );
+        assert_eq!(
+            reasoning_label("**Surveying the repository**\n\nbody", true),
+            "Thought: Surveying the repository"
+        );
+        assert_eq!(reasoning_label("plain thought", false), "Thinking");
+        assert_eq!(reasoning_label("plain thought", true), "Thought");
+        // Bold text that is not its own paragraph is not a title.
+        assert_eq!(
+            reasoning_label("**bold** in the middle of a sentence", true),
+            "Thought"
+        );
+    }
+
+    #[test]
+    fn test_append_stream_parts_active_reasoning_label() {
+        let app = App::default();
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let parts = vec![StreamPart::Reasoning(
+            "**Surveying the repository**\n\nbody".to_string(),
+        )];
+        let mut lines = Vec::new();
+        let mut tool_lines = Vec::new();
+        let mut ctx = ChatRenderContext {
+            lines: &mut lines,
+            app: &app,
+            theme: &theme,
+            mode_color: Color::Cyan,
+            width: 80,
+            tool_row_lines: &mut tool_lines,
+        };
+        append_stream_parts(&mut ctx, &parts);
+        assert!(lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("Thinking: Surveying the repository"))
+        }));
     }
 
     #[test]

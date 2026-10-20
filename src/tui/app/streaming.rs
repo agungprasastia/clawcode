@@ -6,7 +6,14 @@ use super::{App, ConversationStatus};
 pub enum StreamPart {
     User(String),
     Text(String),
+    /// Reasoning that is still streaming. Only the tail of the stream may be
+    /// in this state; completed steps are converted to [`Self::ReasoningDone`]
+    /// so their timer and label stop moving.
     Reasoning(String),
+    ReasoningDone {
+        text: String,
+        duration: std::time::Duration,
+    },
     Tool(String),
 }
 
@@ -31,7 +38,6 @@ impl App {
         self.text_stream_active = false;
         self.reasoning_buffer.clear();
         self.reasoning_start = None;
-        self.reasoning_duration = None;
         self.reasoning_active = false;
         self.active_tool = None;
         if let Some(generation_id) = self.active_generation_id.take() {
@@ -74,47 +80,43 @@ impl App {
     }
 
     pub fn reasoning_elapsed_seconds(&self) -> Option<f64> {
-        self.reasoning_duration
-            .map(|d| d.as_secs_f64())
-            .or_else(|| self.reasoning_start.map(|t| t.elapsed().as_secs_f64()))
+        self.reasoning_start.map(|t| t.elapsed().as_secs_f64())
     }
 
-    pub(crate) fn record_reasoning_duration(&mut self) {
-        if let Some(start) = self.reasoning_start
-            && self.reasoning_duration.is_none()
-        {
-            self.reasoning_duration = Some(start.elapsed());
-        }
-    }
-
+    /// Finish the current reasoning segment. The live stream part is frozen
+    /// with its duration so later steps get their own "Thinking"/"Thought"
+    /// entry instead of mutating this one.
     pub fn flush_reasoning(&mut self) {
-        if self.reasoning_buffer.trim().is_empty() {
-            self.reasoning_buffer.clear();
-            self.reasoning_start = None;
-            self.reasoning_duration = None;
-            self.reasoning_active = false;
-            return;
-        }
         let duration = self
-            .reasoning_duration
-            .or_else(|| self.reasoning_start.map(|t| t.elapsed()))
-            .unwrap_or_default()
-            .as_secs_f64();
-        let dur_str = format!("{:.1}s", duration.max(0.1));
-
-        let mut snippet = String::new();
-        if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
-            snippet.push('\n');
+            .reasoning_start
+            .map(|t| t.elapsed())
+            .unwrap_or_default();
+        if let Some(index) = self
+            .stream_parts
+            .iter()
+            .rposition(|p| matches!(p, StreamPart::Reasoning(_)))
+        {
+            let text = match &mut self.stream_parts[index] {
+                StreamPart::Reasoning(text) => std::mem::take(text),
+                _ => String::new(),
+            };
+            self.stream_parts[index] = StreamPart::ReasoningDone { text, duration };
         }
-        if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-            snippet.push('\n');
+        if !self.reasoning_buffer.trim().is_empty() {
+            let dur_str = format!("{:.1}s", duration.as_secs_f64().max(0.1));
+            let mut snippet = String::new();
+            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                snippet.push('\n');
+            }
+            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                snippet.push('\n');
+            }
+            snippet.push_str(&format!("Thought for {dur_str}\n\n"));
+            self.transcript.push_str(&snippet);
+            self.truncate_transcript();
         }
-        snippet.push_str(&format!("Thought for {dur_str}\n\n"));
-        self.transcript.push_str(&snippet);
-        self.truncate_transcript();
         self.reasoning_buffer.clear();
         self.reasoning_start = None;
-        self.reasoning_duration = None;
         self.reasoning_active = false;
     }
 
@@ -139,20 +141,21 @@ impl App {
 
     pub(crate) fn push_stream_part(&mut self, part: StreamPart) {
         self.ensure_stream_parts();
+        if !matches!(part, StreamPart::Reasoning(_)) {
+            self.flush_reasoning();
+        }
         match part {
             StreamPart::User(prompt) => {
                 self.stream_parts.push(StreamPart::User(prompt));
             }
             StreamPart::Reasoning(delta) => {
-                let last_user_idx = self
-                    .stream_parts
-                    .iter()
-                    .rposition(|p| matches!(p, StreamPart::User(_)))
-                    .unwrap_or(0);
-                if let Some(StreamPart::Reasoning(existing)) = self.stream_parts[last_user_idx..]
-                    .iter_mut()
-                    .find(|p| matches!(p, StreamPart::Reasoning(_)))
-                {
+                // Only extend the trailing part. A model step that reasons,
+                // calls tools, then reasons again must produce a second
+                // reasoning entry after the tools, not merge into the first.
+                if !matches!(self.stream_parts.last(), Some(StreamPart::Reasoning(_))) {
+                    self.flush_reasoning();
+                }
+                if let Some(StreamPart::Reasoning(existing)) = self.stream_parts.last_mut() {
                     existing.push_str(&delta);
                     if existing.len() > Self::MAX_TRANSCRIPT_BYTES {
                         existing
@@ -173,6 +176,7 @@ impl App {
                     self.stream_parts.push(StreamPart::Text(delta));
                 }
             }
+            done @ StreamPart::ReasoningDone { .. } => self.stream_parts.push(done),
             StreamPart::Tool(call_id) => {
                 if !self
                     .stream_parts
@@ -193,6 +197,7 @@ impl App {
 
     pub(crate) fn push_tool_part(&mut self, call_id: String) {
         self.ensure_stream_parts();
+        self.flush_reasoning();
         if !self
             .stream_parts
             .iter()

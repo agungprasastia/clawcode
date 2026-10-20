@@ -38,6 +38,15 @@ pub struct ToolRow {
 
 impl ToolRow {
     pub fn compute_expandable(&self) -> bool {
+        if self.state == ToolRowState::Failed && self.output.lines().count() > 1 {
+            return true;
+        }
+        if tool_uses_generic_detail(&self.name) {
+            if !self.arguments.trim().is_empty() || !self.output.trim().is_empty() {
+                return true;
+            }
+            return false;
+        }
         if matches!(self.name.as_str(), "bash" | "sh") {
             self.output.lines().count() > 10
         } else if matches!(self.name.as_str(), "edit_file" | "edit") {
@@ -79,6 +88,60 @@ pub struct ActiveToolInfo {
     pub name: String,
     pub desc: String,
     pub started_at: std::time::Instant,
+}
+
+/// OpenCode renders tools outside its specialized set with the generic
+/// "tool + scalar input" row, where clicking reveals every input and the
+/// output. Keep the same fallback boundary here.
+pub fn tool_uses_generic_detail(name: &str) -> bool {
+    !matches!(
+        name,
+        "bash"
+            | "sh"
+            | "read_file"
+            | "read"
+            | "write_file"
+            | "write"
+            | "edit_file"
+            | "edit"
+            | "patch"
+            | "apply_patch"
+            | "list_dir"
+            | "glob_search"
+            | "glob"
+            | "grep_search"
+            | "grep"
+            | "webfetch"
+            | "fetch"
+            | "websearch"
+            | "question"
+            | "update_plan"
+            | "task"
+            | "execute"
+            | "skill"
+    )
+}
+
+/// Pending labels mirror OpenCode's tool-specific status copy rather than
+/// exposing the internal tool name.
+pub fn tool_pending_label(name: &str) -> &'static str {
+    match name {
+        "read_file" | "read" => "Reading file…",
+        "glob_search" | "glob" => "Finding files…",
+        "grep_search" | "grep" => "Searching content…",
+        "webfetch" | "fetch" => "Fetching from the web…",
+        "websearch" => "Searching the web…",
+        "bash" | "sh" => "Writing command…",
+        "write_file" | "write" => "Preparing write…",
+        "edit_file" | "edit" => "Preparing edit…",
+        "patch" | "apply_patch" => "Preparing patch…",
+        "task" => "Delegating…",
+        "execute" => "Preparing execution…",
+        "update_plan" => "Updating plan…",
+        "question" => "Asking…",
+        "skill" => "Loading skill…",
+        _ => "Preparing tool…",
+    }
 }
 
 pub(crate) fn tool_names_match(a: &str, b: &str) -> bool {

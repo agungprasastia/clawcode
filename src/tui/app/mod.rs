@@ -33,7 +33,8 @@ pub use session_sync::ClientSessionState;
 pub use streaming::StreamPart;
 pub use suggestions::{AVAILABLE_COMMANDS, CommandSuggestion};
 pub use tool_rows::{
-    ActiveToolInfo, ToolRow, ToolRowState, format_tool_success_detail, tool_target_and_verbs,
+    ActiveToolInfo, ToolRow, ToolRowState, format_tool_success_detail, tool_pending_label,
+    tool_target_and_verbs, tool_uses_generic_detail,
 };
 use util::bounded;
 pub use util::{
@@ -167,7 +168,6 @@ pub struct App {
     text_stream_active: bool,
     reasoning_buffer: String,
     reasoning_start: Option<std::time::Instant>,
-    reasoning_duration: Option<std::time::Duration>,
     reasoning_active: bool,
     stream_parts: Vec<StreamPart>,
     stream_base_len: Option<usize>,
@@ -245,7 +245,6 @@ impl App {
             text_stream_active: false,
             reasoning_buffer: String::new(),
             reasoning_start: None,
-            reasoning_duration: None,
             reasoning_active: false,
             stream_parts: Vec::new(),
             stream_base_len: None,

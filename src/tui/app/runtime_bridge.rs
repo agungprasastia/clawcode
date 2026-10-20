@@ -138,18 +138,17 @@ impl App {
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
                     && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
                 {
+                    self.push_stream_part(StreamPart::Reasoning(delta.to_string()));
                     if self.reasoning_start.is_none() {
                         self.reasoning_start = Some(std::time::Instant::now());
                     }
                     self.reasoning_active = true;
-                    self.push_stream_part(StreamPart::Reasoning(delta.to_string()));
                     self.reasoning_buffer.push_str(delta);
                 }
             }
             "tool_call_start" => {
                 self.text_stream_active = false;
-                self.reasoning_active = false;
-                self.record_reasoning_duration();
+                self.flush_reasoning();
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
                 {
                     let name = payload
@@ -160,7 +159,9 @@ impl App {
                         .get("id")
                         .and_then(|v| v.as_str())
                         .map(ToString::to_string)
-                        .unwrap_or_else(|| format!("{name}:{}", event.seq));
+                        .unwrap_or_else(|| {
+                            format!("{name}:{}:{}", event.seq, self.tool_rows.len())
+                        });
                     self.push_tool_part(call_id.clone());
                     self.upsert_tool_row(ToolRowUpdate {
                         call_id: &call_id,
@@ -186,7 +187,14 @@ impl App {
                             format!("{}{}", row.arguments, delta),
                             MAX_TOOL_ARGUMENT_BYTES,
                         );
-                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
+                        // Parsing partial JSON is wasted work on large
+                        // arguments; only retry when the value looks closed
+                        // or the payload is still small.
+                        let looks_complete = row.arguments.len() <= 4096
+                            || row.arguments.trim_end().ends_with(['}', ']']);
+                        if looks_complete
+                            && let Ok(args) =
+                                serde_json::from_str::<serde_json::Value>(&row.arguments)
                         {
                             let (_, _, desc) = tool_target_and_verbs(&row.name, Some(&args));
                             if !desc.is_empty() {
@@ -223,8 +231,6 @@ impl App {
                 }
             }
             "text_delta" => {
-                self.reasoning_active = false;
-                self.record_reasoning_duration();
                 self.flush_reasoning();
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
                     && let Some(delta) = payload.get("delta").and_then(|v| v.as_str())
@@ -239,8 +245,7 @@ impl App {
             }
             "tool_executing" => {
                 self.text_stream_active = false;
-                self.reasoning_active = false;
-                self.record_reasoning_duration();
+                self.flush_reasoning();
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
                 {
                     let name = payload
@@ -263,7 +268,9 @@ impl App {
                         .get("id")
                         .and_then(|v| v.as_str())
                         .map(ToString::to_string)
-                        .unwrap_or_else(|| format!("inline:{}:{}", name, event.seq));
+                        .unwrap_or_else(|| {
+                            format!("inline:{}:{}:{}", name, event.seq, self.tool_rows.len())
+                        });
                     self.push_tool_part(call_id.clone());
                     let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
                     self.upsert_tool_row(ToolRowUpdate {

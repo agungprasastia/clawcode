@@ -2322,7 +2322,7 @@ fn test_tool_call_start_event_handling() {
     assert_eq!(active.name, "bash");
     assert_eq!(active.desc, "preparing arguments...");
 
-    // Renders "Preparing bash..."
+    // Pending shell calls use OpenCode's "Writing command…" copy.
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
@@ -2340,7 +2340,7 @@ fn test_tool_call_start_event_handling() {
             .iter()
             .any(|frame| text.contains(frame))
     );
-    assert!(text.contains("Preparing bash..."));
+    assert!(text.contains("Writing command…"));
 }
 
 #[test]
@@ -3845,7 +3845,7 @@ fn opencode_visual_streaming_parity_suite() {
     })
     .unwrap();
 
-    // 4. Reasoning delta 2 (should combine into the SAME thought block, not duplicate!)
+    // 4. Reasoning delta 2 starts a new thought block after the tool step.
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id,
         generation_id: Some(10),
@@ -3913,7 +3913,7 @@ fn opencode_visual_streaming_parity_suite() {
         theme.bg_element
     );
     // Thought rendered cleanly without emoji or bulky boxes
-    assert!(rendered.contains("Thought for "));
+    assert_eq!(rendered.matches("Thought · ").count(), 2);
     assert!(!rendered.contains("💭"));
 
     // Tool rows use clean dot icon
@@ -4284,7 +4284,7 @@ fn test_thought_expansion_mouse_click_toggle() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(rendered.contains("+ Thought for"));
+    assert!(rendered.contains("+ Thought · "));
     assert!(!rendered.contains("Choosing iambic pentameter"));
     assert!(!app.is_thought_expanded());
 
@@ -4294,7 +4294,7 @@ fn test_thought_expansion_mouse_click_toggle() {
             let row = (0..120)
                 .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                 .collect::<String>();
-            row.contains("+ Thought for")
+            row.contains("+ Thought · ")
         })
         .expect("thought row found");
 
@@ -4314,7 +4314,7 @@ fn test_thought_expansion_mouse_click_toggle() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(rendered_expanded.contains("- Thought for"));
+    assert!(rendered_expanded.contains("- Thought · "));
     assert!(rendered_expanded.contains("Choosing iambic pentameter"));
     assert!(rendered_expanded.contains("│"));
 
@@ -4324,7 +4324,7 @@ fn test_thought_expansion_mouse_click_toggle() {
             let row = (0..120)
                 .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                 .collect::<String>();
-            row.contains("- Thought for")
+            row.contains("- Thought · ")
         })
         .expect("expanded thought row found");
 
@@ -4343,7 +4343,7 @@ fn test_thought_expansion_mouse_click_toggle() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(rendered_collapsed_again.contains("+ Thought for"));
+    assert!(rendered_collapsed_again.contains("+ Thought · "));
     assert!(!rendered_collapsed_again.contains("Choosing iambic pentameter"));
 }
 
@@ -5224,4 +5224,149 @@ fn multi_turn_conversation_persistence_10_turns_reloads_cleanly() {
     }
 
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn reasoning_after_tools_renders_at_tail_with_fresh_thinking_label() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+
+    app.submit_user_prompt("first question");
+    let session_id = app.active_session_id().unwrap();
+    let send = |seq: i64, generation: i64, kind: &str, payload: serde_json::Value| {
+        tx.send(clawcode::runtime::RuntimeEvent {
+            session_id,
+            generation_id: Some(generation),
+            seq,
+            kind: kind.to_string(),
+            payload_json: payload.to_string(),
+        })
+        .unwrap();
+    };
+
+    send(1, 1, "generation_started", serde_json::json!({}));
+    send(
+        2,
+        1,
+        "reasoning_delta",
+        serde_json::json!({ "delta": "**First survey**\n\nfirst" }),
+    );
+    send(
+        3,
+        1,
+        "text_delta",
+        serde_json::json!({ "delta": "First answer" }),
+    );
+    send(
+        4,
+        1,
+        "generation_finished",
+        serde_json::json!({ "status": "completed" }),
+    );
+    app.poll_runtime();
+
+    app.submit_user_prompt("second question");
+    send(5, 2, "generation_started", serde_json::json!({}));
+    send(
+        6,
+        2,
+        "reasoning_delta",
+        serde_json::json!({ "delta": "**Second survey**\n\nsecond" }),
+    );
+    send(
+        7,
+        2,
+        "text_delta",
+        serde_json::json!({ "delta": "Second answer" }),
+    );
+    send(
+        8,
+        2,
+        "generation_finished",
+        serde_json::json!({ "status": "completed" }),
+    );
+    app.poll_runtime();
+
+    app.submit_user_prompt("third question");
+    send(9, 3, "generation_started", serde_json::json!({}));
+    send(
+        10,
+        3,
+        "reasoning_delta",
+        serde_json::json!({ "delta": "**Third survey**\n\nthird" }),
+    );
+    send(
+        11,
+        3,
+        "tool_call_start",
+        serde_json::json!({ "id": "call-read", "name": "read_file" }),
+    );
+    send(
+        12,
+        3,
+        "tool_executing",
+        serde_json::json!({
+            "id": "call-read",
+            "name": "read_file",
+            "arguments": { "path": "README.md" }
+        }),
+    );
+    send(
+        13,
+        3,
+        "tool_call_settled",
+        serde_json::json!({
+            "call_id": "call-read",
+            "tool_name": "read_file",
+            "status": "completed",
+            "result": "# README"
+        }),
+    );
+    send(
+        14,
+        3,
+        "reasoning_delta",
+        serde_json::json!({ "delta": "**Fourth survey**\n\nfourth" }),
+    );
+    app.poll_runtime();
+
+    let parts = app.stream_parts();
+    assert!(matches!(
+        parts.last(),
+        Some(clawcode::tui::StreamPart::Reasoning(text)) if text.contains("fourth")
+    ));
+
+    let backend = ratatui::backend::TestBackend::new(100, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
+    let rendered = (0..40)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    let text = rendered.join("\n");
+    assert!(text.contains("Thought: First survey"), "{text}");
+    assert!(text.contains("Thought: Second survey"), "{text}");
+    assert!(text.contains("Thought: Third survey"), "{text}");
+    assert_eq!(text.matches("Thinking:").count(), 1, "{text}");
+    assert!(text.contains("Thinking: Fourth survey"), "{text}");
+
+    let thinking_y = rendered
+        .iter()
+        .position(|row| row.contains("Thinking: Fourth survey"))
+        .expect("active reasoning row");
+    let tool_y = rendered
+        .iter()
+        .position(|row| row.contains("Read README.md"))
+        .expect("tool row");
+    assert!(
+        thinking_y > tool_y,
+        "active reasoning should render after the tool step\n{text}"
+    );
 }

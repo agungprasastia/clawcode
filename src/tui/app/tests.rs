@@ -460,7 +460,6 @@ fn clear_and_commands_reset_all_turn_view_state() {
             stream_base_len: Some(1),
             reasoning_buffer: "thinking".into(),
             reasoning_start: Some(std::time::Instant::now()),
-            reasoning_duration: Some(std::time::Duration::from_secs(1)),
             reasoning_active: true,
             current_plan: vec![("step".into(), "pending".into())],
             chat_scroll: 9,
@@ -494,7 +493,6 @@ fn clear_and_commands_reset_all_turn_view_state() {
             app.reasoning_buffer
         );
         assert!(app.reasoning_start.is_none(), "{command}");
-        assert!(app.reasoning_duration.is_none(), "{command}");
         assert!(!app.reasoning_active, "{command}");
         assert!(app.active_tool.is_none(), "{command}");
         assert!(app.tool_rows.is_empty(), "{command}");
@@ -583,4 +581,90 @@ fn runtime_finish_reason_survives_generation_finished() {
         app.conversation_status(),
         ConversationStatus::Finished(FinishReason::Length)
     );
+}
+
+#[test]
+fn reasoning_steps_are_separate_and_restart_timer_after_tools() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("inspect the repository");
+    let session_id = app.active_session_id().unwrap();
+
+    let send = |seq: i64, kind: &str, payload: serde_json::Value| {
+        tx.send(RuntimeEvent {
+            session_id,
+            generation_id: Some(1),
+            seq,
+            kind: kind.to_string(),
+            payload_json: payload.to_string(),
+        })
+        .unwrap();
+    };
+
+    send(1, "generation_started", serde_json::json!({}));
+    send(
+        2,
+        "reasoning_delta",
+        serde_json::json!({ "delta": "**Surveying**\n\nfirst step" }),
+    );
+    app.poll_runtime();
+
+    let first_start = app.reasoning_start.expect("first reasoning timer");
+    assert!(app.is_reasoning());
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    send(
+        3,
+        "tool_call_start",
+        serde_json::json!({ "id": "call-1", "name": "list_dir" }),
+    );
+    send(
+        4,
+        "tool_executing",
+        serde_json::json!({
+            "id": "call-1",
+            "name": "list_dir",
+            "arguments": { "path": "." }
+        }),
+    );
+    send(
+        5,
+        "tool_call_settled",
+        serde_json::json!({
+            "call_id": "call-1",
+            "tool_name": "list_dir",
+            "status": "completed",
+            "result": "src"
+        }),
+    );
+    app.poll_runtime();
+
+    assert!(!app.is_reasoning());
+    assert!(app.reasoning_start.is_none());
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    send(
+        6,
+        "reasoning_delta",
+        serde_json::json!({ "delta": "**Planning**\n\nsecond step" }),
+    );
+    app.poll_runtime();
+
+    let second_start = app.reasoning_start.expect("second reasoning timer");
+    assert!(second_start > first_start);
+    assert!(app.is_reasoning());
+
+    let parts = app.stream_parts();
+    assert_eq!(parts.len(), 4, "unexpected parts: {parts:?}");
+    assert!(matches!(&parts[0], StreamPart::User(prompt) if prompt == "inspect the repository"));
+    match &parts[1] {
+        StreamPart::ReasoningDone { text, .. } => assert!(text.contains("first step")),
+        other => panic!("expected completed first reasoning, got {other:?}"),
+    }
+    assert!(matches!(&parts[2], StreamPart::Tool(id) if id.as_str() == "call-1"));
+    match &parts[3] {
+        StreamPart::Reasoning(text) => assert!(text.contains("second step")),
+        other => panic!("expected active second reasoning, got {other:?}"),
+    }
 }
