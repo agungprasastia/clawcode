@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 
 /// Current persistence schema version.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Apply all migrations up to [`SCHEMA_VERSION`]. Idempotent.
 pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
@@ -174,6 +174,23 @@ pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
              PRAGMA user_version = 6;
              COMMIT;",
         )?;
+    }
+    if current < 7 {
+        let has_metadata: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tool_calls') WHERE name = 'metadata_json'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_metadata == 0 {
+            connection.execute_batch(
+                "BEGIN;
+                 ALTER TABLE tool_calls ADD COLUMN metadata_json TEXT;
+                 PRAGMA user_version = 7;
+                 COMMIT;",
+            )?;
+        } else {
+            connection.execute_batch("PRAGMA user_version = 7;")?;
+        }
     }
     Ok(())
 }

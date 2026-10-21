@@ -361,6 +361,19 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
             })
     }
 
+    pub fn session_tool_calls(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<crate::persistence::ToolCall>, ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.tool_calls(session_id)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<Session>, ProviderError> {
         self.db
             .as_ref()

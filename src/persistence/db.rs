@@ -170,6 +170,7 @@ pub struct ToolCall {
     pub status: ToolCallStatus,
     pub result: Option<String>,
     pub error: Option<String>,
+    pub metadata_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -595,7 +596,7 @@ impl Db {
         self.connection
             .query_row(
                 "SELECT id, session_id, generation_id, assistant_message_id,
-                        call_id, tool_name, arguments, status, result, error
+                        call_id, tool_name, arguments, status, result, error, metadata_json
                  FROM tool_calls WHERE id = ?1",
                 params![id],
                 tool_call_from_row,
@@ -607,7 +608,7 @@ impl Db {
     pub fn tool_calls(&self, session_id: i64) -> Result<Vec<ToolCall>, rusqlite::Error> {
         let mut statement = self.connection.prepare(
             "SELECT id, session_id, generation_id, assistant_message_id,
-                    call_id, tool_name, arguments, status, result, error
+                    call_id, tool_name, arguments, status, result, error, metadata_json
              FROM tool_calls WHERE session_id = ?1 ORDER BY id",
         )?;
         let rows = statement.query_map(params![session_id], tool_call_from_row)?;
@@ -678,7 +679,7 @@ impl Db {
         )?;
         let tool_call = tx.query_row(
             "SELECT id, session_id, generation_id, assistant_message_id,
-                    call_id, tool_name, arguments, status, result, error
+                    call_id, tool_name, arguments, status, result, error, metadata_json
              FROM tool_calls WHERE id = ?1",
             params![id],
             tool_call_from_row,
@@ -700,7 +701,7 @@ impl Db {
         }
         let tool_call = tx.query_row(
             "SELECT id, session_id, generation_id, assistant_message_id,
-                    call_id, tool_name, arguments, status, result, error
+                    call_id, tool_name, arguments, status, result, error, metadata_json
              FROM tool_calls WHERE id = ?1",
             params![id],
             tool_call_from_row,
@@ -725,6 +726,19 @@ impl Db {
         result: Option<&str>,
         error: Option<&str>,
     ) -> Result<(ToolCall, i64), rusqlite::Error> {
+        self.settle_tool_call_with_metadata(id, status, result, error, None)
+    }
+
+    /// Settle a call while preserving tool-owned metadata (for example a
+    /// background shell's `{ "status": "running" }` marker).
+    pub fn settle_tool_call_with_metadata(
+        &self,
+        id: i64,
+        status: ToolCallStatus,
+        result: Option<&str>,
+        error: Option<&str>,
+        metadata_json: Option<&str>,
+    ) -> Result<(ToolCall, i64), rusqlite::Error> {
         if !matches!(
             status,
             ToolCallStatus::Completed | ToolCallStatus::Failed | ToolCallStatus::Cancelled
@@ -742,14 +756,16 @@ impl Db {
         let tx = self.write_transaction()?;
         let updated = match status {
             ToolCallStatus::Failed => tx.execute(
-                "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4
+                "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4,
+                     metadata_json = COALESCE(?5, metadata_json)
                  WHERE id = ?1 AND status IN ('created', 'running')",
-                params![id, status.as_str(), result, error],
+                params![id, status.as_str(), result, error, metadata_json],
             )?,
             ToolCallStatus::Completed | ToolCallStatus::Cancelled => tx.execute(
-                "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4
+                "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4,
+                     metadata_json = COALESCE(?5, metadata_json)
                  WHERE id = ?1 AND status = 'running'",
-                params![id, status.as_str(), result, error],
+                params![id, status.as_str(), result, error, metadata_json],
             )?,
             _ => unreachable!(),
         };
@@ -758,7 +774,7 @@ impl Db {
         }
         let tool_call = tx.query_row(
             "SELECT id, session_id, generation_id, assistant_message_id,
-                    call_id, tool_name, arguments, status, result, error
+                    call_id, tool_name, arguments, status, result, error, metadata_json
              FROM tool_calls WHERE id = ?1",
             params![id],
             tool_call_from_row,
@@ -773,6 +789,34 @@ impl Db {
         )?;
         tx.commit()?;
         Ok((tool_call, seq))
+    }
+
+    /// Replace an existing message body. Used to grow the assistant placeholder
+    /// created before a streaming turn starts executing tools.
+    pub fn update_message_content(
+        &self,
+        session_id: i64,
+        message_id: i64,
+        content: &str,
+    ) -> Result<Message, rusqlite::Error> {
+        if content.len() > MAX_MESSAGE_BYTES {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                MessageTooLarge(content.len()),
+            )));
+        }
+        self.connection.query_row(
+            "UPDATE messages SET content = ?3
+             WHERE session_id = ?1 AND id = ?2
+             RETURNING id, role, content",
+            params![session_id, message_id, content],
+            |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    role: row.get(1)?,
+                    content: row.get(2)?,
+                })
+            },
+        )
     }
 
     pub fn messages(&self, session_id: i64) -> Result<Vec<Message>, rusqlite::Error> {
@@ -1214,6 +1258,7 @@ fn tool_call_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCall> {
         status: ToolCallStatus::from_str(&row.get::<_, String>(7)?),
         result: row.get(8)?,
         error: row.get(9)?,
+        metadata_json: row.get(10)?,
     })
 }
 
@@ -1252,6 +1297,8 @@ fn tool_call_payload(tool_call: &ToolCall, result: Option<&str>, error: Option<&
         "status": tool_call.status.as_str(),
         "result": result,
         "error": error,
+        "metadata": tool_call.metadata_json.as_deref()
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
     })
     .to_string()
 }

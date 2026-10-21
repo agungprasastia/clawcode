@@ -33,8 +33,9 @@ pub use session_sync::ClientSessionState;
 pub use streaming::StreamPart;
 pub use suggestions::{AVAILABLE_COMMANDS, CommandSuggestion};
 pub use tool_rows::{
-    ActiveToolInfo, ToolRow, ToolRowState, format_tool_success_detail, tool_pending_label,
-    tool_target_and_verbs, tool_uses_generic_detail,
+    ActiveToolInfo, ToolRow, ToolRowState, canonical_tool_name, exploration_category,
+    format_tool_success_detail, tool_completed_icon, tool_headline, tool_is_background,
+    tool_pending_label, tool_target_and_verbs, tool_uses_generic_detail,
 };
 use util::bounded;
 pub use util::{

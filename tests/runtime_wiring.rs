@@ -313,6 +313,18 @@ fn one_tool_call_is_joined_and_settled_before_generation_finishes() {
         position("tool_executing") < position("assistant_message"),
         "tool execution must start as soon as its input completes: {kinds:?}"
     );
+    assert!(
+        position("assistant_message") < position("tool_call_created"),
+        "the assistant placeholder must be durable before the tool call: {kinds:?}"
+    );
+    assert!(
+        position("tool_call_created") < position("tool_call_started"),
+        "durable calls must be created before they start: {kinds:?}"
+    );
+    assert!(
+        position("tool_call_started") < position("tool_call_settled"),
+        "durable calls must start before settlement: {kinds:?}"
+    );
 
     let db = client.shutdown();
     let messages = db.messages(session.id).unwrap();
@@ -630,8 +642,8 @@ fn multiple_parallel_tool_calls_start_together_settle_and_feed_back() {
     );
     let assistant_at = kinds
         .iter()
-        .position(|kind| kind == "assistant_message")
-        .expect("assistant snapshot");
+        .position(|kind| kind == "assistant_message_updated")
+        .expect("final assistant snapshot");
     assert!(
         executing[1] < assistant_at,
         "tool execution must overlap the provider stream: {kinds:?}"

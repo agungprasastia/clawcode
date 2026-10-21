@@ -98,11 +98,14 @@ impl App {
             && self.transcript.is_empty()
             && let Ok(messages) = self.command_service.session_messages(session_id)
         {
+            let tool_calls = self
+                .command_service
+                .session_tool_calls(session_id)
+                .unwrap_or_default();
+            let generation_active = matches!(self.status, ConversationStatus::Active);
+            let mut rendered_calls = HashSet::new();
             for msg in messages {
                 let trimmed = msg.content.trim();
-                if msg.role == "tool" && trimmed.is_empty() {
-                    continue;
-                }
                 if msg.role == "user" {
                     self.stream_parts
                         .push(StreamPart::User(trimmed.to_string()));
@@ -115,17 +118,33 @@ impl App {
                     }
                     self.transcript.push_str(&format!("> {trimmed}\n\n"));
                 } else if msg.role == "assistant" {
-                    self.stream_parts
-                        .push(StreamPart::Text(trimmed.to_string()));
-                    if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-                        if self.transcript.ends_with('\n') {
-                            self.transcript.push('\n');
-                        } else {
-                            self.transcript.push_str("\n\n");
+                    if !trimmed.is_empty() {
+                        self.stream_parts
+                            .push(StreamPart::Text(trimmed.to_string()));
+                        if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                            if self.transcript.ends_with('\n') {
+                                self.transcript.push('\n');
+                            } else {
+                                self.transcript.push_str("\n\n");
+                            }
                         }
+                        self.transcript.push_str(&format!("{trimmed}\n\n"));
                     }
-                    self.transcript.push_str(&format!("{trimmed}\n\n"));
-                } else if msg.role == "tool" {
+                    // Durable calls belong to this assistant row. Rebuild
+                    // them in call order instead of relying on the legacy
+                    // `role = "tool"` messages, which cannot represent a
+                    // call that was still running when the app exited.
+                    for call in tool_calls
+                        .iter()
+                        .filter(|call| call.assistant_message_id == msg.id)
+                    {
+                        self.restore_durable_tool_call(call, generation_active);
+                        rendered_calls.insert(call.id);
+                    }
+                } else if msg.role == "tool" && tool_calls.is_empty() {
+                    if trimmed.is_empty() {
+                        continue;
+                    }
                     let call_id = format!("msg-{}", msg.id);
                     let tool_name = if trimmed.starts_with("Plan updated:") {
                         "update_plan"
@@ -144,13 +163,14 @@ impl App {
                         row.output = trimmed.to_string();
                         row.expandable = row.compute_expandable();
                     }
-                    if !self
-                        .stream_parts
-                        .iter()
-                        .any(|p| matches!(p, StreamPart::Tool(id) if id == &call_id))
-                    {
-                        self.stream_parts.push(StreamPart::Tool(call_id));
-                    }
+                    self.push_tool_part(call_id);
+                }
+            }
+            // A call can outlive its message row only if a write was
+            // interrupted. Keep it visible rather than silently dropping it.
+            for call in &tool_calls {
+                if !rendered_calls.contains(&call.id) {
+                    self.restore_durable_tool_call(call, generation_active);
                 }
             }
             self.truncate_transcript();
@@ -170,6 +190,89 @@ impl App {
                 state.loaded_until_seq = self.loaded_until_seq;
             }
         }
+    }
+
+    fn restore_durable_tool_call(
+        &mut self,
+        call: &crate::persistence::ToolCall,
+        generation_active: bool,
+    ) {
+        use crate::persistence::ToolCallStatus;
+
+        let args_value = serde_json::from_str::<serde_json::Value>(&call.arguments)
+            .unwrap_or_else(|_| serde_json::Value::String(call.arguments.clone()));
+        let (_verb, _active_verb, desc) = tool_target_and_verbs(&call.tool_name, Some(&args_value));
+        let metadata = call
+            .metadata_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+        let (mut state, mut output) = match call.status {
+            ToolCallStatus::Created => (ToolRowState::Pending, String::new()),
+            ToolCallStatus::Running => (ToolRowState::Running, String::new()),
+            ToolCallStatus::Completed => (
+                ToolRowState::Completed,
+                call.result.clone().unwrap_or_default(),
+            ),
+            ToolCallStatus::Failed => (
+                ToolRowState::Failed,
+                call.error
+                    .clone()
+                    .or_else(|| call.result.clone())
+                    .unwrap_or_default(),
+            ),
+            ToolCallStatus::Cancelled => (
+                ToolRowState::Failed,
+                call.error
+                    .clone()
+                    .or_else(|| call.result.clone())
+                    .unwrap_or_else(|| "cancelled".to_string()),
+            ),
+        };
+        if matches!(state, ToolRowState::Pending | ToolRowState::Running) && !generation_active {
+            state = ToolRowState::Failed;
+            output = "generation ended before tool completion".to_string();
+        }
+        self.upsert_tool_row(ToolRowUpdate {
+            call_id: &call.call_id,
+            name: &call.tool_name,
+            state,
+            desc,
+            arguments: call.arguments.clone(),
+            metadata,
+        });
+        if let Some(row) = self
+            .tool_rows
+            .iter_mut()
+            .find(|row| row.call_id == call.call_id)
+        {
+            row.state = state;
+            row.output = bounded(output, super::MAX_TOOL_OUTPUT_BYTES);
+            row.arguments_complete = true;
+            row.expandable = row.compute_expandable();
+        }
+        self.push_tool_part(call.call_id.clone());
+    }
+
+    /// Replace the current assistant text part with the durable final body.
+    /// The live stream already rendered the same characters through the
+    /// typewriter, so this only rewrites the part used by the renderer.
+    pub(crate) fn update_assistant_text(&mut self, content: &str) {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Some(StreamPart::Text(existing)) = self
+            .stream_parts
+            .iter_mut()
+            .rev()
+            .find(|part| matches!(part, StreamPart::Text(_)))
+        {
+            if existing != trimmed {
+                *existing = bounded(trimmed.to_string(), Self::MAX_TRANSCRIPT_BYTES);
+            }
+            return;
+        }
+        self.push_stream_part(StreamPart::Text(trimmed.to_string()));
     }
 
     pub(crate) fn apply_replayed_event(&mut self, event: &RuntimeEvent) {
@@ -200,6 +303,21 @@ impl App {
                             self.scroll_to_bottom();
                         }
                     }
+                }
+            }
+            "assistant_message_updated" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    && let Some(content) = payload.get("content").and_then(|v| v.as_str())
+                {
+                    self.update_assistant_text(content);
+                }
+            }
+            "tool_call_progress" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                {
+                    let call_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                    self.append_tool_progress(call_id, output);
                 }
             }
             "user_message" | "prompt_promoted" | "prompt_admitted" => {
@@ -241,7 +359,7 @@ impl App {
                         state: ToolRowState::Pending,
                         desc,
                         arguments,
-                        metadata: None,
+                        metadata: payload.get("metadata").cloned(),
                     });
                     self.push_tool_part(call_id.to_string());
                 }
@@ -266,7 +384,7 @@ impl App {
                         state: ToolRowState::Running,
                         desc,
                         arguments,
-                        metadata: None,
+                        metadata: payload.get("metadata").cloned(),
                     });
                     self.push_tool_part(call_id.to_string());
                 }
@@ -289,6 +407,10 @@ impl App {
                         .and_then(|v| v.as_str())
                         .or_else(|| payload.get("error").and_then(|v| v.as_str()))
                         .unwrap_or("");
+                    let metadata = payload.get("metadata").cloned();
+                    if let Some(metadata) = metadata.clone() {
+                        self.set_tool_row_metadata(call_id, metadata);
+                    }
                     if !self.complete_tool_row(call_id, tool_name, success, output) {
                         let args = payload.get("arguments");
                         let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
@@ -303,7 +425,7 @@ impl App {
                             },
                             desc,
                             arguments,
-                            metadata: None,
+                            metadata,
                         });
                         self.complete_tool_row(call_id, tool_name, success, output);
                     }
@@ -324,6 +446,10 @@ impl App {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                    let metadata = payload.get("metadata").cloned();
+                    if let Some(metadata) = metadata.clone() {
+                        self.set_tool_row_metadata(call_id, metadata);
+                    }
                     if !self.complete_tool_row(call_id, tool_name, success, output) {
                         let args = payload.get("arguments");
                         let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
@@ -338,7 +464,7 @@ impl App {
                             },
                             desc,
                             arguments,
-                            metadata: None,
+                            metadata,
                         });
                         self.complete_tool_row(call_id, tool_name, success, output);
                     }

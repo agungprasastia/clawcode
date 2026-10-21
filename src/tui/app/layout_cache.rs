@@ -102,6 +102,15 @@ impl App {
                 self.toggle_thought_expanded();
                 return;
             }
+            if call_id.starts_with("group:") {
+                self.toggle_tool_expanded(&call_id);
+                self.diagnostic = if self.is_tool_expanded(&call_id) {
+                    "exploration group expanded".to_string()
+                } else {
+                    "exploration group collapsed".to_string()
+                };
+                return;
+            }
             let expandable = self
                 .tool_rows
                 .iter()

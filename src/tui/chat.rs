@@ -8,7 +8,11 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::App;
-use super::app::{StreamPart, ToolRow, ToolRowState, tool_pending_label, tool_uses_generic_detail};
+use super::app::{
+    StreamPart, ToolRow, ToolRowState, canonical_tool_name, exploration_category,
+    tool_completed_icon, tool_headline, tool_is_background, tool_pending_label,
+    tool_uses_generic_detail,
+};
 use super::render::{
     identity_label, mode_label, render_command_popup, render_hints_row, render_input_card,
     status_label,
@@ -347,8 +351,128 @@ fn reasoning_label(text: &str, done: bool) -> String {
     }
 }
 
+fn tool_row_is_terminal(row: &ToolRow) -> bool {
+    matches!(row.state, ToolRowState::Completed | ToolRowState::Failed)
+}
+
+fn exploration_run(app: &App, parts: &[StreamPart], start: usize) -> Option<(Vec<String>, bool)> {
+    let mut ids = Vec::new();
+    for part in &parts[start..] {
+        let StreamPart::Tool(call_id) = part else {
+            break;
+        };
+        let Some(row) = app.tool_rows().iter().find(|row| row.call_id == *call_id) else {
+            break;
+        };
+        if exploration_category(&row.name).is_none() {
+            break;
+        }
+        ids.push(call_id.clone());
+    }
+    if ids.len() < 2 {
+        return None;
+    }
+    let complete = ids.iter().all(|call_id| {
+        app.tool_rows()
+            .iter()
+            .find(|row| row.call_id == *call_id)
+            .is_some_and(tool_row_is_terminal)
+    });
+    Some((ids, complete))
+}
+
+fn exploration_group_label(app: &App, ids: &[String], complete: bool) -> String {
+    let mut counts: Vec<(&'static str, usize)> = Vec::new();
+    for call_id in ids {
+        let Some(row) = app.tool_rows().iter().find(|row| row.call_id == *call_id) else {
+            continue;
+        };
+        let Some(category) = exploration_category(&row.name) else {
+            continue;
+        };
+        if let Some((_, count)) = counts.iter_mut().find(|(name, _)| *name == category) {
+            *count += 1;
+        } else {
+            counts.push((category, 1));
+        }
+    }
+    let parts = counts
+        .into_iter()
+        .map(|(category, count)| {
+            let noun = match category {
+                "search" if count != 1 => "searches",
+                "fetch" if count != 1 => "fetches",
+                _ if count == 1 => category,
+                _ => match category {
+                    "read" => "reads",
+                    "search" => "searches",
+                    "fetch" => "fetches",
+                    _ => "items",
+                },
+            };
+            format!("{count} {noun}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{}: {parts}",
+        if complete { "Explored" } else { "Exploring" }
+    )
+}
+
+fn render_exploration_group(ctx: &mut ChatRenderContext<'_>, ids: &[String], complete: bool) {
+    let Some(first) = ids.first() else {
+        return;
+    };
+    let group_id = format!("group:{first}");
+    let expanded = ctx.app.is_tool_expanded(&group_id);
+    let label = exploration_group_label(ctx.app, ids, complete);
+    let marker = if complete {
+        "→ ".to_string()
+    } else {
+        format!("{} ", ctx.app.wave_spinner().compact_frame())
+    };
+    let line_index = ctx.lines.len();
+    ctx.lines.push(Line::from(vec![
+        Span::raw("   "),
+        Span::styled(
+            marker,
+            Style::default()
+                .fg(if complete {
+                    ctx.theme.quiet
+                } else {
+                    ctx.theme.amber
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            label,
+            Style::default().fg(if complete {
+                ctx.theme.quiet
+            } else {
+                ctx.theme.ink
+            }),
+        ),
+    ]));
+    ctx.tool_row_lines.push((group_id, line_index));
+    if expanded {
+        for call_id in ids {
+            if let Some(row) = ctx
+                .app
+                .tool_rows()
+                .iter()
+                .find(|row| row.call_id == *call_id)
+            {
+                render_tool_card_or_row(ctx, row);
+            }
+        }
+    }
+}
+
 fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
-    for part in parts {
+    let mut index = 0;
+    while index < parts.len() {
+        let part = &parts[index];
         match part {
             StreamPart::User(prompt) => {
                 if !ctx.lines.is_empty() {
@@ -475,13 +599,21 @@ fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
                 ctx.lines.push(Line::from(""));
             }
             StreamPart::Tool(call_id) => {
+                if let Some((ids, complete)) = exploration_run(ctx.app, parts, index) {
+                    let len = ids.len();
+                    render_exploration_group(ctx, &ids, complete);
+                    index += len;
+                    continue;
+                }
                 let app = ctx.app;
                 let Some(row) = app.tool_rows().iter().find(|row| row.call_id == *call_id) else {
+                    index += 1;
                     continue;
                 };
                 render_tool_card_or_row(ctx, row);
             }
         }
+        index += 1;
     }
 }
 
@@ -682,6 +814,44 @@ fn render_shell_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
         lines.push(pad_card_line(cmd_line, card_width, theme.bg_element));
         tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
 
+        // Foreground shells publish chunks while the process is alive.
+        let output = strip_ansi_codes(&row.output);
+        let raw_lines: Vec<&str> = output.lines().collect();
+        if !raw_lines.is_empty() {
+            let total = raw_lines.len();
+            let max_preview = 10;
+            let is_expanded = app.is_tool_expanded(&row.call_id);
+            let display_lines = if is_expanded || total <= max_preview {
+                &raw_lines[..]
+            } else {
+                &raw_lines[..max_preview]
+            };
+            for line_text in display_lines {
+                let out_line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled((*line_text).to_string(), Style::default().fg(theme.ink)),
+                ]);
+                lines.push(pad_card_line(out_line, card_width, theme.bg_element));
+                tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+            }
+            if total > max_preview {
+                let remaining = total - max_preview;
+                let hint_text = if is_expanded {
+                    "↳ click to collapse".to_string()
+                } else if remaining == 1 {
+                    "↳ click to expand (1 more line)".to_string()
+                } else {
+                    format!("↳ click to expand ({} more lines)", remaining)
+                };
+                let hint_line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(hint_text, Style::default().fg(theme.dim)),
+                ]);
+                lines.push(pad_card_line(hint_line, card_width, theme.bg_element));
+                tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+            }
+        }
+
         // Line 3: empty padding line
         lines.push(empty_card_line(card_width, theme.bg_element));
         tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
@@ -706,7 +876,7 @@ fn render_shell_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
             } else {
                 theme.ink
             };
-            let cmd_line = Line::from(vec![
+            let mut cmd_spans = vec![
                 Span::raw("  "),
                 Span::styled(
                     "$ ",
@@ -715,7 +885,18 @@ fn render_shell_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(cmd, Style::default().fg(text_color)),
-            ]);
+            ];
+            if tool_is_background(row) {
+                cmd_spans.push(Span::raw(" "));
+                cmd_spans.push(Span::styled(
+                    " Background ",
+                    Style::default()
+                        .fg(mode_color)
+                        .bg(theme.bg_element)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            let cmd_line = Line::from(cmd_spans);
             lines.push(pad_card_line(cmd_line, card_width, theme.bg_element));
             tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
 
@@ -741,7 +922,7 @@ fn render_shell_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
             } else {
                 theme.ink
             };
-            let cmd_line = Line::from(vec![
+            let mut cmd_spans = vec![
                 Span::raw("  "),
                 Span::styled(
                     "$ ",
@@ -750,7 +931,18 @@ fn render_shell_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(cmd, Style::default().fg(text_color)),
-            ]);
+            ];
+            if tool_is_background(row) {
+                cmd_spans.push(Span::raw(" "));
+                cmd_spans.push(Span::styled(
+                    " Background ",
+                    Style::default()
+                        .fg(mode_color)
+                        .bg(theme.bg_element)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            let cmd_line = Line::from(cmd_spans);
             lines.push(pad_card_line(cmd_line, card_width, theme.bg_element));
             tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
 
@@ -922,7 +1114,7 @@ fn render_diff_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
             let title_line = Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
-                    "• ",
+                    format!("{} ", tool_completed_icon(&row.name, row.state)),
                     Style::default()
                         .fg(marker_color)
                         .add_modifier(Modifier::BOLD),
@@ -959,7 +1151,7 @@ fn render_diff_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
             let title_line = Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
-                    "• ",
+                    format!("{} ", tool_completed_icon(&row.name, row.state)),
                     Style::default()
                         .fg(marker_color)
                         .add_modifier(Modifier::BOLD),
@@ -1037,31 +1229,424 @@ fn render_diff_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
 }
 
 fn render_tool_card_or_row(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
-    if matches!(row.name.as_str(), "bash" | "sh") {
-        render_shell_card(ctx, row);
-    } else if matches!(
-        row.name.as_str(),
-        "edit_file" | "edit" | "patch" | "apply_patch"
-    ) {
-        render_diff_card(ctx, row);
-    } else {
-        render_generic_tool_card(ctx, row);
+    match canonical_tool_name(&row.name) {
+        "bash" => render_shell_card(ctx, row),
+        "edit" | "patch" => render_diff_card(ctx, row),
+        "write" => render_write_card(ctx, row),
+        "update_plan" | "todowrite" => render_todos_card(ctx, row),
+        "question" => render_question_card(ctx, row),
+        "task" => render_subagent_row(ctx, row),
+        "execute" => render_execute_row(ctx, row),
+        "read" => {
+            render_compact_tool(ctx, row);
+            append_loaded_files_detail(ctx, row);
+        }
+        _ => render_compact_tool(ctx, row),
     }
 }
 
-fn render_generic_tool_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
-    let lines = &mut *ctx.lines;
-    let app = ctx.app;
-    let theme = ctx.theme;
-    let mode_color = ctx.mode_color;
-    let width = ctx.width;
-    let tool_row_lines = &mut *ctx.tool_row_lines;
+fn card_width(width: u16) -> usize {
+    (width as usize).saturating_sub(2).max(20)
+}
 
-    lines.push(compact_tool_line(row, app, theme, mode_color, width));
-    tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
+fn ensure_card_separator(lines: &mut Vec<Line<'static>>) {
+    if !lines.is_empty()
+        && !lines
+            .last()
+            .map(|line| {
+                line.spans.is_empty() || (line.spans.len() == 1 && line.spans[0].content.is_empty())
+            })
+            .unwrap_or(false)
+    {
+        lines.push(Line::from(""));
+    }
+}
 
-    let expanded = app.is_tool_expanded(&row.call_id);
-    append_specialized_detail(lines, row, theme, tool_row_lines, expanded);
+fn push_card_line(
+    ctx: &mut ChatRenderContext<'_>,
+    row: &ToolRow,
+    line: Line<'static>,
+    width: usize,
+) {
+    ctx.lines
+        .push(pad_card_line(line, width, ctx.theme.bg_element));
+    ctx.tool_row_lines
+        .push((row.call_id.clone(), ctx.lines.len() - 1));
+}
+
+fn push_card_blank(ctx: &mut ChatRenderContext<'_>, row: &ToolRow, width: usize) {
+    push_card_line(
+        ctx,
+        row,
+        empty_card_line(width, ctx.theme.bg_element),
+        width,
+    );
+}
+
+fn tool_content(row: &ToolRow) -> String {
+    serde_json::from_str::<serde_json::Value>(&row.arguments)
+        .ok()
+        .and_then(|args| {
+            args.get("content")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_default()
+}
+
+fn tool_path(row: &ToolRow) -> String {
+    serde_json::from_str::<serde_json::Value>(&row.arguments)
+        .ok()
+        .and_then(|args| {
+            args.get("path")
+                .or_else(|| args.get("file_path"))
+                .or_else(|| args.get("filePath"))
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        })
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| row.desc.clone())
+}
+
+fn render_write_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
+    let content = tool_content(row);
+    let content_lines: Vec<&str> = content.lines().collect();
+    let width = card_width(ctx.width);
+    if row.state == ToolRowState::Completed && !content_lines.is_empty() {
+        ensure_card_separator(ctx.lines);
+        push_card_blank(ctx, row, width);
+        push_card_line(
+            ctx,
+            row,
+            Line::from(Span::styled(
+                format!("  # Wrote {}", tool_path(row)),
+                Style::default()
+                    .fg(ctx.theme.quiet)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            width,
+        );
+        let expanded = ctx.app.is_tool_expanded(&row.call_id);
+        let total = content_lines.len();
+        let max_preview = 10;
+        let visible = if expanded || total <= max_preview {
+            total
+        } else {
+            max_preview
+        };
+        for line_text in content_lines.iter().take(visible) {
+            push_card_line(
+                ctx,
+                row,
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled((*line_text).to_string(), Style::default().fg(ctx.theme.ink)),
+                ]),
+                width,
+            );
+        }
+        if total > max_preview {
+            let remaining = total - max_preview;
+            let hint = if expanded {
+                "↳ click to collapse".to_string()
+            } else if remaining == 1 {
+                "↳ click to expand (1 more line)".to_string()
+            } else {
+                format!("↳ click to expand ({remaining} more lines)")
+            };
+            push_card_line(
+                ctx,
+                row,
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(hint, Style::default().fg(ctx.theme.dim)),
+                ]),
+                width,
+            );
+        }
+        push_card_blank(ctx, row, width);
+        ctx.lines.push(Line::from(""));
+    }
+    render_compact_tool(ctx, row);
+}
+
+fn render_todos_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
+    if row.state == ToolRowState::Completed
+        && let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
+        && let Some(plan) = args.get("plan").and_then(|value| value.as_array())
+        && !plan.is_empty()
+    {
+        let width = card_width(ctx.width);
+        ensure_card_separator(ctx.lines);
+        push_card_blank(ctx, row, width);
+        push_card_line(
+            ctx,
+            row,
+            Line::from(Span::styled(
+                "  # Todos",
+                Style::default()
+                    .fg(ctx.theme.quiet)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            width,
+        );
+        for item in plan {
+            let Some(step) = item
+                .get("step")
+                .or_else(|| item.get("content"))
+                .or_else(|| item.get("title"))
+                .and_then(|value| value.as_str())
+            else {
+                continue;
+            };
+            let status = item
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("pending");
+            let (icon, color) = match status {
+                "completed" | "complete" | "done" => ("✔", ctx.theme.success),
+                "in_progress" | "in-progress" | "running" => ("•", ctx.theme.amber),
+                _ => ("□", ctx.theme.dim),
+            };
+            push_card_line(
+                ctx,
+                row,
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(icon.to_string(), Style::default().fg(color)),
+                    Span::raw(" "),
+                    Span::styled(step.to_string(), Style::default().fg(ctx.theme.ink)),
+                ]),
+                width,
+            );
+        }
+        push_card_blank(ctx, row, width);
+        ctx.lines.push(Line::from(""));
+    }
+    render_compact_tool(ctx, row);
+}
+
+fn question_items(row: &ToolRow) -> Vec<String> {
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments) else {
+        return Vec::new();
+    };
+    if let Some(items) = args.get("questions").and_then(|value| value.as_array()) {
+        return items
+            .iter()
+            .filter_map(|item| {
+                item.get("question")
+                    .or_else(|| item.get("text"))
+                    .and_then(|value| value.as_str())
+                    .or_else(|| item.as_str())
+                    .map(ToString::to_string)
+            })
+            .collect();
+    }
+    args.get("question")
+        .and_then(|value| value.as_str())
+        .map(|question| vec![question.to_string()])
+        .unwrap_or_default()
+}
+
+fn question_answers(row: &ToolRow) -> Vec<String> {
+    let mut answers = Vec::new();
+    if let Some(metadata_answers) = row
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("answers"))
+        .and_then(|value| value.as_array())
+    {
+        for answer in metadata_answers {
+            match answer {
+                serde_json::Value::Array(values) => answers.push(
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                serde_json::Value::String(value) => answers.push(value.clone()),
+                _ => answers.push(answer.to_string()),
+            }
+        }
+    }
+    if answers.is_empty()
+        && let Some(answer) = row.output.lines().find_map(|line| {
+            line.strip_prefix("Answer:")
+                .map(str::trim)
+                .filter(|answer| !answer.is_empty())
+        })
+    {
+        answers.push(answer.to_string());
+    }
+    answers
+}
+
+fn render_question_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
+    let questions = question_items(row);
+    if row.state == ToolRowState::Completed && !questions.is_empty() {
+        let answers = question_answers(row);
+        let width = card_width(ctx.width);
+        ensure_card_separator(ctx.lines);
+        push_card_blank(ctx, row, width);
+        push_card_line(
+            ctx,
+            row,
+            Line::from(Span::styled(
+                "  # Questions",
+                Style::default()
+                    .fg(ctx.theme.quiet)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            width,
+        );
+        for (index, question) in questions.iter().enumerate() {
+            push_card_line(
+                ctx,
+                row,
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(question.clone(), Style::default().fg(ctx.theme.quiet)),
+                ]),
+                width,
+            );
+            if let Some(answer) = answers.get(index) {
+                push_card_line(
+                    ctx,
+                    row,
+                    Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled(answer.clone(), Style::default().fg(ctx.theme.ink)),
+                    ]),
+                    width,
+                );
+            }
+        }
+        push_card_blank(ctx, row, width);
+        ctx.lines.push(Line::from(""));
+    }
+    render_compact_tool(ctx, row);
+}
+
+fn render_subagent_row(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
+    render_compact_tool(ctx, row);
+    let session_id = row
+        .metadata
+        .as_ref()
+        .and_then(|metadata| {
+            metadata
+                .get("sessionID")
+                .or_else(|| metadata.get("sessionId"))
+        })
+        .and_then(|value| value.as_str());
+    if let Some(session_id) = session_id {
+        ctx.lines.push(Line::from(vec![
+            Span::raw("      ↳ "),
+            Span::styled(
+                format!("child session {session_id}"),
+                Style::default().fg(ctx.theme.dim),
+            ),
+        ]));
+        ctx.tool_row_lines
+            .push((row.call_id.clone(), ctx.lines.len() - 1));
+    }
+}
+
+fn execute_child_summary(call: &serde_json::Value) -> String {
+    if let Some(input) = call.get("input") {
+        if let Some(summary) = input.as_str() {
+            return summary.to_string();
+        }
+        if let Some(object) = input.as_object()
+            && let Some((key, value)) = object.iter().next()
+        {
+            let value = match value {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            return format!("{key}: {value}");
+        }
+    }
+    String::new()
+}
+
+fn render_execute_row(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
+    render_compact_tool(ctx, row);
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments) else {
+        return;
+    };
+    if let Some(calls) = args.get("toolCalls").and_then(|value| value.as_array()) {
+        for call in calls.iter().take(16) {
+            let Some(tool) = call.get("tool").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let status = call
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("running");
+            let (marker, color) = match status {
+                "completed" | "complete" | "success" => ("✓", ctx.theme.success),
+                "error" | "failed" => ("✗", ctx.theme.error),
+                _ => ("│", ctx.theme.quiet),
+            };
+            let summary = execute_child_summary(call);
+            let mut spans = vec![
+                Span::raw("      "),
+                Span::styled(format!("{marker} "), Style::default().fg(color)),
+                Span::styled(tool.to_string(), Style::default().fg(ctx.theme.ink)),
+            ];
+            if !summary.is_empty() {
+                spans.push(Span::styled(
+                    format!("  {summary}"),
+                    Style::default().fg(ctx.theme.dim),
+                ));
+            }
+            ctx.lines.push(Line::from(spans));
+            ctx.tool_row_lines
+                .push((row.call_id.clone(), ctx.lines.len() - 1));
+        }
+    }
+    let failed = row
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("error"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || row.state == ToolRowState::Failed;
+    if failed {
+        let output = strip_ansi_codes(&row.output);
+        let output_lines: Vec<&str> = output.trim().lines().collect();
+        let start = output_lines.len().saturating_sub(4);
+        for (index, line) in output_lines.iter().skip(start).enumerate() {
+            let prefix = if index == 0 { "      ↳ " } else { "        " };
+            ctx.lines.push(Line::from(vec![
+                Span::styled(prefix.to_string(), Style::default().fg(ctx.theme.quiet)),
+                Span::styled((*line).to_string(), Style::default().fg(ctx.theme.error)),
+            ]));
+            ctx.tool_row_lines
+                .push((row.call_id.clone(), ctx.lines.len() - 1));
+        }
+    }
+}
+
+fn render_compact_tool(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
+    let line_index = ctx.lines.len();
+    ctx.lines.push(compact_tool_line(
+        row,
+        ctx.app,
+        ctx.theme,
+        ctx.mode_color,
+        ctx.width,
+    ));
+    ctx.tool_row_lines.push((row.call_id.clone(), line_index));
+    let expanded = ctx.app.is_tool_expanded(&row.call_id);
+    if tool_uses_generic_detail(&row.name) {
+        if expanded {
+            append_generic_tool_detail(ctx.lines, row, ctx.theme, ctx.tool_row_lines);
+        }
+    } else if expanded && row.state == ToolRowState::Failed {
+        append_tool_output_detail(ctx.lines, row, ctx.theme, ctx.tool_row_lines);
+    }
 }
 
 fn append_generic_tool_detail(
@@ -1162,133 +1747,23 @@ fn append_tool_output_detail(
     }
 }
 
-fn append_specialized_detail(
-    lines: &mut Vec<Line<'static>>,
-    row: &ToolRow,
-    theme: &Theme,
-    tool_row_lines: &mut Vec<(String, usize)>,
-    expanded: bool,
-) {
-    if tool_uses_generic_detail(&row.name) {
-        if expanded {
-            append_generic_tool_detail(lines, row, theme, tool_row_lines);
-        }
-        return;
-    }
-
-    if expanded && row.state == ToolRowState::Failed {
-        append_tool_output_detail(lines, row, theme, tool_row_lines);
-    }
-
-    let terminal = row.state == ToolRowState::Completed || row.state == ToolRowState::Failed;
-    if !terminal && !matches!(row.name.as_str(), "task" | "execute" | "update_plan") {
-        return;
-    }
-    let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments) else {
+fn append_loaded_files_detail(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
+    let Some(loaded) = row
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("loaded"))
+        .and_then(|value| value.as_array())
+    else {
         return;
     };
-    match row.name.as_str() {
-        "task" => {
-            let agent = args
-                .get("subagent_type")
-                .or_else(|| args.get("agent"))
-                .and_then(|value| value.as_str())
-                .unwrap_or("subagent");
-            let description = args
-                .get("description")
-                .or_else(|| args.get("prompt"))
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            let suffix = if description.is_empty() {
-                String::new()
-            } else {
-                format!(": {description}")
-            };
-            let line = Line::from(vec![
-                Span::styled("      ↳ ", Style::default().fg(theme.quiet)),
-                Span::styled(format!("{agent}{suffix}"), Style::default().fg(theme.quiet)),
-            ]);
-            lines.push(line);
-            tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
-            if let Some(session_id) = row
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("sessionId"))
-                .and_then(|value| value.as_str())
-            {
-                let session_line = Line::from(vec![
-                    Span::styled("      ↳ ", Style::default().fg(theme.quiet)),
-                    Span::styled(
-                        format!("child session {session_id}"),
-                        Style::default().fg(theme.dim),
-                    ),
-                ]);
-                lines.push(session_line);
-                tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
-            }
-        }
-        "execute" => {
-            if let Some(calls) = args.get("toolCalls").and_then(|value| value.as_array()) {
-                for call in calls.iter().take(16) {
-                    let Some(tool) = call.get("tool").and_then(|value| value.as_str()) else {
-                        continue;
-                    };
-                    let Some(status) = call.get("status").and_then(|value| value.as_str()) else {
-                        let line = Line::from(vec![
-                            Span::styled("      ↳ ", Style::default().fg(theme.quiet)),
-                            Span::styled(tool.to_string(), Style::default().fg(theme.quiet)),
-                        ]);
-                        lines.push(line);
-                        tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
-                        continue;
-                    };
-                    let (marker, color) = match status {
-                        "completed" | "complete" => ("✓", theme.success),
-                        "error" | "failed" => ("×", theme.error),
-                        "running" | "pending" | "in_progress" | "in-progress" => ("⠋", theme.quiet),
-                        _ => ("·", theme.quiet),
-                    };
-                    let line = Line::from(vec![
-                        Span::styled("      ↳ ", Style::default().fg(theme.quiet)),
-                        Span::styled(format!("{marker} {tool}"), Style::default().fg(color)),
-                    ]);
-                    lines.push(line);
-                    tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
-                }
-            }
-        }
-        "update_plan" => {
-            let Some(plan) = args.get("plan").and_then(|value| value.as_array()) else {
-                return;
-            };
-            for item in plan.iter() {
-                let Some(step) = item
-                    .get("step")
-                    .or_else(|| item.get("content"))
-                    .or_else(|| item.get("title"))
-                    .and_then(|value| value.as_str())
-                else {
-                    continue;
-                };
-                let status = item
-                    .get("status")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("pending");
-                let (status_icon, status_color) = match status {
-                    "completed" | "complete" | "done" => ("✔ ", theme.success),
-                    "in_progress" | "in-progress" | "running" => ("• ", theme.amber),
-                    _ => ("□ ", theme.dim),
-                };
-                let line = Line::from(vec![
-                    Span::styled("      │ ", Style::default().fg(theme.dim)),
-                    Span::styled(status_icon, Style::default().fg(status_color)),
-                    Span::styled(step.to_string(), Style::default().fg(theme.quiet)),
-                ]);
-                lines.push(line);
-                tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
-            }
-        }
-        _ => {}
+    for path in loaded.iter().filter_map(|value| value.as_str()).take(16) {
+        ctx.lines.push(Line::from(vec![
+            Span::raw("      "),
+            Span::styled("↳ Loaded ", Style::default().fg(ctx.theme.quiet)),
+            Span::styled(path.to_string(), Style::default().fg(ctx.theme.ink)),
+        ]));
+        ctx.tool_row_lines
+            .push((row.call_id.clone(), ctx.lines.len() - 1));
     }
 }
 
@@ -1299,225 +1774,38 @@ fn compact_tool_line(
     mode_color: Color,
     width: u16,
 ) -> Line<'static> {
-    let marker = match row.state {
-        ToolRowState::Running => Span::styled(
-            format!("{} ", app.wave_spinner().compact_frame()),
-            Style::default().fg(mode_color),
-        ),
-        ToolRowState::Pending => Span::styled(
-            format!("{} ", app.wave_spinner().compact_frame()),
-            Style::default().fg(theme.dim),
-        ),
-        ToolRowState::Completed => Span::styled(
-            "● ",
-            Style::default()
-                .fg(theme.success)
-                .add_modifier(Modifier::BOLD),
-        ),
-        ToolRowState::Failed => Span::styled(
-            "× ",
-            Style::default()
-                .fg(theme.error)
-                .add_modifier(Modifier::BOLD),
-        ),
+    let active = matches!(row.state, ToolRowState::Pending | ToolRowState::Running);
+    let canonical = canonical_tool_name(&row.name);
+    let marker_text = if active {
+        app.wave_spinner().compact_frame().to_string()
+    } else {
+        tool_completed_icon(&row.name, row.state).to_string()
+    };
+    let marker_style = if active {
+        if row.state == ToolRowState::Running {
+            Style::default().fg(mode_color)
+        } else {
+            Style::default().fg(theme.dim)
+        }
+    } else if row.state == ToolRowState::Failed {
+        Style::default()
+            .fg(theme.error)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.quiet)
+            .add_modifier(Modifier::BOLD)
     };
 
-    let (verb, mut target, detail): (&str, String, Option<String>) =
-        if row.desc == "preparing arguments..." {
-            (tool_pending_label(&row.name), String::new(), None)
+    let text = if active {
+        if tool_uses_generic_detail(&row.name) || canonical == "execute" {
+            canonical.to_string()
         } else {
-            let target_str = if row.desc.is_empty() {
-                row.arguments.clone()
-            } else {
-                row.desc.clone()
-            };
-            match row.name.as_str() {
-                "read_file" | "read" => {
-                    let clean = target_str
-                        .strip_prefix("Read ")
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Read", clean, None)
-                }
-                "write_file" | "write" => {
-                    let clean = target_str
-                        .strip_prefix("Write ")
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Write", clean, None)
-                }
-                "edit_file" | "edit" => {
-                    let diff_detail = if let Ok(args) =
-                        serde_json::from_str::<serde_json::Value>(&row.arguments)
-                        && let Some(old_str) = args
-                            .get("old_string")
-                            .or_else(|| args.get("old_str"))
-                            .and_then(|v| v.as_str())
-                        && let Some(new_str) = args
-                            .get("new_string")
-                            .or_else(|| args.get("new_str"))
-                            .and_then(|v| v.as_str())
-                    {
-                        let diff = crate::tui::diff::compute_diff(old_str, new_str, 0);
-                        Some(format!("+{} -{}", diff.added, diff.removed))
-                    } else {
-                        None
-                    };
-                    let clean = target_str
-                        .strip_prefix("Edit ")
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Edit", clean, diff_detail)
-                }
-                "patch" | "apply_patch" => {
-                    let patch_detail = if let Ok(args) =
-                        serde_json::from_str::<serde_json::Value>(&row.arguments)
-                        && let Some(patch_str) = args.get("patch").and_then(|v| v.as_str())
-                    {
-                        let mut added = 0usize;
-                        let mut removed = 0usize;
-                        for l in patch_str.lines() {
-                            if l.starts_with('+') && !l.starts_with("+++") {
-                                added += 1;
-                            } else if l.starts_with('-') && !l.starts_with("---") {
-                                removed += 1;
-                            }
-                        }
-                        Some(format!("+{added} -{removed}"))
-                    } else {
-                        None
-                    };
-                    let clean = target_str
-                        .strip_prefix("Patch ")
-                        .or_else(|| target_str.strip_prefix("Applied patch "))
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Patch", clean, patch_detail)
-                }
-                "list_dir" => {
-                    let clean = target_str
-                        .strip_prefix("List ")
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("List", clean, None)
-                }
-                "glob_search" | "glob" => {
-                    let count_detail = if row.state == ToolRowState::Completed {
-                        let count = row
-                            .metadata
-                            .as_ref()
-                            .and_then(|m| m.get("count").or_else(|| m.get("matches")))
-                            .and_then(|v| v.as_u64())
-                            .map(|c| c as usize)
-                            .unwrap_or_else(|| {
-                                row.output.lines().filter(|l| !l.trim().is_empty()).count()
-                            });
-                        Some(format!(
-                            "{} {}",
-                            count,
-                            if count == 1 { "match" } else { "matches" }
-                        ))
-                    } else {
-                        None
-                    };
-                    let clean = target_str
-                        .strip_prefix("Glob ")
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Glob", clean, count_detail)
-                }
-                "grep_search" | "grep" => {
-                    let count_detail = if row.state == ToolRowState::Completed {
-                        let count = row
-                            .metadata
-                            .as_ref()
-                            .and_then(|m| m.get("count").or_else(|| m.get("matches")))
-                            .and_then(|v| v.as_u64())
-                            .map(|c| c as usize)
-                            .unwrap_or_else(|| {
-                                row.output.lines().filter(|l| !l.trim().is_empty()).count()
-                            });
-                        Some(format!(
-                            "{} {}",
-                            count,
-                            if count == 1 { "match" } else { "matches" }
-                        ))
-                    } else {
-                        None
-                    };
-                    let clean = target_str
-                        .strip_prefix("Grep ")
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Grep", clean, count_detail)
-                }
-                "webfetch" | "fetch" => {
-                    let clean = target_str
-                        .strip_prefix("Fetch ")
-                        .or_else(|| target_str.strip_prefix("Fetched "))
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Fetch", clean, None)
-                }
-                "websearch" | "search" => {
-                    let clean = target_str
-                        .strip_prefix("Search ")
-                        .or_else(|| target_str.strip_prefix("Searched "))
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Search", clean, None)
-                }
-                "update_plan" => ("Updated Plan", String::new(), None),
-                "task" => {
-                    let clean = target_str
-                        .strip_prefix("Task ")
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Task", clean, None)
-                }
-                "execute" => {
-                    let clean = target_str
-                        .strip_prefix("Execute ")
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Execute", clean, None)
-                }
-                "question" => {
-                    let clean = target_str
-                        .strip_prefix("Ask ")
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Ask", clean, None)
-                }
-                "skill" => {
-                    let clean = target_str
-                        .strip_prefix("Load skill ")
-                        .or_else(|| target_str.strip_prefix("Loaded skill "))
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    ("Load skill", clean, None)
-                }
-                "bash" | "sh" => {
-                    let clean = target_str.strip_prefix("$ ").unwrap_or(&target_str).trim();
-                    if clean.is_empty() {
-                        ("bash", String::new(), None)
-                    } else {
-                        ("", clean.to_string(), None)
-                    }
-                }
-                _ => {
-                    let clean = target_str
-                        .strip_prefix("Run ")
-                        .unwrap_or(&target_str)
-                        .to_string();
-                    if clean.is_empty() {
-                        ("Run", row.name.clone(), None)
-                    } else {
-                        ("Run", clean, None)
-                    }
-                }
-            }
-        };
+            tool_pending_label(&row.name).to_string()
+        }
+    } else {
+        tool_headline(row)
+    };
 
     let err_msg = if row.state == ToolRowState::Failed {
         let first = row.output.lines().next().unwrap_or("error").trim();
@@ -1532,64 +1820,53 @@ fn compact_tool_line(
     } else {
         String::new()
     };
-
-    let indent_w = 3;
-    let marker_w = 2;
-    let verb_w = if verb.is_empty() {
-        0
-    } else if target.is_empty() {
-        text_cell_width(verb)
+    let failed_suffix = if row.state == ToolRowState::Failed && !err_msg.is_empty() {
+        format!(" · failed: {err_msg}")
     } else {
-        text_cell_width(verb) + 1
+        String::new()
     };
-    let detail_w = detail.as_ref().map(|d| text_cell_width(d) + 3).unwrap_or(0);
-    let err_w = if row.state == ToolRowState::Failed && !err_msg.is_empty() {
-        text_cell_width(&err_msg) + 11
-    } else {
-        0
-    };
-
-    let overhead = indent_w + marker_w + verb_w + detail_w + err_w;
-    let max_target_width = (width as usize).saturating_sub(overhead + 2);
-    if width > 0 && max_target_width >= 8 && text_cell_width(&target) > max_target_width {
-        target = truncate_tool_text(&target, max_target_width);
-    }
-
-    let mut spans = vec![Span::raw("   "), marker];
-
-    if !verb.is_empty() {
-        let verb_text = if target.is_empty() {
-            verb.to_string()
+    let background = tool_is_background(row);
+    let badge = " Background ";
+    let reserve =
+        5 + if background {
+            text_cell_width(badge) + 1
         } else {
-            format!("{verb} ")
-        };
+            0
+        } + text_cell_width(&failed_suffix);
+    let max_text_width = (width as usize).saturating_sub(reserve);
+    let text = if width > 0 && text_cell_width(&text) > max_text_width && max_text_width >= 8 {
+        truncate_tool_text(&text, max_text_width)
+    } else {
+        text
+    };
+
+    let mut spans = vec![
+        Span::raw("   "),
+        Span::styled(format!("{marker_text} "), marker_style),
+        Span::styled(
+            text,
+            Style::default().fg(if active { theme.quiet } else { theme.ink }),
+        ),
+    ];
+    if background {
+        spans.push(Span::raw(" "));
         spans.push(Span::styled(
-            verb_text,
-            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+            badge,
+            Style::default()
+                .fg(mode_color)
+                .bg(theme.bg_element)
+                .add_modifier(Modifier::BOLD),
         ));
     }
-
-    if !target.is_empty() {
-        spans.push(Span::styled(target, Style::default().fg(theme.ink)));
-    }
-
-    if let Some(detail) = detail {
+    if !failed_suffix.is_empty() {
         spans.push(Span::styled(
-            format!(" ({detail})"),
-            Style::default().fg(theme.quiet),
-        ));
-    }
-
-    if row.state == ToolRowState::Failed && !err_msg.is_empty() {
-        spans.push(Span::styled(
-            format!(" · failed: {err_msg}"),
+            failed_suffix,
             Style::default().fg(theme.error),
         ));
     }
 
     Line::from(spans)
 }
-
 pub(crate) fn visual_line_count(lines: &[Line], width: u16) -> usize {
     if width == 0 {
         return lines.len();
@@ -1611,114 +1888,11 @@ fn tool_row_detail(row: &ToolRow) -> String {
     if row.desc == "preparing arguments..." {
         return tool_pending_label(&row.name).to_string();
     }
-    let target = if row.desc.is_empty() {
-        row.arguments.clone()
-    } else {
-        row.desc.clone()
-    };
-    let label = match row.name.as_str() {
-        "read_file" | "read" => "Read",
-        "write_file" | "write" => "Write",
-        "edit_file" | "edit" => "Edit",
-        "patch" | "apply_patch" => "Patch",
-        "list_dir" => "List",
-        "glob_search" | "glob" => "Glob",
-        "grep_search" | "grep" => "Grep",
-        "webfetch" | "fetch" => "Fetch",
-        "websearch" | "search" => "Search",
-        "update_plan" => "Updated Plan",
-        "task" => "Task",
-        "execute" => "Execute",
-        "question" => "Ask",
-        "skill" => "Load skill",
-        "bash" | "sh" => "",
-        _ => "Run",
-    };
-    if matches!(row.name.as_str(), "edit_file" | "edit")
-        && let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
-        && let Some(old_str) = args
-            .get("old_string")
-            .or_else(|| args.get("old_str"))
-            .and_then(|v| v.as_str())
-        && let Some(new_str) = args
-            .get("new_string")
-            .or_else(|| args.get("new_str"))
-            .and_then(|v| v.as_str())
-    {
-        let diff = crate::tui::diff::compute_diff(old_str, new_str, 0);
-        let count_suffix = format!(" (+{} -{})", diff.added, diff.removed);
-        let clean_target = target.strip_prefix("Edit ").unwrap_or(&target);
-        if clean_target.is_empty() {
-            format!("{label}{count_suffix}")
-        } else {
-            format!("{label} {clean_target}{count_suffix}")
-        }
-    } else if matches!(row.name.as_str(), "patch" | "apply_patch")
-        && let Ok(args) = serde_json::from_str::<serde_json::Value>(&row.arguments)
-        && let Some(patch_str) = args.get("patch").and_then(|v| v.as_str())
-    {
-        let mut added = 0usize;
-        let mut removed = 0usize;
-        for l in patch_str.lines() {
-            if l.starts_with('+') && !l.starts_with("+++") {
-                added += 1;
-            } else if l.starts_with('-') && !l.starts_with("---") {
-                removed += 1;
-            }
-        }
-        let count_suffix = format!(" (+{added} -{removed})");
-        let clean_target = target.strip_prefix("Patch ").unwrap_or(&target);
-        if clean_target.is_empty() {
-            format!("{label}{count_suffix}")
-        } else {
-            format!("{label} {clean_target}{count_suffix}")
-        }
-    } else if matches!(
-        row.name.as_str(),
-        "glob_search" | "glob" | "grep_search" | "grep"
-    ) && row.state == ToolRowState::Completed
-    {
-        let count = row
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("count").or_else(|| m.get("matches")))
-            .and_then(|v| v.as_u64())
-            .map(|c| c as usize)
-            .unwrap_or_else(|| row.output.lines().filter(|l| !l.trim().is_empty()).count());
-        let count_suffix = format!(
-            " ({} {})",
-            count,
-            if count == 1 { "match" } else { "matches" }
-        );
-        let clean_target = target
-            .strip_prefix("Glob ")
-            .or_else(|| target.strip_prefix("Grep "))
-            .unwrap_or(&target);
-        if clean_target.is_empty() {
-            format!("{label}{count_suffix}")
-        } else {
-            format!("{label} {clean_target}{count_suffix}")
-        }
-    } else if matches!(row.name.as_str(), "bash" | "sh") {
-        let clean = target.strip_prefix("$ ").unwrap_or(&target).trim();
-        if clean.is_empty() {
-            "bash".to_string()
-        } else {
-            clean.to_string()
-        }
-    } else if target.is_empty() {
-        if label.is_empty() {
-            row.name.clone()
-        } else {
-            format!("{label} {}", row.name)
-        }
-    } else if label.is_empty() {
-        target
-    } else {
-        format!("{label} {target}")
+    if canonical_tool_name(&row.name) == "bash" {
+        return shell_command(row);
     }
+    tool_headline(row)
 }
-
 fn text_cell_width(text: &str) -> usize {
     Span::raw(text).width()
 }
@@ -2682,6 +2856,468 @@ mod tests {
             !lines
                 .iter()
                 .any(|line| line.spans.iter().any(|span| span.content == "▌ "))
+        );
+    }
+
+    fn test_tool_row(
+        call_id: &str,
+        name: &str,
+        state: ToolRowState,
+        arguments: serde_json::Value,
+    ) -> ToolRow {
+        ToolRow {
+            call_id: call_id.to_string(),
+            name: name.to_string(),
+            desc: String::new(),
+            arguments: arguments.to_string(),
+            output: String::new(),
+            state,
+            arguments_complete: true,
+            metadata: None,
+            started_at: std::time::Instant::now(),
+            expandable: false,
+        }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn render_parts(app: &App, parts: &[StreamPart], width: u16) -> (String, Vec<(String, usize)>) {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let mut lines = Vec::new();
+        let mut tool_lines = Vec::new();
+        let mut ctx = ChatRenderContext {
+            lines: &mut lines,
+            app,
+            theme: &theme,
+            mode_color: Color::Cyan,
+            width,
+            tool_row_lines: &mut tool_lines,
+        };
+        append_stream_parts(&mut ctx, parts);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        (text, tool_lines)
+    }
+
+    #[test]
+    fn exploration_groups_collapse_and_expand_by_category() {
+        let mut app = App::default();
+        let rows = vec![
+            test_tool_row(
+                "read-1",
+                "read_file",
+                ToolRowState::Completed,
+                serde_json::json!({ "path": "src/main.rs" }),
+            ),
+            test_tool_row(
+                "grep-1",
+                "grep",
+                ToolRowState::Completed,
+                serde_json::json!({ "query": "needle", "path": "." }),
+            ),
+            test_tool_row(
+                "glob-1",
+                "glob",
+                ToolRowState::Completed,
+                serde_json::json!({ "pattern": "*.rs", "path": "src" }),
+            ),
+            test_tool_row(
+                "fetch-1",
+                "webfetch",
+                ToolRowState::Completed,
+                serde_json::json!({ "url": "https://example.com" }),
+            ),
+        ];
+        app.set_tool_rows_for_test(rows);
+        let parts = vec![
+            StreamPart::Tool("read-1".to_string()),
+            StreamPart::Tool("grep-1".to_string()),
+            StreamPart::Tool("glob-1".to_string()),
+            StreamPart::Tool("fetch-1".to_string()),
+        ];
+
+        let (collapsed, tool_lines) = render_parts(&app, &parts, 100);
+        assert!(
+            collapsed.contains("Explored: 1 read, 2 searches, 1 fetch"),
+            "{collapsed}"
+        );
+        assert!(!collapsed.contains("Read src/main.rs"), "{collapsed}");
+        assert!(
+            tool_lines.iter().any(|(id, _)| id == "group:read-1"),
+            "group header must be clickable: {tool_lines:?}"
+        );
+
+        let (single, _) = render_parts(&app, &[StreamPart::Tool("read-1".to_string())], 100);
+        assert!(single.contains("→ Read src/main.rs"), "{single}");
+        assert!(!single.contains("Explored:"), "{single}");
+
+        app.toggle_tool_expanded("group:read-1");
+        let (expanded, _) = render_parts(&app, &parts, 100);
+        assert!(expanded.contains("→ Read src/main.rs"), "{expanded}");
+        assert!(expanded.contains("✱ Grep \"needle\" in ."), "{expanded}");
+        assert!(expanded.contains("✱ Glob \"*.rs\" in src"), "{expanded}");
+        assert!(
+            expanded.contains("% WebFetch https://example.com"),
+            "{expanded}"
+        );
+
+        let mut pending_rows = app.tool_rows().to_vec();
+        pending_rows[0].state = ToolRowState::Running;
+        app.set_tool_rows_for_test(pending_rows);
+        let (pending, _) = render_parts(&app, &parts, 100);
+        assert!(
+            pending.contains("Exploring: 1 read, 2 searches, 1 fetch"),
+            "{pending}"
+        );
+    }
+
+    #[test]
+    fn specialized_tools_render_opencode_icons_and_labels() {
+        let app = App::default();
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+
+        let mut glob = test_tool_row(
+            "glob",
+            "glob_search",
+            ToolRowState::Completed,
+            serde_json::json!({ "pattern": "*.rs", "path": "src" }),
+        );
+        glob.metadata = Some(serde_json::json!({ "count": 3 }));
+        let mut grep = test_tool_row(
+            "grep",
+            "grep_search",
+            ToolRowState::Completed,
+            serde_json::json!({ "query": "needle", "path": "." }),
+        );
+        grep.metadata = Some(serde_json::json!({ "matches": 1 }));
+        let mut websearch = test_tool_row(
+            "websearch",
+            "websearch",
+            ToolRowState::Completed,
+            serde_json::json!({ "query": "rust" }),
+        );
+        websearch.metadata = Some(serde_json::json!({ "provider": "Brave" }));
+        let mut empty_glob = test_tool_row(
+            "glob-empty",
+            "glob",
+            ToolRowState::Completed,
+            serde_json::json!({ "pattern": "*.none" }),
+        );
+        empty_glob.metadata = Some(serde_json::json!({ "count": 0 }));
+        let mut failed_todos = test_tool_row(
+            "todos-failed",
+            "update_plan",
+            ToolRowState::Failed,
+            serde_json::json!({ "plan": [] }),
+        );
+        failed_todos.output = "plan update failed".to_string();
+
+        let rows = vec![
+            test_tool_row(
+                "read",
+                "read",
+                ToolRowState::Completed,
+                serde_json::json!({ "path": "src/main.rs" }),
+            ),
+            glob,
+            grep,
+            test_tool_row(
+                "fetch",
+                "webfetch",
+                ToolRowState::Completed,
+                serde_json::json!({ "url": "https://example.com" }),
+            ),
+            websearch,
+            test_tool_row(
+                "write",
+                "write",
+                ToolRowState::Completed,
+                serde_json::json!({ "path": "notes.md" }),
+            ),
+            test_tool_row(
+                "edit",
+                "edit",
+                ToolRowState::Completed,
+                serde_json::json!({ "path": "src/main.rs" }),
+            ),
+            test_tool_row(
+                "patch",
+                "patch",
+                ToolRowState::Completed,
+                serde_json::json!({ "path": "src/lib.rs" }),
+            ),
+            test_tool_row(
+                "skill",
+                "skill",
+                ToolRowState::Completed,
+                serde_json::json!({ "name": "review" }),
+            ),
+            test_tool_row(
+                "question",
+                "question",
+                ToolRowState::Completed,
+                serde_json::json!({ "questions": [{ "question": "a" }, { "question": "b" }] }),
+            ),
+            test_tool_row(
+                "todos",
+                "update_plan",
+                ToolRowState::Completed,
+                serde_json::json!({ "plan": [] }),
+            ),
+            test_tool_row(
+                "task",
+                "task",
+                ToolRowState::Completed,
+                serde_json::json!({ "agent": "scout", "description": "inspect parser" }),
+            ),
+            test_tool_row(
+                "execute",
+                "execute",
+                ToolRowState::Completed,
+                serde_json::json!({}),
+            ),
+            test_tool_row(
+                "generic",
+                "mcp_lookup",
+                ToolRowState::Completed,
+                serde_json::json!({ "query": "needle" }),
+            ),
+            empty_glob,
+            failed_todos,
+        ];
+        let labels = rows
+            .iter()
+            .map(|row| line_text(&compact_tool_line(row, &app, &theme, Color::Cyan, 120)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels[0], "   → Read src/main.rs");
+        assert_eq!(labels[1], "   ✱ Glob \"*.rs\" in src (3 matches)");
+        assert_eq!(labels[2], "   ✱ Grep \"needle\" in . (1 match)");
+        assert_eq!(labels[3], "   % WebFetch https://example.com");
+        assert_eq!(labels[4], "   ◈ Web Search via Brave \"rust\"");
+        assert_eq!(labels[5], "   ← Write notes.md");
+        assert_eq!(labels[6], "   ← Edit src/main.rs");
+        assert_eq!(labels[7], "   ✓ Patching src/lib.rs");
+        assert_eq!(labels[8], "   → Skill \"review\"");
+        assert_eq!(labels[9], "   → Asked 2 questions");
+        assert_eq!(labels[10], "   ⚙ Cleared todos");
+        assert_eq!(labels[11], "   ✓ Scout Subagent — inspect parser");
+        assert_eq!(labels[12], "   ✓ execute");
+        assert_eq!(labels[13], "   ✓ mcp_lookup needle");
+        assert_eq!(labels[14], "   ✱ Glob \"*.none\"");
+        assert_eq!(
+            labels[15],
+            "   ✗ Todo update failed · failed: plan update failed"
+        );
+    }
+
+    #[test]
+    fn specialized_cards_render_write_todos_and_question_content() {
+        let mut app = App::default();
+        let write_content = (1..=12)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let write = test_tool_row(
+            "write",
+            "write_file",
+            ToolRowState::Completed,
+            serde_json::json!({ "path": "notes.md", "content": write_content }),
+        );
+        let todos = test_tool_row(
+            "todos",
+            "update_plan",
+            ToolRowState::Completed,
+            serde_json::json!({
+                "plan": [
+                    { "step": "done", "status": "completed" },
+                    { "step": "later", "status": "pending" }
+                ]
+            }),
+        );
+        let mut question = test_tool_row(
+            "question",
+            "question",
+            ToolRowState::Completed,
+            serde_json::json!({ "questions": [{ "question": "Which database?" }] }),
+        );
+        question.metadata = Some(serde_json::json!({ "answers": [["sqlite"]] }));
+        app.set_tool_rows_for_test(vec![write, todos, question]);
+
+        let parts = vec![
+            StreamPart::Tool("write".to_string()),
+            StreamPart::Tool("todos".to_string()),
+            StreamPart::Tool("question".to_string()),
+        ];
+        let (text, _) = render_parts(&app, &parts, 80);
+        assert!(text.contains("# Wrote notes.md"), "{text}");
+        assert!(text.contains("line 10"), "{text}");
+        assert!(text.contains("↳ click to expand (2 more lines)"), "{text}");
+        assert!(!text.contains("line 11"), "{text}");
+        assert!(text.contains("# Todos"), "{text}");
+        assert!(text.contains("✔ done"), "{text}");
+        assert!(text.contains("□ later"), "{text}");
+        assert!(text.contains("⚙ Cleared todos"), "{text}");
+        assert!(text.contains("# Questions"), "{text}");
+        assert!(text.contains("Which database?"), "{text}");
+        assert!(text.contains("sqlite"), "{text}");
+        assert!(text.contains("→ Asked 1 question"), "{text}");
+
+        app.toggle_tool_expanded("write");
+        let (expanded, _) = render_parts(&app, &parts, 80);
+        assert!(expanded.contains("line 11"), "{expanded}");
+        assert!(expanded.contains("↳ click to collapse"), "{expanded}");
+
+        let mut read = test_tool_row(
+            "read-loaded",
+            "read_file",
+            ToolRowState::Completed,
+            serde_json::json!({ "path": "src/main.rs" }),
+        );
+        read.metadata = Some(serde_json::json!({
+            "loaded": ["src/one.rs", "src/two.rs"]
+        }));
+        app.set_tool_rows_for_test(vec![read]);
+        let (read_text, _) = render_parts(&app, &[StreamPart::Tool("read-loaded".to_string())], 80);
+        assert!(read_text.contains("↳ Loaded src/one.rs"), "{read_text}");
+        assert!(read_text.contains("↳ Loaded src/two.rs"), "{read_text}");
+    }
+
+    #[test]
+    fn shell_card_streams_live_output_and_marks_background_runs() {
+        let mut app = App::default();
+        let mut running = test_tool_row(
+            "shell-running",
+            "bash",
+            ToolRowState::Running,
+            serde_json::json!({ "command": "cargo run" }),
+        );
+        app.set_tool_rows_for_test(vec![running.clone()]);
+        app.append_tool_progress("shell-running", "Compiling...\n");
+        app.append_tool_progress("shell-running", "Linking...\n");
+        running.output = app.tool_rows()[0].output.clone();
+        app.set_tool_rows_for_test(vec![running]);
+        let (text, _) = render_parts(&app, &[StreamPart::Tool("shell-running".to_string())], 80);
+        assert!(text.contains("cargo run"), "{text}");
+        assert!(text.contains("Compiling..."), "{text}");
+        assert!(text.contains("Linking..."), "{text}");
+
+        let mut background = test_tool_row(
+            "shell-background",
+            "bash",
+            ToolRowState::Completed,
+            serde_json::json!({ "command": "cargo run" }),
+        );
+        background.output = "Background command started (pid 42).".to_string();
+        background.metadata = Some(serde_json::json!({
+            "status": "running",
+            "background": true,
+            "pid": 42,
+        }));
+        app.set_tool_rows_for_test(vec![background]);
+        let (text, _) = render_parts(
+            &app,
+            &[StreamPart::Tool("shell-background".to_string())],
+            80,
+        );
+        assert!(text.contains("$ cargo run"), "{text}");
+        assert!(text.contains("Background"), "{text}");
+    }
+
+    #[test]
+    fn replayed_durable_tool_events_do_not_duplicate_parts_or_regress_state() {
+        let mut app = App::default();
+        app.set_stream_parts_for_test(
+            vec![
+                StreamPart::User("inspect files".to_string()),
+                StreamPart::Text("Partial answer".to_string()),
+                StreamPart::Tool("call-1".to_string()),
+            ],
+            Some(0),
+        );
+        let mut row = test_tool_row(
+            "call-1",
+            "glob",
+            ToolRowState::Running,
+            serde_json::json!({ "pattern": "*.rs", "path": "src" }),
+        );
+        row.output = "partial".to_string();
+        app.set_tool_rows_for_test(vec![row]);
+
+        let event = |seq, kind: &str, payload: serde_json::Value| crate::runtime::RuntimeEvent {
+            session_id: 1,
+            generation_id: Some(1),
+            seq,
+            kind: kind.to_string(),
+            payload_json: payload.to_string(),
+        };
+        app.apply_replayed_event(&event(
+            1,
+            "tool_call_created",
+            serde_json::json!({
+                "call_id": "call-1",
+                "tool_name": "glob",
+                "arguments": { "pattern": "*.rs", "path": "src" }
+            }),
+        ));
+        app.apply_replayed_event(&event(
+            2,
+            "tool_call_started",
+            serde_json::json!({
+                "call_id": "call-1",
+                "tool_name": "glob",
+                "arguments": { "pattern": "*.rs", "path": "src" }
+            }),
+        ));
+        app.apply_replayed_event(&event(
+            3,
+            "tool_call_settled",
+            serde_json::json!({
+                "call_id": "call-1",
+                "tool_name": "glob",
+                "status": "completed",
+                "result": "src/main.rs\nsrc/lib.rs",
+                "metadata": { "count": 2 }
+            }),
+        ));
+        app.apply_replayed_event(&event(
+            4,
+            "assistant_message_updated",
+            serde_json::json!({ "content": "Final answer" }),
+        ));
+
+        assert_eq!(app.stream_parts().len(), 3);
+        assert_eq!(
+            app.stream_parts()
+                .iter()
+                .filter(|part| matches!(part, StreamPart::Tool(_)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            app.stream_parts().last(),
+            Some(StreamPart::Tool(id)) if id == "call-1"
+        ));
+        let text = app
+            .stream_parts()
+            .iter()
+            .find_map(|part| match part {
+                StreamPart::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(text, "Final answer");
+
+        let row = &app.tool_rows()[0];
+        assert_eq!(row.state, ToolRowState::Completed);
+        assert_eq!(row.output, "src/main.rs\nsrc/lib.rs");
+        assert_eq!(
+            row.metadata.as_ref().and_then(|meta| meta.get("count")),
+            Some(&serde_json::json!(2))
         );
     }
 }

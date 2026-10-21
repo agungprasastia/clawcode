@@ -5,6 +5,17 @@ use std::path::{Path, PathBuf};
 pub const TOOL_READ_MAX_BYTES: usize = 256 * 1024;
 pub const TOOL_MUTATION_MAX_BYTES: usize = 1024 * 1024;
 
+/// Streaming output emitted while a tool is still running. Shell tools use
+/// this to feed the transcript's live preview; other tools are silent.
+pub type ToolProgress = dyn Fn(&str) + Send + Sync;
+
+/// Tool output plus metadata that the transcript persists with the tool part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolExecution {
+    pub output: String,
+    pub metadata: Option<serde_json::Value>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolRequest {
     Read { path: PathBuf, max_bytes: usize },
@@ -467,6 +478,10 @@ pub fn coding_tools_schemas() -> Vec<serde_json::Value> {
                         "command": {
                             "type": "string",
                             "description": "The command line string to run"
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": "Run detached and return immediately. Use for long-lived servers or watchers."
                         }
                     },
                     "required": ["command"]
@@ -591,6 +606,37 @@ pub fn execute_tool(
     mode: Mode,
     name: &str,
     arguments_json: &str,
+) -> Result<String, String> {
+    execute_tool_with_progress(workspace, mode, name, arguments_json, None)
+        .map(|execution| execution.output)
+}
+
+pub fn execute_tool_with_progress(
+    workspace: &Workspace<crate::workspace::RealFileSystem>,
+    mode: Mode,
+    name: &str,
+    arguments_json: &str,
+    progress: Option<std::sync::Arc<ToolProgress>>,
+) -> Result<ToolExecution, String> {
+    let mut metadata = None;
+    let output = execute_tool_inner(
+        workspace,
+        mode,
+        name,
+        arguments_json,
+        progress,
+        &mut metadata,
+    )?;
+    Ok(ToolExecution { output, metadata })
+}
+
+fn execute_tool_inner(
+    workspace: &Workspace<crate::workspace::RealFileSystem>,
+    mode: Mode,
+    name: &str,
+    arguments_json: &str,
+    progress: Option<std::sync::Arc<ToolProgress>>,
+    metadata: &mut Option<serde_json::Value>,
 ) -> Result<String, String> {
     let args: serde_json::Value = serde_json::from_str(arguments_json)
         .map_err(|e| format!("Invalid JSON arguments for tool '{name}': {e}"))?;
@@ -907,6 +953,7 @@ pub fn execute_tool(
                 0,
             );
 
+            *metadata = Some(serde_json::json!({ "count": matched.len() }));
             if matched.is_empty() {
                 Ok(format!("No files matched pattern '{pattern}'"))
             } else {
@@ -941,6 +988,7 @@ pub fn execute_tool(
                 0,
             );
 
+            *metadata = Some(serde_json::json!({ "matches": matches.len() }));
             if matches.is_empty() {
                 Ok(format!("No matches found for query '{query}'"))
             } else {
@@ -979,9 +1027,49 @@ pub fn execute_tool(
                 c
             };
             cmd.stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
                 .current_dir(workspace.root_path());
+
+            let background = args
+                .get("background")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if background {
+                let log_path = std::env::temp_dir().join(format!(
+                    "clawcode-shell-{}-{}.log",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_nanos())
+                        .unwrap_or_default()
+                ));
+                let log = std::fs::File::create(&log_path)
+                    .map_err(|error| format!("Failed to create shell log: {error}"))?;
+                let log_err = log
+                    .try_clone()
+                    .map_err(|error| format!("Failed to open shell log: {error}"))?;
+                let child = cmd
+                    .stdout(std::process::Stdio::from(log))
+                    .stderr(std::process::Stdio::from(log_err))
+                    .spawn()
+                    .map_err(|e| format!("Failed to execute command: {e}"))?;
+                let pid = child.id();
+                // The child owns the redirected handles; dropping the parent
+                // handle leaves the process running independently.
+                drop(child);
+                let display_path = log_path.display().to_string();
+                *metadata = Some(serde_json::json!({
+                    "status": "running",
+                    "background": true,
+                    "pid": pid,
+                    "log": display_path,
+                }));
+                return Ok(format!(
+                    "Background command started (pid {pid}).\nLog: {display_path}"
+                ));
+            }
+
+            cmd.stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
 
             let mut child = cmd
                 .spawn()
@@ -991,27 +1079,15 @@ pub fn execute_tool(
             let mut stderr_pipe = child.stderr.take();
 
             const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
+            let stdout_progress = progress.clone();
+            let stderr_progress = progress.clone();
 
             let stdout_handle = std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                if let Some(mut pipe) = stdout_pipe.take() {
-                    use std::io::Read;
-                    let _ = (&mut pipe).take(MAX_OUTPUT_BYTES).read_to_end(&mut buf);
-                    let mut sink = std::io::sink();
-                    let _ = std::io::copy(&mut pipe, &mut sink);
-                }
-                buf
+                read_shell_pipe(stdout_pipe.take(), MAX_OUTPUT_BYTES, stdout_progress)
             });
 
             let stderr_handle = std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                if let Some(mut pipe) = stderr_pipe.take() {
-                    use std::io::Read;
-                    let _ = (&mut pipe).take(MAX_OUTPUT_BYTES).read_to_end(&mut buf);
-                    let mut sink = std::io::sink();
-                    let _ = std::io::copy(&mut pipe, &mut sink);
-                }
-                buf
+                read_shell_pipe(stderr_pipe.take(), MAX_OUTPUT_BYTES, stderr_progress)
             });
 
             let start = std::time::Instant::now();
@@ -1170,6 +1246,38 @@ pub fn execute_tool(
         }
         _ => Err(format!("Unknown tool: '{name}'")),
     }
+}
+
+fn read_shell_pipe(
+    pipe: Option<impl Read>,
+    max_bytes: u64,
+    progress: Option<std::sync::Arc<ToolProgress>>,
+) -> Vec<u8> {
+    let Some(mut pipe) = pipe else {
+        return Vec::new();
+    };
+    let mut collected = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = match pipe.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let remaining = max_bytes.saturating_sub(collected.len() as u64) as usize;
+        let take = read.min(remaining);
+        if take > 0 {
+            collected.extend_from_slice(&buffer[..take]);
+            if let Some(callback) = progress.as_ref() {
+                callback(&String::from_utf8_lossy(&buffer[..take]));
+            }
+        }
+        if take < read {
+            let mut sink = std::io::sink();
+            let _ = std::io::copy(&mut pipe, &mut sink);
+            break;
+        }
+    }
+    collected
 }
 
 pub fn execute_webfetch(url: &str) -> Result<String, String> {
@@ -2131,6 +2239,90 @@ mod tests {
         assert!(question_res.contains("1. postgres"));
         assert!(question_res.contains("2. sqlite"));
 
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn shell_foreground_reports_progress_and_background_returns_metadata() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "clawcode-shell-stream-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let workspace = Workspace::open(&temp_dir).unwrap();
+
+        #[cfg(windows)]
+        let foreground = "$first = 'shell-live-one'; $second = 'shell-live-two'; Write-Output $first; Write-Output $second";
+        #[cfg(not(windows))]
+        let foreground = "printf 'shell-live-one\\nshell-live-two\\n'";
+
+        let chunks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&chunks);
+        let progress: std::sync::Arc<ToolProgress> =
+            std::sync::Arc::new(move |chunk| sink.lock().unwrap().push(chunk.to_string()));
+        let arguments = serde_json::json!({ "command": foreground }).to_string();
+        let execution =
+            execute_tool_with_progress(&workspace, Mode::Build, "bash", &arguments, Some(progress))
+                .unwrap();
+        assert!(
+            execution.output.contains("shell-live-one"),
+            "{}",
+            execution.output
+        );
+        assert!(
+            execution.output.contains("shell-live-two"),
+            "{}",
+            execution.output
+        );
+        assert!(execution.metadata.is_none());
+        let streamed = chunks.lock().unwrap().join("");
+        assert!(streamed.contains("shell-live-one"), "{streamed}");
+        assert!(streamed.contains("shell-live-two"), "{streamed}");
+
+        #[cfg(windows)]
+        let background = "Start-Sleep -Milliseconds 250; Write-Output background-live";
+        #[cfg(not(windows))]
+        let background = "sleep 0.25; echo background-live";
+
+        let arguments =
+            serde_json::json!({ "command": background, "background": true }).to_string();
+        let execution =
+            execute_tool_with_progress(&workspace, Mode::Build, "bash", &arguments, None).unwrap();
+        let metadata = execution.metadata.expect("background metadata");
+        assert_eq!(
+            metadata.get("status").and_then(|v| v.as_str()),
+            Some("running")
+        );
+        assert_eq!(
+            metadata.get("background").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(metadata.get("pid").and_then(|v| v.as_u64()).is_some());
+        let log = metadata
+            .get("log")
+            .and_then(|value| value.as_str())
+            .expect("background log path")
+            .to_string();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if std::fs::read_to_string(&log)
+                .map(|content| content.contains("background-live"))
+                .unwrap_or(false)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background output did not reach {log}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let _ = std::fs::remove_file(&log);
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 

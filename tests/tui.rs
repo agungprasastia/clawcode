@@ -1610,7 +1610,8 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
     assert_eq!(active.name, "read_file");
     assert_eq!(active.desc, "src/cli/mod.rs");
 
-    // Rendering while tool is active displays the braille spinner and "Read src/cli/mod.rs"
+    // Rendering while tool is active displays the braille spinner and the
+    // OpenCode pending label.
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
@@ -1625,7 +1626,7 @@ fn tool_execution_formats_crabcode_style_and_tracks_active_tool() {
         .join("\n");
 
     assert!(text.contains(app.wave_spinner().compact_frame()));
-    assert!(text.contains("Read src/cli/mod.rs"));
+    assert!(text.contains("Reading file…"));
     // Hints row shows clean status ("running"), not "ready"
     assert!(!text.contains("● ready"));
     assert!(text.contains("running"));
@@ -1762,7 +1763,7 @@ fn tool_execution_update_plan_renders_checklist_and_tracks_plan() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("Updated Plan"));
+    assert!(text.contains("Cleared todos"));
     assert!(text.contains("✔ Selesai langkah pertama"));
     assert!(text.contains("• Sedang menjalankan langkah kedua"));
     assert!(text.contains("□ Langkah ketiga pending"));
@@ -1849,11 +1850,22 @@ fn various_tool_entries_format_matching_crabcode_spec() {
     })
     .unwrap();
 
-    // glob_search
+    // Keep the search rows from folding into one exploration group; this test
+    // checks the labels of the individual specialized rows.
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id: 1,
         generation_id: Some(1),
         seq: 2,
+        kind: "text_delta".to_string(),
+        payload_json: serde_json::json!({ "delta": "Continuing." }).to_string(),
+    })
+    .unwrap();
+
+    // glob_search
+    tx.send(clawcode::runtime::RuntimeEvent {
+        session_id: 1,
+        generation_id: Some(1),
+        seq: 3,
         kind: "tool_executed".to_string(),
         payload_json: serde_json::json!({
             "name": "glob_search",
@@ -1869,7 +1881,7 @@ fn various_tool_entries_format_matching_crabcode_spec() {
     tx.send(clawcode::runtime::RuntimeEvent {
         session_id: 1,
         generation_id: Some(1),
-        seq: 3,
+        seq: 4,
         kind: "tool_executed".to_string(),
         payload_json: serde_json::json!({
             "name": "list_dir",
@@ -1889,7 +1901,7 @@ fn various_tool_entries_format_matching_crabcode_spec() {
             .iter()
             .all(|r| r.state == clawcode::tui::ToolRowState::Completed)
     );
-    assert_eq!(app.stream_parts().len(), 3);
+    assert_eq!(app.stream_parts().len(), 4);
 
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -1904,8 +1916,8 @@ fn various_tool_entries_format_matching_crabcode_spec() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("Grep /"));
-    assert!(text.contains("Glob *ui*"));
+    assert!(text.contains("Grep \"/\""));
+    assert!(text.contains("Glob \"*ui*\" (2 matches)"));
     assert!(text.contains("List src"));
 }
 
@@ -1947,7 +1959,7 @@ fn historical_tool_lines_render_with_clean_styles() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("Grep /"));
+    assert!(text.contains("Grep \"/\""));
 }
 #[test]
 fn test_app_permission_dialog_navigation_and_decisions() {
@@ -2489,7 +2501,7 @@ fn test_websearch_visual_card_formatting() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Search rust tokio"));
+    assert!(text.contains("Web Search \"rust tokio\""));
 }
 
 #[test]
@@ -2537,7 +2549,7 @@ fn test_edit_file_opencode_side_by_side_diff_in_transcript() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("• Edit src/main.rs"));
+    assert!(text.contains("← Edit src/main.rs"));
     assert!(text.contains("-     // old"));
     assert!(text.contains("+     println!(\"hello\");"));
 }
@@ -2952,7 +2964,7 @@ fn test_edit_patch_tool_opencode_style_running_and_executed() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(text.contains("Patch src/lib.rs (+2 -1)"));
+    assert!(text.contains("Patching src/lib.rs"));
     assert!(text.contains("- fn old() {}"));
     assert!(text.contains("+ fn extra() {}"));
 }
@@ -3534,6 +3546,90 @@ fn ordered_stream_keeps_text_tools_and_followup_text_in_event_order() {
 }
 
 #[test]
+fn exploration_group_header_click_expands_and_collapses() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("explore files");
+    let session_id = app.active_session_id().unwrap();
+    for (seq, id, name, arguments, output) in [
+        (
+            1,
+            "read-1",
+            "read_file",
+            serde_json::json!({ "path": "src/main.rs" }),
+            "fn main() {}",
+        ),
+        (
+            2,
+            "grep-1",
+            "grep",
+            serde_json::json!({ "query": "fn" }),
+            "src/main.rs:1: fn main() {}",
+        ),
+    ] {
+        tx.send(clawcode::runtime::RuntimeEvent {
+            session_id,
+            generation_id: Some(1),
+            seq,
+            kind: "tool_executed".into(),
+            payload_json: serde_json::json!({
+                "id": id,
+                "name": name,
+                "arguments": arguments,
+                "success": true,
+                "output": output,
+            })
+            .to_string(),
+        })
+        .unwrap();
+    }
+    app.poll_runtime();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
+    let group_row = (0..30)
+        .find(|&y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+                .contains("Explored: 1 read, 1 search")
+        })
+        .expect("exploration group header");
+    assert!(!app.is_tool_expanded("group:read-1"));
+
+    app.apply(UiEvent::MouseClick { x: 4, y: group_row });
+    assert!(app.is_tool_expanded("group:read-1"));
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
+    let expanded = (0..30)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(expanded.contains("Read src/main.rs"), "{expanded}");
+    assert!(expanded.contains("Grep \"fn\""), "{expanded}");
+
+    let group_row = (0..30)
+        .find(|&y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+                .contains("Explored: 1 read, 1 search")
+        })
+        .expect("exploration group header after expansion");
+    app.apply(UiEvent::MouseClick { x: 4, y: group_row });
+    assert!(!app.is_tool_expanded("group:read-1"));
+}
+
+#[test]
 fn long_tool_output_expands_and_collapses_from_rendered_row() {
     let mut app = App::default();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -3626,8 +3722,8 @@ fn task_and_execute_rows_render_nested_work_when_metadata_exists() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("↳ scout: inspect parser"));
-    assert!(text.contains("⠋ read"));
+    assert!(text.contains("Scout Subagent — inspect parser"));
+    assert!(text.contains("│ read"));
     assert!(text.contains("✓ grep"));
 }
 
@@ -3917,9 +4013,9 @@ fn opencode_visual_streaming_parity_suite() {
     assert!(!rendered.contains("💭"));
 
     // Tool rows use clean dot icon
-    assert!(rendered.contains("● Read README.md"));
+    assert!(rendered.contains("→ Read README.md"));
     // No noisy line count suffix
-    assert!(!rendered.contains("● Read README.md · 3 lines"));
+    assert!(!rendered.contains("→ Read README.md · 3 lines"));
 
     // Shell row uses $ prefix
     assert!(rendered.contains("$ git status"));
@@ -3999,7 +4095,7 @@ fn test_edit_file_shows_real_unified_diff_with_colors_and_card() {
         .join("\n");
 
     // Title line contains edit icon, path, and (+A -R) badge
-    assert!(rendered.contains("• Edit src/main.rs (+2 -1)"));
+    assert!(rendered.contains("← Edit src/main.rs"));
     // Unified diff rendered with - and + markers
     assert!(rendered.contains("-     let a = 1;"));
     assert!(rendered.contains("+     let a = 10;"));
@@ -4011,7 +4107,7 @@ fn test_edit_file_shows_real_unified_diff_with_colors_and_card() {
     let title_y = (0..30)
         .find(|&y| {
             let row: String = (0..100).map(|x| buffer[(x, y)].symbol()).collect();
-            row.contains("• Edit src/main.rs")
+            row.contains("← Edit src/main.rs")
         })
         .expect("title line should exist");
     assert_eq!(buffer[(50, title_y)].bg, theme.bg_element);
@@ -4165,7 +4261,7 @@ fn test_tool_executed_missing_id_resolves_without_duplicate_row() {
         .join("\n");
 
     // Exactly one row rendered
-    let occurrences = rendered.matches("Grep adalah").count();
+    let occurrences = rendered.matches("Grep \"adalah\"").count();
     assert_eq!(occurrences, 1, "rendered was:\n{rendered}");
     assert!(rendered.contains("failed: 'README.md' is not a directory"));
     // Must NOT have click to expand
@@ -4229,7 +4325,7 @@ fn test_glob_grep_read_have_no_click_to_expand() {
         .join("\n");
 
     // Must be rendered as clean inline tool with match count
-    assert!(rendered.contains("● Glob **/*.md (5 matches)"));
+    assert!(rendered.contains("✱ Glob \"**/*.md\" (5 matches)"));
     // Must NEVER show generic click to expand for inline tools
     assert!(!rendered.contains("↳ click to expand"));
 }
@@ -4900,9 +4996,9 @@ fn tool_card_rendering_and_raw_tool_bracket_badge_formatting() {
 
     assert!(!text.contains("[tool]:"));
     assert!(text.contains("Read Cargo.toml"));
-    assert!(text.contains("Updated Plan"));
+    assert!(text.contains("Cleared todos"));
     assert!(text.contains("List src"));
-    assert!(text.contains("Run finished calculation"));
+    assert!(text.contains("calculate finished calculation"));
 
     let tool_y = (0..buffer.area.height)
         .find(|&y| {
@@ -4960,8 +5056,111 @@ fn restore_session_from_database_formats_tool_messages_as_clean_cards() {
 
     assert!(text.contains("Run my tools"));
     assert!(text.contains("Running now..."));
-    assert!(text.contains("Updated Plan"));
+    assert!(text.contains("Cleared todos"));
     assert!(text.contains("read Cargo.toml output"));
+}
+
+#[test]
+fn restore_durable_tools_keeps_metadata_and_marks_interrupted_calls_failed() {
+    let db = clawcode::persistence::Db::open_in_memory().unwrap();
+    let session = db.create_session("Durable tools").unwrap();
+    db.append_message(session.id, "user", "Run the tools")
+        .unwrap();
+    let generation = db
+        .start_generation(session.id, "plan", "fake", "model")
+        .unwrap();
+    let assistant = db
+        .append_message(session.id, "assistant", "Partial answer")
+        .unwrap();
+    let (background, _) = db
+        .create_tool_call(clawcode::persistence::NewToolCall {
+            session_id: session.id,
+            generation_id: generation.id,
+            assistant_message_id: assistant.id,
+            call_id: "shell-call",
+            tool_name: "bash",
+            arguments: r#"{"command":"cargo run"}"#,
+        })
+        .unwrap();
+    db.start_tool_call(background.id).unwrap();
+    db.settle_tool_call_with_metadata(
+        background.id,
+        clawcode::persistence::ToolCallStatus::Completed,
+        Some("Background command started (pid 42)."),
+        None,
+        Some(r#"{"status":"running","background":true,"pid":42}"#),
+    )
+    .unwrap();
+    let (interrupted, _) = db
+        .create_tool_call(clawcode::persistence::NewToolCall {
+            session_id: session.id,
+            generation_id: generation.id,
+            assistant_message_id: assistant.id,
+            call_id: "read-call",
+            tool_name: "read_file",
+            arguments: r#"{"path":"src/lib.rs"}"#,
+        })
+        .unwrap();
+    db.start_tool_call(interrupted.id).unwrap();
+    db.finish_generation(
+        generation.id,
+        clawcode::persistence::GenerationStatus::Completed,
+        None,
+    )
+    .unwrap();
+    db.update_message_content(session.id, assistant.id, "Final answer")
+        .unwrap();
+
+    let mut app = App::default();
+    let service = clawcode::cli::CommandService::with_db(clawcode::cli::CliDiscovery::new(), db);
+    app.set_command_service(service);
+    app.switch_session(session.id);
+
+    assert_eq!(app.stream_parts().len(), 4);
+    let rows = app.tool_rows();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].call_id, "shell-call");
+    assert_eq!(rows[0].state, clawcode::tui::ToolRowState::Completed);
+    assert_eq!(
+        rows[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("status"))
+            .and_then(|status| status.as_str()),
+        Some("running")
+    );
+    assert_eq!(rows[1].call_id, "read-call");
+    assert_eq!(rows[1].state, clawcode::tui::ToolRowState::Failed);
+    assert_eq!(rows[1].output, "generation ended before tool completion");
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Final answer"), "{text}");
+    assert!(text.contains("$ cargo run"), "{text}");
+    assert!(text.contains("Background"), "{text}");
+    assert!(
+        text.contains("read src/lib.rs") || text.contains("Read src/lib.rs"),
+        "{text}"
+    );
+    assert!(
+        text.contains("generation ended before tool completion"),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("Final answer").count(),
+        1,
+        "assistant text must not duplicate on restore: {text}"
+    );
 }
 
 #[test]

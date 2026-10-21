@@ -832,6 +832,25 @@ impl SharedGenerationCtx {
         }
     }
 
+    fn tool_progress_callback(
+        &self,
+        call_id: &str,
+    ) -> Arc<crate::conversation::tools::ToolProgress> {
+        let ctx = self.clone();
+        let call_id = call_id.to_string();
+        Arc::new(move |chunk: &str| {
+            ctx.publish(
+                0,
+                "tool_call_progress",
+                serde_json::json!({
+                    "id": call_id,
+                    "output": chunk,
+                })
+                .to_string(),
+            );
+        })
+    }
+
     fn publish(&self, seq: i64, kind: &str, payload_json: String) {
         self.bus.publish(RuntimeEvent {
             seq,
@@ -862,7 +881,7 @@ impl SharedGenerationCtx {
 }
 
 enum LocalToolOutcome {
-    Completed(String),
+    Completed(crate::conversation::tools::ToolExecution),
     Failed(String),
     Cancelled,
 }
@@ -875,6 +894,7 @@ struct LocalToolTask {
     mode: crate::workspace::Mode,
     tool_name: String,
     args: String,
+    progress: Option<Arc<crate::conversation::tools::ToolProgress>>,
 }
 
 /// Runs every local tool call on its own thread, matching OpenCode's fiber per
@@ -907,6 +927,7 @@ impl ToolWorkers {
             mode,
             tool_name,
             args,
+            progress,
         } = task;
         self.expected += 1;
         let tx = self.tx.clone();
@@ -927,9 +948,11 @@ impl ToolWorkers {
                             &effective_workspace_dir,
                             crate::workspace::RealFileSystem,
                         ) {
-                            Ok(workspace) => crate::conversation::tools::execute_tool(
-                                &workspace, mode, &tool_name, &args,
-                            ),
+                            Ok(workspace) => {
+                                crate::conversation::tools::execute_tool_with_progress(
+                                    &workspace, mode, &tool_name, &args, progress,
+                                )
+                            }
                             Err(error) => Err(format!(
                                 "Failed to open workspace {}: {error}",
                                 effective_workspace_dir.display()
@@ -937,7 +960,7 @@ impl ToolWorkers {
                         }
                     }));
                     match result {
-                        Ok(Ok(output)) => LocalToolOutcome::Completed(output),
+                        Ok(Ok(execution)) => LocalToolOutcome::Completed(execution),
                         Ok(Err(error)) => LocalToolOutcome::Failed(error),
                         Err(_) => {
                             LocalToolOutcome::Failed("local tool thread panicked".to_string())
@@ -1217,6 +1240,12 @@ fn run_generation(
         let mut failed = false;
         let mut provider_cancelled = false;
         let mut tool_workers = ToolWorkers::new();
+        // Created as soon as the first tool input is complete, so the
+        // assistant row exists while tools run and a crash/reload keeps the
+        // partial turn. It is updated with the final text before the turn is
+        // committed to provider history.
+        let mut assistant_message: Option<crate::persistence::Message> = None;
+        let mut created_calls: Vec<Option<crate::persistence::ToolCall>> = Vec::new();
 
         for event in &mut stream {
             if cancel_requested(&ctx.db, ctx.generation_id) {
@@ -1275,15 +1304,30 @@ fn run_generation(
                     }
                 }
                 StreamEvent::ToolCallEnd { id } => {
-                    if completed_tool_call_ids.contains(&id) {
+                    if completed_tool_call_ids.contains(&id) || malformed_tool_stream {
                         malformed_tool_stream = true;
-                    } else if let Some(index) = turn_tool_calls
+                        completed_tool_call_ids.push(id);
+                        continue;
+                    }
+                    if let Some(index) = turn_tool_calls
                         .iter()
                         .position(|(call_id, _, _)| call_id == &id)
                     {
                         let (call_id, tool_name, args_str) = {
                             let call = &turn_tool_calls[index];
                             (call.0.clone(), call.1.clone(), call.2.clone())
+                        };
+                        // Tool inputs are JSON objects. Reject incomplete or
+                        // non-object payloads before a durable call exists so
+                        // malformed streams cannot leave orphaned rows.
+                        let parsed_args = match serde_json::from_str::<serde_json::Value>(&args_str)
+                        {
+                            Ok(value) if value.is_object() => value,
+                            _ => {
+                                malformed_tool_stream = true;
+                                completed_tool_call_ids.push(id);
+                                continue;
+                            }
                         };
                         ctx.publish(
                             0,
@@ -1299,8 +1343,6 @@ fn run_generation(
                         // provider finishes that call's input. Do the same so
                         // local work overlaps the rest of the stream and
                         // sibling tool calls run concurrently.
-                        let parsed_args = serde_json::from_str::<serde_json::Value>(&args_str)
-                            .unwrap_or_else(|_| serde_json::Value::String(args_str.clone()));
                         ctx.publish(
                             0,
                             "tool_executing",
@@ -1311,6 +1353,102 @@ fn run_generation(
                             })
                             .to_string(),
                         );
+
+                        if assistant_message.is_none() {
+                            let message = match persist_message(ctx, "assistant", &text) {
+                                Some(message) => message,
+                                None => return,
+                            };
+                            // Persist the part order immediately: assistant
+                            // text, then its tool calls. The final text is
+                            // written into this same row when the turn ends.
+                            ctx.emit(
+                                "assistant_message",
+                                &serde_json::json!({
+                                    "content": text,
+                                    "assistant_message_id": message.id,
+                                    "partial": true,
+                                }),
+                            );
+                            assistant_message = Some(message);
+                        }
+                        let assistant_message_id = assistant_message
+                            .as_ref()
+                            .map(|message| message.id)
+                            .unwrap_or(0);
+
+                        let (created_call, created_seq) =
+                            match ctx.writer.create_tool_call(NewToolCall {
+                                session_id: ctx.session_id,
+                                generation_id: ctx.generation_id,
+                                assistant_message_id,
+                                call_id: &call_id,
+                                tool_name: &tool_name,
+                                arguments: &args_str,
+                            }) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    let message = format!("tool creation failed: {error}");
+                                    ctx.db.last_error(ctx.session_id, &message);
+                                    let _ = ctx
+                                        .fail_active_tools("generation aborted before tool start");
+                                    fail_generation(ctx, &message);
+                                    ctx.deactivate();
+                                    return;
+                                }
+                            };
+                        ctx.set_active_tool_call(created_call.id);
+                        ctx.publish(
+                            created_seq,
+                            "tool_call_created",
+                            tool_call_event_payload(&created_call, None, None),
+                        );
+                        let (running_call, running_seq) = match ctx
+                            .writer
+                            .start_tool_call(created_call.id)
+                        {
+                            Ok(value) => value,
+                            Err(error) => {
+                                let mut message =
+                                    format!("tool start failed before execution: {error}");
+                                match ctx.writer.settle_tool_call(
+                                    created_call.id,
+                                    ToolCallStatus::Failed,
+                                    None,
+                                    Some(&message),
+                                ) {
+                                    Ok((failed_call, failed_seq)) => ctx.publish(
+                                        failed_seq,
+                                        "tool_call_settled",
+                                        tool_call_event_payload(&failed_call, None, Some(&message)),
+                                    ),
+                                    Err(settle_error) => {
+                                        message.push_str(&format!(
+                                            "; durable call may remain created: {settle_error}"
+                                        ));
+                                    }
+                                }
+                                ctx.clear_active_tool_call(created_call.id);
+                                if let Err(cleanup_error) =
+                                    ctx.fail_active_tools("generation aborted before tool start")
+                                {
+                                    message.push_str(&format!("; {cleanup_error}"));
+                                }
+                                fail_generation(ctx, &message);
+                                ctx.deactivate();
+                                return;
+                            }
+                        };
+                        ctx.publish(
+                            running_seq,
+                            "tool_call_started",
+                            tool_call_event_payload(&running_call, None, None),
+                        );
+                        while created_calls.len() <= index {
+                            created_calls.push(None);
+                        }
+                        created_calls[index] = Some(created_call);
+                        let progress = Some(ctx.tool_progress_callback(&call_id));
                         tool_workers.spawn(LocalToolTask {
                             index,
                             db: ctx.db.clone(),
@@ -1319,6 +1457,7 @@ fn run_generation(
                             mode,
                             tool_name,
                             args: args_str,
+                            progress,
                         });
                     } else {
                         malformed_tool_stream = true;
@@ -1356,10 +1495,15 @@ fn run_generation(
             }
         }
         if cancel_requested(&ctx.db, ctx.generation_id) || provider_cancelled {
-            if !text.is_empty() && persist_message(ctx, "assistant", &text).is_none() {
+            if let Some(message) = assistant_message.as_ref() {
+                let _ = ctx
+                    .db
+                    .with(|db| db.update_message_content(ctx.session_id, message.id, &text));
+            } else if !text.is_empty() && persist_message(ctx, "assistant", &text).is_none() {
                 ctx.deactivate();
                 return;
             }
+            let _ = ctx.cancel_active_tools();
             ctx.db.clear_last_error(ctx.session_id);
             let _ = ctx.db.with(|db| {
                 db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None)
@@ -1371,6 +1515,7 @@ fn run_generation(
 
         if failed {
             ctx.db.last_error(ctx.session_id, "stream error");
+            let _ = ctx.fail_active_tools("stream failed before tool settlement");
             fail_generation(ctx, "stream error");
             ctx.deactivate();
             return;
@@ -1384,6 +1529,7 @@ fn run_generation(
             if malformed_tool_stream || complete_count != turn_tool_calls.len() {
                 let message = "stream requires complete local tool calls";
                 ctx.db.last_error(ctx.session_id, message);
+                let _ = ctx.fail_active_tools("stream ended before tool settlement");
                 fail_generation(ctx, message);
                 ctx.deactivate();
                 return;
@@ -1415,18 +1561,48 @@ fn run_generation(
             break;
         }
 
-        // Persist owning assistant row before any tool identity or side effect.
-        let assistant_message = match persist_message(ctx, "assistant", &text) {
-            Some(message) => message,
+        let (assistant_message, updated_partial) = match assistant_message.take() {
+            Some(message) => {
+                match ctx
+                    .db
+                    .with(|db| db.update_message_content(ctx.session_id, message.id, &text))
+                {
+                    Ok(saved) => (saved, true),
+                    Err(error) => {
+                        fail_generation(ctx, &error.to_string());
+                        ctx.deactivate();
+                        return;
+                    }
+                }
+            }
             None => {
-                ctx.deactivate();
-                return;
+                let message = match persist_message(ctx, "assistant", &text) {
+                    Some(message) => message,
+                    None => {
+                        ctx.deactivate();
+                        return;
+                    }
+                };
+                (message, false)
             }
         };
-        ctx.emit(
-            "assistant_message",
-            &serde_json::json!({ "content": text, "assistant_message_id": assistant_message.id }),
-        );
+        if updated_partial {
+            ctx.emit(
+                "assistant_message_updated",
+                &serde_json::json!({
+                    "content": text,
+                    "assistant_message_id": assistant_message.id,
+                }),
+            );
+        } else {
+            ctx.emit(
+                "assistant_message",
+                &serde_json::json!({
+                    "content": text,
+                    "assistant_message_id": assistant_message.id,
+                }),
+            );
+        }
 
         for (call_id, result) in provider_tool_results {
             ctx.publish(
@@ -1446,84 +1622,16 @@ fn run_generation(
             tool_name: String,
             content: String,
         }
-        let mut created_calls = Vec::with_capacity(turn_tool_calls.len());
         let mut outcomes: Vec<Option<ExecutedTool>> =
             (0..turn_tool_calls.len()).map(|_| None).collect();
-
-        // Persist every durable call identity before settling any result. The
-        // workers already run concurrently from their `ToolCallEnd` events.
-        for (call_id, tool_name, args_str) in &turn_tool_calls {
-            if cancel_requested(&ctx.db, ctx.generation_id) {
-                let _ = ctx.cancel_active_tools();
-                ctx.db.clear_last_error(ctx.session_id);
-                let _ = ctx.db.with(|db| {
-                    db.finish_generation(ctx.generation_id, GenerationStatus::Cancelled, None)
-                });
-                ctx.emit_status("cancelled", None);
-                ctx.deactivate();
-                return;
-            }
-
-            let (created_call, created_seq) = match ctx.writer.create_tool_call(NewToolCall {
-                session_id: ctx.session_id,
-                generation_id: ctx.generation_id,
-                assistant_message_id: assistant_message.id,
-                call_id,
-                tool_name,
-                arguments: args_str,
-            }) {
-                Ok(value) => value,
-                Err(error) => {
-                    let _ = ctx.fail_active_tools("generation aborted before tool creation");
-                    fail_generation(ctx, &error);
-                    ctx.deactivate();
-                    return;
-                }
-            };
-            ctx.set_active_tool_call(created_call.id);
-            ctx.publish(
-                created_seq,
-                "tool_call_created",
-                tool_call_event_payload(&created_call, None, None),
-            );
-            let (running_call, running_seq) = match ctx.writer.start_tool_call(created_call.id) {
-                Ok(value) => value,
-                Err(error) => {
-                    let mut message = format!("tool start failed before execution: {error}");
-                    match ctx.writer.settle_tool_call(
-                        created_call.id,
-                        ToolCallStatus::Failed,
-                        None,
-                        Some(&message),
-                    ) {
-                        Ok((failed_call, failed_seq)) => ctx.publish(
-                            failed_seq,
-                            "tool_call_settled",
-                            tool_call_event_payload(&failed_call, None, Some(&message)),
-                        ),
-                        Err(settle_error) => {
-                            message.push_str(&format!(
-                                "; durable call may remain created: {settle_error}"
-                            ));
-                        }
-                    }
-                    ctx.clear_active_tool_call(created_call.id);
-                    if let Err(cleanup_error) =
-                        ctx.fail_active_tools("generation aborted before tool start")
-                    {
-                        message.push_str(&format!("; {cleanup_error}"));
-                    }
-                    fail_generation(ctx, &message);
-                    ctx.deactivate();
-                    return;
-                }
-            };
-            ctx.publish(
-                running_seq,
-                "tool_call_started",
-                tool_call_event_payload(&running_call, None, None),
-            );
-            created_calls.push(created_call);
+        if created_calls.len() != turn_tool_calls.len() || created_calls.iter().any(Option::is_none)
+        {
+            let message = "durable tool creation was incomplete".to_string();
+            ctx.db.last_error(ctx.session_id, &message);
+            let _ = ctx.fail_active_tools("generation aborted before tool settlement");
+            fail_generation(ctx, &message);
+            ctx.deactivate();
+            return;
         }
 
         let mut cancelled = false;
@@ -1536,7 +1644,7 @@ fn run_generation(
                 ctx.deactivate();
                 return;
             };
-            let Some(created_call) = created_calls.get(index) else {
+            let Some(created_call) = created_calls.get(index).and_then(Option::as_ref) else {
                 let message = "local tool worker returned an unknown call index".to_string();
                 ctx.db.last_error(ctx.session_id, &message);
                 let _ = ctx.fail_active_tools("generation aborted before tool settlement");
@@ -1553,22 +1661,27 @@ fn run_generation(
                 return;
             };
 
-            let (settlement_status, result, error) = match outcome {
-                LocalToolOutcome::Completed(output) => (
+            let (settlement_status, result, error, metadata_json) = match outcome {
+                LocalToolOutcome::Completed(execution) => (
                     ToolCallStatus::Completed,
-                    Some(bound_tool_text(output)),
+                    Some(bound_tool_text(execution.output)),
+                    None,
+                    execution.metadata.map(|metadata| metadata.to_string()),
+                ),
+                LocalToolOutcome::Failed(error) => (
+                    ToolCallStatus::Failed,
+                    None,
+                    Some(bound_tool_text(error)),
                     None,
                 ),
-                LocalToolOutcome::Failed(error) => {
-                    (ToolCallStatus::Failed, None, Some(bound_tool_text(error)))
-                }
-                LocalToolOutcome::Cancelled => (ToolCallStatus::Cancelled, None, None),
+                LocalToolOutcome::Cancelled => (ToolCallStatus::Cancelled, None, None, None),
             };
-            let (settled_call, settled_seq) = match ctx.writer.settle_tool_call(
+            let (settled_call, settled_seq) = match ctx.writer.settle_tool_call_with_metadata(
                 created_call.id,
                 settlement_status,
                 result.as_deref(),
                 error.as_deref(),
+                metadata_json.as_deref(),
             ) {
                 Ok(value) => {
                     ctx.clear_active_tool_call(created_call.id);
@@ -1606,6 +1719,8 @@ fn run_generation(
                         .unwrap_or_else(|_| serde_json::Value::String(args_str.clone())),
                     "success": success,
                     "output": output,
+                    "metadata": settled_call.metadata_json.as_deref()
+                        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
                     "assistant_message_id": assistant_message.id,
                 }),
             );
@@ -1743,6 +1858,8 @@ fn tool_call_event_payload(
         "status": tool_call.status.as_str(),
         "result": result,
         "error": error,
+        "metadata": tool_call.metadata_json.as_deref()
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
     })
     .to_string()
 }

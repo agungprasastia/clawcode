@@ -62,6 +62,7 @@ enum Command {
         status: ToolCallStatus,
         result: Option<String>,
         error: Option<String>,
+        metadata_json: Option<String>,
         reply: mpsc::Sender<Result<(ToolCall, i64), String>>,
     },
     AdmitInput {
@@ -177,13 +178,20 @@ impl WriterHandle {
                         status,
                         result,
                         error,
+                        metadata_json,
                         reply,
                     } => {
                         flush_batch(&mut db, &mut pending);
                         flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
-                            db.settle_tool_call(id, status, result.as_deref(), error.as_deref())
-                                .map_err(|error| error.to_string()),
+                            db.settle_tool_call_with_metadata(
+                                id,
+                                status,
+                                result.as_deref(),
+                                error.as_deref(),
+                                metadata_json.as_deref(),
+                            )
+                            .map_err(|error| error.to_string()),
                         );
                     }
                     Command::AdmitInput {
@@ -337,16 +345,18 @@ impl WriterHandle {
                             status,
                             result,
                             error,
+                            metadata_json,
                             reply,
                         } => {
                             flush_batch(&mut db, &mut pending);
                             flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
-                                db.settle_tool_call(
+                                db.settle_tool_call_with_metadata(
                                     id,
                                     status,
                                     result.as_deref(),
                                     error.as_deref(),
+                                    metadata_json.as_deref(),
                                 )
                                 .map_err(|error| error.to_string()),
                             );
@@ -557,6 +567,17 @@ impl WriterHandle {
         result: Option<&str>,
         error: Option<&str>,
     ) -> Result<(ToolCall, i64), String> {
+        self.settle_tool_call_with_metadata(id, status, result, error, None)
+    }
+
+    pub fn settle_tool_call_with_metadata(
+        &self,
+        id: i64,
+        status: ToolCallStatus,
+        result: Option<&str>,
+        error: Option<&str>,
+        metadata_json: Option<&str>,
+    ) -> Result<(ToolCall, i64), String> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.sender()?
             .try_send(Command::SettleToolCall {
@@ -564,6 +585,7 @@ impl WriterHandle {
                 status,
                 result: result.map(str::to_string),
                 error: error.map(str::to_string),
+                metadata_json: metadata_json.map(str::to_string),
                 reply: reply_tx,
             })
             .map_err(|error| error.to_string())?;

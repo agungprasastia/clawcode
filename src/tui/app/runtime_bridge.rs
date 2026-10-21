@@ -310,6 +310,73 @@ impl App {
                     }
                 }
             }
+            "tool_call_progress" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                {
+                    let call_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                    self.append_tool_progress(call_id, output);
+                }
+            }
+            "tool_call_created" | "tool_call_started" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                {
+                    let call_id = payload
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let tool_name = payload
+                        .get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool");
+                    let args = payload.get("arguments");
+                    let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
+                    let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
+                    if self.tool_rows.iter().any(|row| row.call_id == call_id) {
+                        // The volatile `tool_executing` event usually arrives
+                        // first. Durable lifecycle events must enrich that
+                        // row without stepping it backwards to Pending.
+                        if let Some(row) =
+                            self.tool_rows.iter_mut().find(|row| row.call_id == call_id)
+                        {
+                            row.name = tool_name.to_string();
+                            if !arguments.is_empty() {
+                                row.arguments = bounded(arguments, MAX_TOOL_ARGUMENT_BYTES);
+                            }
+                            if !desc.is_empty() {
+                                row.desc = bounded(desc, MAX_TOOL_ARGUMENT_BYTES);
+                            }
+                            if event.kind == "tool_call_started"
+                                && row.state == ToolRowState::Pending
+                            {
+                                row.state = ToolRowState::Running;
+                            }
+                            if let Some(metadata) = payload.get("metadata") {
+                                row.metadata = Some(metadata.clone());
+                            }
+                            row.expandable = row.compute_expandable();
+                        }
+                    } else {
+                        self.upsert_tool_row(ToolRowUpdate {
+                            call_id,
+                            name: tool_name,
+                            state: if event.kind == "tool_call_started" {
+                                ToolRowState::Running
+                            } else {
+                                ToolRowState::Pending
+                            },
+                            desc,
+                            arguments,
+                            metadata: payload.get("metadata").cloned(),
+                        });
+                    }
+                    self.push_tool_part(call_id.to_string());
+                    self.refresh_active_tool();
+                }
+            }
+            "tool_call_settled" | "assistant_message_updated" => {
+                self.apply_replayed_event(&event);
+            }
             "tool_executed" => {
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
                 {
@@ -502,46 +569,6 @@ impl App {
                             }
                         }
                     }
-                }
-            }
-            "tool_call_settled" => {
-                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
-                {
-                    let call_id = payload
-                        .get("call_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let tool_name = payload
-                        .get("tool_name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("tool");
-                    let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                    let success = status == "completed";
-                    let output = payload
-                        .get("result")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| payload.get("error").and_then(|v| v.as_str()))
-                        .unwrap_or("");
-                    if !self.complete_tool_row(call_id, tool_name, success, output) {
-                        let args = payload.get("arguments");
-                        let arguments = args.map(serde_json::Value::to_string).unwrap_or_default();
-                        let (_verb, _active_verb, desc) = tool_target_and_verbs(tool_name, args);
-                        self.upsert_tool_row(ToolRowUpdate {
-                            call_id,
-                            name: tool_name,
-                            state: if success {
-                                ToolRowState::Completed
-                            } else {
-                                ToolRowState::Failed
-                            },
-                            desc,
-                            arguments,
-                            metadata: None,
-                        });
-                        self.complete_tool_row(call_id, tool_name, success, output);
-                    }
-                    self.push_tool_part(call_id.to_string());
-                    self.refresh_active_tool();
                 }
             }
             _ => {}
