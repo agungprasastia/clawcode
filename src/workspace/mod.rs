@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub use files::{FileSystem, RealFileSystem};
+pub(crate) use files::temporary_sibling;
 pub use policy::{Mode, Operation, Policy, PolicyDecision, Risk};
 pub use root::WorkspaceRoot;
 pub use shell::classify_shell;

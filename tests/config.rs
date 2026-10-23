@@ -451,3 +451,135 @@ fn rejects_mcp_server_without_transport() {
     };
     assert!(message.contains("needs a command or url"), "{message}");
 }
+
+#[test]
+fn parses_opencode_and_tui_settings_fields() {
+    use clawcode::config::{
+        MarkdownMode, ThinkingDisplay, ToolGrouping, TranscriptVerbosity, TurnTokensMode,
+    };
+
+    let source = r#"{
+      "schema_version": 1,
+      "animations": false,
+      "mouse": false,
+      "session": {
+        "thinking": "show",
+        "grouping": "none",
+        "verbosity": "high",
+        "markdown": "source",
+        "tps": false,
+        "scrollbar": false
+      },
+      "scroll": {
+        "speed": 5,
+        "acceleration": true
+      },
+      "leader": {
+        "timeout": 3500
+      },
+      "debug": {
+        "turn_tokens": "verbose"
+      },
+      "provider": {
+        "openai": {
+          "models": {
+            "gpt-5": {
+              "variants": ["low", "medium", "high"]
+            }
+          }
+        }
+      }
+    }"#;
+
+    let config = ConfigLoader.parse_str("clawcode.jsonc", source).unwrap();
+    assert!(!config.tui.animations);
+    assert!(!config.tui.mouse);
+    assert_eq!(config.tui.thinking, ThinkingDisplay::Show);
+    assert_eq!(config.tui.grouping, ToolGrouping::None);
+    assert_eq!(config.tui.verbosity, TranscriptVerbosity::High);
+    assert_eq!(config.tui.markdown, MarkdownMode::Source);
+    assert!(!config.tui.tps);
+    assert!(!config.tui.scrollbar);
+    assert_eq!(config.tui.scroll_speed, 5);
+    assert!(config.tui.scroll_acceleration);
+    assert_eq!(config.tui.leader_timeout_ms, 3500);
+    assert_eq!(config.tui.turn_tokens, TurnTokensMode::Verbose);
+
+    let model = &config.providers["openai"].models["gpt-5"];
+    assert_eq!(model.variants, vec!["low", "medium", "high"]);
+}
+
+#[test]
+fn save_tui_settings_preserves_existing_fields_comments_and_roundtrips() {
+    use clawcode::config::{
+        MarkdownMode, ThinkingDisplay, ToolGrouping, TranscriptVerbosity, TuiSettingsConfig,
+        TurnTokensMode,
+    };
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "clawcode_cfg_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let cfg_path = temp_dir.join("clawcode.jsonc");
+    std::fs::write(
+        &cfg_path,
+        r#"{
+  // Keep user comment intact
+  "schema_version": 1,
+  "model": "openai/o3-mini",
+  "api_key": "env:OPENAI_API_KEY",
+}
+"#,
+    )
+    .unwrap();
+
+    let updated = TuiSettingsConfig {
+        animations: false,
+        thinking: ThinkingDisplay::Show,
+        grouping: ToolGrouping::None,
+        verbosity: TranscriptVerbosity::Low,
+        markdown: MarkdownMode::Source,
+        tps: false,
+        scrollbar: false,
+        scroll_speed: 6,
+        scroll_acceleration: true,
+        mouse: false,
+        leader_timeout_ms: 1500,
+        turn_tokens: TurnTokensMode::Compact,
+    };
+
+    Config::save_tui_settings(&cfg_path, &updated).unwrap();
+
+    let raw = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(raw.contains("// Keep user comment intact"), "{raw}");
+
+    let reloaded = ConfigLoader
+        .parse_str(cfg_path.display().to_string(), &raw)
+        .unwrap();
+    assert_eq!(reloaded.model.as_deref(), Some("openai/o3-mini"));
+    assert_eq!(
+        reloaded.api_key,
+        Some(SecretRef::Env("OPENAI_API_KEY".into()))
+    );
+    assert_eq!(reloaded.tui, updated);
+
+    // Update a second time to verify in-place replacement of existing `tui` block.
+    let mut updated_again = updated;
+    updated_again.verbosity = TranscriptVerbosity::High;
+    updated_again.animations = true;
+    Config::save_tui_settings(&cfg_path, &updated_again).unwrap();
+
+    let raw2 = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(raw2.contains("// Keep user comment intact"), "{raw2}");
+    let reloaded2 = ConfigLoader
+        .parse_str(cfg_path.display().to_string(), &raw2)
+        .unwrap();
+    assert_eq!(reloaded2.tui, updated_again);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
