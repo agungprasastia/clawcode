@@ -404,3 +404,96 @@ fn configured_router_trims_env_api_keys() {
     let (_, _, key, _) = router.resolve_provider(&req);
     assert_eq!(key, None);
 }
+
+#[test]
+fn openai_adapter_serializes_reasoning_effort_when_variant_set() {
+    let transport = CaptureTransport::new(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\ndata: [DONE]\n",
+    );
+    let provider = OpenAiCompatible::new(
+        "openai",
+        "https://example.test/v1/chat/completions",
+        transport.clone(),
+    );
+
+    let req_high = StreamRequest::new("o3-mini", "hi", 4096).with_variant(Some("high".into()));
+    let _ = provider.send(&req_high).unwrap();
+    let body_high: serde_json::Value =
+        serde_json::from_str(&transport.last_body().unwrap()).unwrap();
+    assert_eq!(body_high["reasoning_effort"], "high");
+
+    let req_default =
+        StreamRequest::new("o3-mini", "hi", 4096).with_variant(Some("default".into()));
+    let _ = provider.send(&req_default).unwrap();
+    let body_default: serde_json::Value =
+        serde_json::from_str(&transport.last_body().unwrap()).unwrap();
+    assert!(body_default.get("reasoning_effort").is_none());
+
+    let req_none = StreamRequest::new("o3-mini", "hi", 4096).with_variant(None);
+    let _ = provider.send(&req_none).unwrap();
+    let body_none: serde_json::Value =
+        serde_json::from_str(&transport.last_body().unwrap()).unwrap();
+    assert!(body_none.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn anthropic_adapter_serializes_thinking_budget_when_variant_set() {
+    let transport = CaptureTransport::new("data: {\"delta\":{\"text\":\"ok\"}}\n\n");
+    let provider = Anthropic::new(
+        "anthropic",
+        "https://api.anthropic.com/v1/messages",
+        transport.clone(),
+    );
+
+    let req_med =
+        StreamRequest::new("claude-sonnet-4-0", "hi", 4096).with_variant(Some("medium".into()));
+    let _ = provider.send(&req_med).unwrap();
+    let body_med: serde_json::Value =
+        serde_json::from_str(&transport.last_body().unwrap()).unwrap();
+    assert_eq!(body_med["thinking"]["type"], "enabled");
+    assert_eq!(body_med["thinking"]["budget_tokens"], 4096);
+    assert!(body_med["max_tokens"].as_u64().unwrap() > 4096);
+
+    let req_default =
+        StreamRequest::new("claude-sonnet-4-0", "hi", 4096).with_variant(Some("default".into()));
+    let _ = provider.send(&req_default).unwrap();
+    let body_default: serde_json::Value =
+        serde_json::from_str(&transport.last_body().unwrap()).unwrap();
+    assert!(body_default.get("thinking").is_none());
+}
+
+#[test]
+fn available_variants_resolves_custom_and_reasoning_models() {
+    assert_eq!(
+        clawcode::provider::available_variants_for_model("openai", "o3-mini", None),
+        vec!["default", "low", "medium", "high"]
+    );
+    assert_eq!(
+        clawcode::provider::available_variants_for_model("anthropic", "claude-sonnet-4-0", None),
+        vec!["default", "low", "medium", "high"]
+    );
+    assert_eq!(
+        clawcode::provider::available_variants_for_model("openai", "gpt-4o-mini", None),
+        vec!["default"]
+    );
+
+    let mut config = clawcode::config::Config::default();
+    let mut custom_provider = clawcode::config::CustomProviderConfig::default();
+    custom_provider.models.insert(
+        "custom-reasoner".into(),
+        clawcode::config::CustomModelConfig {
+            variants: vec!["minimal".into(), "max".into()],
+            ..Default::default()
+        },
+    );
+    config.providers.insert("myrouter".into(), custom_provider);
+
+    assert_eq!(
+        clawcode::provider::available_variants_for_model(
+            "myrouter",
+            "custom-reasoner",
+            Some(&config)
+        ),
+        vec!["default", "minimal", "max"]
+    );
+}

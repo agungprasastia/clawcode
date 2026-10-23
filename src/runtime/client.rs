@@ -1337,6 +1337,7 @@ fn run_generation(
             messages: messages.clone(),
             provider: Some(provider_name.to_string()),
             tools: tools.clone(),
+            variant: None,
         };
 
         let mut stream = match runtime.provider.stream(&request) {
