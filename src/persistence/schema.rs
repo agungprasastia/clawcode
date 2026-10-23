@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 
 /// Current persistence schema version.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Apply all migrations up to [`SCHEMA_VERSION`]. Idempotent.
 pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
@@ -239,6 +239,18 @@ pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
                  UNIQUE(project_id, action, resource)
              );
              PRAGMA user_version = 9;
+             COMMIT;",
+        )?;
+    }
+    if current < 10 {
+        connection.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS kv_state (
+                 key TEXT PRIMARY KEY,
+                 value_json TEXT NOT NULL,
+                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+             );
+             PRAGMA user_version = 10;
              COMMIT;",
         )?;
     }

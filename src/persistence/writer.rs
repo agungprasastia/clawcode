@@ -75,6 +75,22 @@ enum Command {
         input_id: i64,
         reply: mpsc::Sender<Result<(SessionInput, Message, i64), String>>,
     },
+    UpdateInputDelivery {
+        session_id: i64,
+        input_id: i64,
+        delivery: InputDelivery,
+        reply: mpsc::Sender<Result<Option<(SessionInput, i64)>, String>>,
+    },
+    DiscardPendingInput {
+        session_id: i64,
+        input_id: i64,
+        reply: mpsc::Sender<Result<Option<(SessionInput, i64)>, String>>,
+    },
+    SetKv {
+        key: String,
+        value_json: String,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     InsertContextEpoch {
         session_id: i64,
         epoch_id: String,
@@ -212,6 +228,43 @@ impl WriterHandle {
                         flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
                             db.promote_input(input_id)
+                                .map_err(|error| error.to_string()),
+                        );
+                    }
+                    Command::UpdateInputDelivery {
+                        session_id,
+                        input_id,
+                        delivery,
+                        reply,
+                    } => {
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
+                        let _ = reply.send(
+                            db.update_input_delivery(session_id, input_id, delivery)
+                                .map_err(|error| error.to_string()),
+                        );
+                    }
+                    Command::DiscardPendingInput {
+                        session_id,
+                        input_id,
+                        reply,
+                    } => {
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
+                        let _ = reply.send(
+                            db.discard_pending_input(session_id, input_id)
+                                .map_err(|error| error.to_string()),
+                        );
+                    }
+                    Command::SetKv {
+                        key,
+                        value_json,
+                        reply,
+                    } => {
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
+                        let _ = reply.send(
+                            db.set_kv(&key, &value_json)
                                 .map_err(|error| error.to_string()),
                         );
                     }
@@ -379,6 +432,43 @@ impl WriterHandle {
                             flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
                                 db.promote_input(input_id)
+                                    .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::UpdateInputDelivery {
+                            session_id,
+                            input_id,
+                            delivery,
+                            reply,
+                        } => {
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
+                            let _ = reply.send(
+                                db.update_input_delivery(session_id, input_id, delivery)
+                                    .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::DiscardPendingInput {
+                            session_id,
+                            input_id,
+                            reply,
+                        } => {
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
+                            let _ = reply.send(
+                                db.discard_pending_input(session_id, input_id)
+                                    .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::SetKv {
+                            key,
+                            value_json,
+                            reply,
+                        } => {
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
+                            let _ = reply.send(
+                                db.set_kv(&key, &value_json)
                                     .map_err(|error| error.to_string()),
                             );
                         }
@@ -621,6 +711,58 @@ impl WriterHandle {
         self.sender()?
             .try_send(Command::PromoteInput {
                 input_id,
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn update_input_delivery(
+        &self,
+        session_id: i64,
+        input_id: i64,
+        delivery: InputDelivery,
+    ) -> Result<Option<(SessionInput, i64)>, String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::UpdateInputDelivery {
+                session_id,
+                input_id,
+                delivery,
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn discard_pending_input(
+        &self,
+        session_id: i64,
+        input_id: i64,
+    ) -> Result<Option<(SessionInput, i64)>, String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::DiscardPendingInput {
+                session_id,
+                input_id,
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn set_kv(&self, key: &str, value_json: &str) -> Result<(), String> {
+        if value_json.len() > MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
+                value_json.len()
+            ));
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::SetKv {
+                key: key.to_string(),
+                value_json: value_json.to_string(),
                 reply: reply_tx,
             })
             .map_err(|error| error.to_string())?;

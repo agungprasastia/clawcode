@@ -1297,3 +1297,112 @@ fn v5_database_migrates_to_v6_context_epochs() {
     assert_eq!(epoch.epoch_id, "epoch-1");
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn kv_state_roundtrips_overwrites_and_migrates_from_v9() {
+    let path = temp_db_path("v9_to_v10_kv_state");
+    {
+        let _db = Db::open(&path).unwrap();
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE IF EXISTS kv_state; PRAGMA user_version = 9;")
+            .unwrap();
+    }
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.schema_version(), 10);
+    assert_eq!(db.get_kv("model.favorites").unwrap(), None);
+
+    db.set_kv("model.favorites", r#"["openai/gpt-4o"]"#)
+        .unwrap();
+    assert_eq!(
+        db.get_kv("model.favorites").unwrap().as_deref(),
+        Some(r#"["openai/gpt-4o"]"#)
+    );
+
+    let writer = WriterHandle::spawn(db);
+    writer
+        .set_kv(
+            "model.favorites",
+            r#"["openai/gpt-4o","anthropic/claude-sonnet-4-0"]"#,
+        )
+        .unwrap();
+    let db = writer.shutdown().unwrap();
+    assert_eq!(
+        db.get_kv("model.favorites").unwrap().as_deref(),
+        Some(r#"["openai/gpt-4o","anthropic/claude-sonnet-4-0"]"#)
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn steer_prioritized_ahead_of_queued_inputs_and_discard_skips_promoted() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("inbox_steer_discard").unwrap();
+    let other_session = db.create_session("other_session").unwrap();
+    let writer = WriterHandle::spawn(db);
+
+    let (first, _) = writer
+        .admit_input(session.id, "first queued", InputDelivery::Queue)
+        .unwrap();
+    let (second, _) = writer
+        .admit_input(session.id, "second queued", InputDelivery::Queue)
+        .unwrap();
+    let (third, _) = writer
+        .admit_input(session.id, "third steered", InputDelivery::Queue)
+        .unwrap();
+
+    // Wrong session id returns None without mutating.
+    assert!(
+        writer
+            .update_input_delivery(other_session.id, third.id, InputDelivery::Steer)
+            .unwrap()
+            .is_none()
+    );
+
+    let (updated_third, update_seq) = writer
+        .update_input_delivery(session.id, third.id, InputDelivery::Steer)
+        .unwrap()
+        .expect("pending input should update to steer");
+    assert_eq!(updated_third.delivery, InputDelivery::Steer);
+    assert!(update_seq > 0);
+
+    let db = writer.shutdown().unwrap();
+    let pending = db.pending_session_inputs(session.id).unwrap();
+    let pending_ids: Vec<i64> = pending.iter().map(|row| row.id).collect();
+    assert_eq!(pending_ids, vec![third.id, first.id, second.id]);
+
+    let next = db.next_pending_input(session.id).unwrap().unwrap();
+    assert_eq!(next.id, third.id);
+
+    let (promoted_third, _, _) = db.promote_input(third.id).unwrap();
+    assert_eq!(promoted_third.status, InputStatus::Promoted);
+
+    let writer = WriterHandle::spawn(db);
+    // Discarding an already-promoted input safely returns Ok(None).
+    assert!(
+        writer
+            .discard_pending_input(session.id, third.id)
+            .unwrap()
+            .is_none()
+    );
+
+    // Discarding a pending input marks it discarded and emits prompt_discarded.
+    let (discarded_first, discard_seq) = writer
+        .discard_pending_input(session.id, first.id)
+        .unwrap()
+        .expect("pending input should discard");
+    assert_eq!(discarded_first.status, InputStatus::Discarded);
+    assert!(discard_seq > update_seq);
+
+    let db = writer.shutdown().unwrap();
+    let remaining = db.pending_session_inputs(session.id).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, second.id);
+
+    let events = db.events_after(session.id, -1).unwrap();
+    assert!(events.iter().any(|event| event.kind == "prompt_updated"));
+    assert!(events.iter().any(|event| event.kind == "prompt_discarded"));
+}

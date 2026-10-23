@@ -735,6 +735,35 @@ impl Db {
         )
     }
 
+    /// Read a JSON value from the durable `kv_state` store.
+    pub fn get_kv(&self, key: &str) -> Result<Option<String>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT value_json FROM kv_state WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Upsert a JSON value in the durable `kv_state` store.
+    pub fn set_kv(&self, key: &str, value_json: &str) -> Result<(), rusqlite::Error> {
+        if value_json.len() > MAX_MESSAGE_BYTES {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                MessageTooLarge(value_json.len()),
+            )));
+        }
+        self.connection.execute(
+            "INSERT INTO kv_state (key, value_json, updated_at)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+             ON CONFLICT(key) DO UPDATE SET
+                 value_json = excluded.value_json,
+                 updated_at = excluded.updated_at",
+            params![key, value_json],
+        )?;
+        Ok(())
+    }
+
     /// Fetch one session input by row id.
     pub fn session_input(&self, id: i64) -> Result<Option<SessionInput>, rusqlite::Error> {
         self.connection
@@ -757,7 +786,22 @@ impl Db {
         rows.collect()
     }
 
-    /// Fetch the next pending input for a session in admission order.
+    /// Fetch pending session inputs in execution priority order (`steer` ahead of `queue`, then `id`).
+    pub fn pending_session_inputs(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<SessionInput>, rusqlite::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, content, delivery, status, created_at, promoted_at, user_message_id
+             FROM session_inputs
+             WHERE session_id = ?1 AND status = 'pending'
+             ORDER BY CASE WHEN delivery = 'steer' THEN 0 ELSE 1 END, id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id], session_input_from_row)?;
+        rows.collect()
+    }
+
+    /// Fetch the next pending input for a session (`steer` ahead of `queue`, then admission order).
     pub fn next_pending_input(
         &self,
         session_id: i64,
@@ -765,7 +809,10 @@ impl Db {
         self.connection
             .query_row(
                 "SELECT id, session_id, content, delivery, status, created_at, promoted_at, user_message_id
-                 FROM session_inputs WHERE session_id = ?1 AND status = 'pending' ORDER BY id LIMIT 1",
+                 FROM session_inputs
+                 WHERE session_id = ?1 AND status = 'pending'
+                 ORDER BY CASE WHEN delivery = 'steer' THEN 0 ELSE 1 END, id ASC
+                 LIMIT 1",
                 params![session_id],
                 session_input_from_row,
             )
@@ -862,6 +909,71 @@ impl Db {
         let seq = append_event_in_transaction(&tx, session_id, None, "prompt_promoted", &payload)?;
         tx.commit()?;
         Ok((input, message, seq))
+    }
+
+    /// Atomically update a pending input's delivery mode (`queue` / `steer`) and record `prompt_updated`.
+    /// Returns `Ok(None)` if the input is not pending or does not belong to `session_id`.
+    pub fn update_input_delivery(
+        &self,
+        session_id: i64,
+        input_id: i64,
+        delivery: InputDelivery,
+    ) -> Result<Option<(SessionInput, i64)>, rusqlite::Error> {
+        let tx = self.write_transaction()?;
+        let updated = tx
+            .query_row(
+                "UPDATE session_inputs
+                 SET delivery = ?1
+                 WHERE id = ?2 AND session_id = ?3 AND status = 'pending'
+                 RETURNING id, session_id, content, delivery, status, created_at, promoted_at, user_message_id",
+                params![delivery.as_str(), input_id, session_id],
+                session_input_from_row,
+            )
+            .optional()?;
+        let Some(input) = updated else {
+            return Ok(None);
+        };
+        let payload = serde_json::json!({
+            "input_id": input.id,
+            "session_id": session_id,
+            "delivery": delivery.as_str(),
+        })
+        .to_string();
+        let seq = append_event_in_transaction(&tx, session_id, None, "prompt_updated", &payload)?;
+        tx.commit()?;
+        Ok(Some((input, seq)))
+    }
+
+    /// Atomically mark a pending input `discarded` and record `prompt_discarded`.
+    /// Returns `Ok(None)` if the input is already promoted/discarded or does not belong to `session_id`.
+    pub fn discard_pending_input(
+        &self,
+        session_id: i64,
+        input_id: i64,
+    ) -> Result<Option<(SessionInput, i64)>, rusqlite::Error> {
+        let tx = self.write_transaction()?;
+        let updated = tx
+            .query_row(
+                "UPDATE session_inputs
+                 SET status = 'discarded'
+                 WHERE id = ?1 AND session_id = ?2 AND status = 'pending'
+                 RETURNING id, session_id, content, delivery, status, created_at, promoted_at, user_message_id",
+                params![input_id, session_id],
+                session_input_from_row,
+            )
+            .optional()?;
+        let Some(input) = updated else {
+            return Ok(None);
+        };
+        let payload = serde_json::json!({
+            "input_id": input.id,
+            "session_id": session_id,
+            "content": input.content,
+        })
+        .to_string();
+        let seq = append_event_in_transaction(&tx, session_id, None, "prompt_discarded", &payload)?;
+        tx.commit()?;
+        Ok(Some((input, seq)))
     }
     /// Fetch one durable local tool call by row id.
     pub fn tool_call(&self, id: i64) -> Result<Option<ToolCall>, rusqlite::Error> {
