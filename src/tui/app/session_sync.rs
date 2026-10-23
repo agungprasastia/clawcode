@@ -6,6 +6,7 @@ use super::util::bounded;
 use super::{App, ConversationStatus, MAX_DIAGNOSTIC_BYTES, StreamPart};
 use crate::provider::FinishReason;
 use crate::runtime::RuntimeEvent;
+use crate::tui::dialogs::PendingPromptItem;
 
 /// View state isolated per session: switching sessions must not reset the
 /// draft, transcript, or scroll position of either side.
@@ -27,6 +28,7 @@ pub struct ClientSessionState {
     pub stream_base_len: Option<usize>,
     pub expanded_tool_rows: HashSet<String>,
     pub collapsed_tool_rows: HashSet<String>,
+    pub pending_prompts: Vec<PendingPromptItem>,
 }
 
 impl Default for ClientSessionState {
@@ -48,6 +50,7 @@ impl Default for ClientSessionState {
             stream_base_len: None,
             expanded_tool_rows: HashSet::new(),
             collapsed_tool_rows: HashSet::new(),
+            pending_prompts: Vec::new(),
         }
     }
 }
@@ -80,6 +83,7 @@ impl App {
         state.stream_base_len = self.stream_base_len;
         state.expanded_tool_rows = std::mem::take(&mut self.expanded_tool_rows);
         state.collapsed_tool_rows = std::mem::take(&mut self.collapsed_tool_rows);
+        state.pending_prompts = std::mem::take(&mut self.pending_prompts);
     }
 
     /// Restore the target session's state into the live view fields.
@@ -101,6 +105,20 @@ impl App {
         self.stream_base_len = state.stream_base_len;
         self.expanded_tool_rows = std::mem::take(&mut state.expanded_tool_rows);
         self.collapsed_tool_rows = std::mem::take(&mut state.collapsed_tool_rows);
+        self.pending_prompts = std::mem::take(&mut state.pending_prompts);
+        if self.pending_prompts.is_empty()
+            && let Some(runtime) = self.runtime.as_ref()
+            && let Ok(pending) = runtime.pending_inputs(session_id)
+        {
+            self.pending_prompts = pending
+                .into_iter()
+                .map(|input| PendingPromptItem {
+                    id: input.id,
+                    content: input.content,
+                    delivery: input.delivery.as_str().to_string(),
+                })
+                .collect();
+        }
         self.tool_rows = std::mem::take(&mut state.tool_rows);
         self.refresh_active_tool();
         self.metrics = None;

@@ -15,7 +15,7 @@ use super::app::{
 };
 use super::render::{
     identity_label, input_card_height, mode_label, render_command_popup, render_hints_row,
-    render_input_card, status_label,
+    render_input_card, render_pending_prompts_strip, status_label,
 };
 use super::theme::Theme;
 
@@ -24,7 +24,7 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let has_gap = area.height >= 16;
+    let has_gap = area.height >= 16 || !app.pending_prompts().is_empty();
     let input_height = input_card_height(app, area.width).min(area.height.saturating_sub(9).max(5));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -349,6 +349,9 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         }
     }
 
+    if !app.pending_prompts().is_empty() {
+        render_pending_prompts_strip(frame, chunks[2], app, theme, mode_color);
+    }
     render_input_card(frame, chunks[3], app, theme, mode_color);
     render_command_popup(frame, chunks[3], app, theme);
     render_hints_row(frame, chunks[4], app, theme);
@@ -1020,6 +1023,20 @@ fn render_shell_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
                 lines.push(pad_card_line(hint_line, card_width, theme.bg_element));
                 tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
             }
+        }
+
+        if row.state == ToolRowState::Running
+            && row.started_at.elapsed() >= std::time::Duration::from_secs(3)
+        {
+            let bg_hint = Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "Ctrl+B to run in background",
+                    Style::default().fg(theme.dim),
+                ),
+            ]);
+            lines.push(pad_card_line(bg_hint, card_width, theme.bg_element));
+            tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
         }
 
         // Line 3: empty padding line

@@ -305,11 +305,11 @@ pub fn render_settings_dialog(
 
     let search_line = if dialog.filter.is_empty() {
         Line::from(vec![
-            Span::styled("Filter: ", Style::default().fg(theme.dim)),
+            Span::styled("Filter: ", Style::default().fg(theme.teal)),
             Span::styled(
                 "type to filter settings...",
                 Style::default()
-                    .fg(theme.quiet)
+                    .fg(theme.ink)
                     .add_modifier(Modifier::ITALIC),
             ),
         ])
@@ -353,7 +353,7 @@ pub fn render_settings_dialog(
         vec![Line::from(Span::styled(
             format!("  No settings matching \"{}\"", dialog.filter),
             Style::default()
-                .fg(theme.dim)
+                .fg(theme.ink)
                 .add_modifier(Modifier::ITALIC),
         ))]
     } else {
@@ -402,7 +402,12 @@ pub fn render_settings_dialog(
                 Line::from(vec![
                     Span::styled(cursor, Style::default().fg(theme.teal)),
                     Span::styled(key.title(), title_style),
-                    Span::styled(desc, Style::default().fg(theme.dim)),
+                    Span::styled(
+                        desc,
+                        Style::default()
+                            .fg(theme.ink)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
                     Span::raw(" ".repeat(gap)),
                     Span::styled(value_pill, value_style),
                 ])
@@ -425,17 +430,17 @@ pub fn render_settings_dialog(
             "↑/↓ ",
             Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("navigate  ", Style::default().fg(theme.dim)),
+        Span::styled("navigate  ", Style::default().fg(theme.ink)),
         Span::styled(
             "←/→/Enter ",
             Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("change  ", Style::default().fg(theme.dim)),
+        Span::styled("change  ", Style::default().fg(theme.ink)),
         Span::styled(
             "Esc ",
             Style::default().fg(theme.teal).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("close", Style::default().fg(theme.dim)),
+        Span::styled("close", Style::default().fg(theme.ink)),
     ]);
     frame.render_widget(Paragraph::new(footer), chunks[4]);
 }

@@ -41,6 +41,7 @@ impl App {
             self.tool_rows.clear();
             self.expanded_tool_rows.clear();
             self.collapsed_tool_rows.clear();
+            self.pending_prompts.clear();
         }
         for row in &mut self.tool_rows {
             if matches!(row.state, ToolRowState::Pending | ToolRowState::Running) {

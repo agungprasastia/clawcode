@@ -1,12 +1,11 @@
 use super::App;
-use super::util::{bounded, ceil_char_boundary, find_user_turn_boundary, split_provider_model};
-use super::{
-    ConversationMode, ConversationStatus, Input, InputEditKind, MAX_IDENTITY_BYTES, StreamPart,
-};
+use super::util::{ceil_char_boundary, find_user_turn_boundary};
+use super::{ConversationMode, ConversationStatus, Input, InputEditKind, StreamPart};
 use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
 use crate::conversation::ConversationEvent;
 use crate::platform::SystemClipboard;
-use crate::tui::dialogs::{AgentsDialogState, ThemesDialogState};
+use crate::runtime::client::GenerationRequest;
+use crate::tui::dialogs::{AgentsDialogState, PendingPromptItem, ThemesDialogState};
 
 impl App {
     const MAX_INPUT_UNDO: usize = 100;
@@ -158,6 +157,9 @@ impl App {
         self.clear_input_history();
         let trimmed_start = input.trim_start();
         if trimmed_start.is_empty() {
+            if !self.pending_prompts.is_empty() {
+                self.steer_first_queued_prompt();
+            }
             return;
         }
         let is_slash = trimmed_start.starts_with('/');
@@ -317,6 +319,53 @@ impl App {
                     format!("thinking display: {}", self.tui_settings.thinking.as_str());
                 return;
             }
+            if trimmed == "/queued" {
+                self.open_queued_prompts_dialog();
+                return;
+            }
+            if trimmed == "/stash" || trimmed == "/stash list" {
+                self.open_stash_dialog();
+                return;
+            }
+            if trimmed == "/stash pop" {
+                self.pop_stash_to_prompt(0);
+                return;
+            }
+            if let Some(rest) = trimmed.strip_prefix("/stash push") {
+                let text = rest.trim();
+                if text.is_empty() {
+                    self.diagnostic =
+                        "usage: /stash push <text> (or use Palette -> Stash prompt)".to_string();
+                } else {
+                    self.prompt = text.to_string();
+                    self.stash_current_prompt();
+                }
+                return;
+            }
+            if trimmed == "/variant" {
+                self.open_variants_dialog();
+                return;
+            }
+            if let Some(arg) = trimmed.strip_prefix("/variant ") {
+                let v = arg.trim();
+                if v.is_empty() {
+                    self.open_variants_dialog();
+                } else if v.eq_ignore_ascii_case("default")
+                    || v.eq_ignore_ascii_case("off")
+                    || v.eq_ignore_ascii_case("none")
+                {
+                    self.set_active_variant(None);
+                } else {
+                    self.set_active_variant(Some(v.to_string()));
+                }
+                return;
+            }
+            if trimmed == "/background" {
+                if !self.background_running_tools() {
+                    self.diagnostic = "no running foreground shell to background".to_string();
+                }
+                return;
+            }
             if let Some(stripped) = trimmed.strip_prefix("/model ") {
                 let arg = stripped.trim();
                 let chosen = if let Some(suggestion) = model_suggestions.get(selected_idx) {
@@ -327,12 +376,7 @@ impl App {
                     model_suggestions.first().cloned()
                 };
                 if let Some(chosen) = chosen {
-                    if let Some((provider, model)) = split_provider_model(&chosen) {
-                        self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
-                        self.model = bounded(model.to_string(), MAX_IDENTITY_BYTES);
-                    } else {
-                        self.model = bounded(chosen.clone(), MAX_IDENTITY_BYTES);
-                    }
+                    self.select_provider_and_model(&chosen);
                     self.diagnostic = format!("model switched to: {chosen}");
                     return;
                 }
@@ -378,21 +422,94 @@ impl App {
     }
 
     pub fn submit_user_prompt(&mut self, prompt: &str) {
-        if self.status == ConversationStatus::Active || self.active_generation_id.is_some() {
-            self.request_runtime_cancel();
+        if prompt.len() > crate::persistence::MAX_MESSAGE_BYTES {
+            self.diagnostic = format!(
+                "message too large: {} bytes (max {})",
+                prompt.len(),
+                crate::persistence::MAX_MESSAGE_BYTES
+            );
+            return;
         }
+
+        let has_live_turn_driver = self.runtime.is_some()
+            || self.runtime_events.is_some()
+            || self.active_generation_id.is_some();
+        let is_active = self.status == ConversationStatus::Active && has_live_turn_driver;
+        if is_active {
+            let provider = if self.provider.is_empty() {
+                "anthropic".to_string()
+            } else {
+                self.provider.clone()
+            };
+            let model = if self.model.is_empty() {
+                "claude-3-7-sonnet".to_string()
+            } else {
+                self.model.clone()
+            };
+            let agent_mode = match self.mode {
+                ConversationMode::Plan => "plan",
+                ConversationMode::Build => "build",
+            };
+            let variant = self.active_variant().map(ToString::to_string);
+
+            if let Some(runtime) = self.runtime.as_ref() {
+                let Some(session_id) = self.active_session_id else {
+                    return;
+                };
+                match runtime.start_generation_admitted_request(GenerationRequest {
+                    session_id,
+                    agent_mode,
+                    provider: &provider,
+                    model: &model,
+                    variant: variant.as_deref(),
+                    prompt,
+                    mcp: None,
+                }) {
+                    Ok(input_id) => {
+                        if let Ok(pending) = runtime.pending_inputs(session_id)
+                            && !pending.is_empty()
+                        {
+                            self.pending_prompts = pending
+                                .into_iter()
+                                .map(|item| PendingPromptItem {
+                                    id: item.id,
+                                    content: item.content,
+                                    delivery: item.delivery.as_str().to_string(),
+                                })
+                                .collect();
+                        } else if !self.pending_prompts.iter().any(|p| p.id == input_id) {
+                            self.pending_prompts.push(PendingPromptItem {
+                                id: input_id,
+                                content: prompt.to_string(),
+                                delivery: "queue".to_string(),
+                            });
+                        }
+                        self.diagnostic =
+                            "prompt queued (Enter on empty input to steer, /queued to manage)"
+                                .to_string();
+                    }
+                    Err(error) => {
+                        self.diagnostic = error;
+                    }
+                }
+            } else {
+                let id = self.next_local_input_id;
+                self.next_local_input_id += 1;
+                self.pending_prompts.push(PendingPromptItem {
+                    id,
+                    content: prompt.to_string(),
+                    delivery: "queue".to_string(),
+                });
+                self.diagnostic =
+                    "prompt queued (Enter on empty input to steer, /queued to manage)".to_string();
+            }
+            return;
+        }
+
         self.reset_turn_view(false);
         self.status = ConversationStatus::Idle;
         self.session_listings.clear();
         if self.runtime.is_some() {
-            if prompt.len() > crate::persistence::MAX_MESSAGE_BYTES {
-                self.diagnostic = format!(
-                    "message too large: {} bytes (max {})",
-                    prompt.len(),
-                    crate::persistence::MAX_MESSAGE_BYTES
-                );
-                return;
-            }
             if self.active_session_id.is_none()
                 && let Some(runtime) = self.runtime.as_ref()
                 && let Ok(id) = runtime.create_session(1, prompt)
@@ -417,10 +534,18 @@ impl App {
                 ConversationMode::Plan => "plan",
                 ConversationMode::Build => "build",
             };
+            let variant = self.active_variant().map(ToString::to_string);
 
             if let Some(runtime) = self.runtime.as_ref()
-                && let Err(error) =
-                    runtime.start_generation(session_id, agent_mode, &provider, &model, prompt)
+                && let Err(error) = runtime.start_generation_request(GenerationRequest {
+                    session_id,
+                    agent_mode,
+                    provider: &provider,
+                    model: &model,
+                    variant: variant.as_deref(),
+                    prompt,
+                    mcp: None,
+                })
             {
                 self.diagnostic = error;
                 return;
@@ -866,6 +991,13 @@ impl App {
             Input::Left => {
                 self.cursor_position = self.cursor_position.saturating_sub(1);
             }
+            Input::BackgroundOrLeft => {
+                if self.prompt.is_empty() && self.has_running_shell() {
+                    self.background_running_tools();
+                } else {
+                    self.cursor_position = self.cursor_position.saturating_sub(1);
+                }
+            }
             Input::Right => {
                 self.cursor_position = (self.cursor_position + 1).min(self.prompt.chars().count());
             }
@@ -895,9 +1027,7 @@ impl App {
             Input::PinSession => self.toggle_active_session_pinned(),
             Input::CycleModel => self.cycle_model(false),
             Input::CycleModelReverse => self.cycle_model(true),
-            Input::CycleVariant => {
-                self.diagnostic = "No model variants available.".to_string();
-            }
+            Input::CycleVariant => self.cycle_variant(),
             Input::SessionNext => self.cycle_session(true),
             Input::SessionPrevious => self.cycle_session(false),
             Input::ReopenTab => self.reopen_closed_session_tab(),

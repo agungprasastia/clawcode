@@ -12,11 +12,12 @@ use super::chat::render_chat;
 
 use super::App;
 use super::dialogs::{
-    render_agents_dialog, render_git_dialog, render_mcp_dialog, render_model_suggestions_popup,
-    render_models_dialog, render_palette_dialog, render_permission_dialog, render_question_dialog,
+    format_single_line_preview, render_agents_dialog, render_git_dialog, render_mcp_dialog,
+    render_model_suggestions_popup, render_models_dialog, render_palette_dialog,
+    render_permission_dialog, render_question_dialog, render_queued_prompts_dialog,
     render_session_rename_dialog, render_sessions_dialog, render_sessions_panel,
-    render_settings_dialog, render_skills_dialog, render_status_dialog, render_themes_dialog,
-    render_which_key,
+    render_settings_dialog, render_skills_dialog, render_stash_dialog, render_status_dialog,
+    render_themes_dialog, render_variants_dialog, render_which_key,
 };
 use super::home::render_home;
 use super::tabs::render_session_tabs;
@@ -82,6 +83,24 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         render_mcp_dialog(frame, area, dialog, &theme);
     } else if let Some(dialog) = app.settings_dialog() {
         render_settings_dialog(frame, area, dialog, app.tui_settings(), &theme);
+    } else if let Some(dialog) = app.queued_prompts_dialog() {
+        render_queued_prompts_dialog(frame, area, dialog, &theme);
+    } else if let Some(dialog) = app.stash_dialog() {
+        render_stash_dialog(frame, area, dialog, &theme);
+    } else if let Some(dialog) = app.variants_dialog() {
+        let model_label = if app.selected_model().is_empty() {
+            "default"
+        } else {
+            app.selected_model()
+        };
+        render_variants_dialog(
+            frame,
+            area,
+            dialog,
+            app.active_variant(),
+            model_label,
+            &theme,
+        );
     } else if let Some(dialog) = app.sessions_dialog() {
         render_sessions_dialog(frame, area, dialog, app.active_session_id(), &theme);
     } else if let Some(dialog) = app.agents_dialog() {
@@ -220,13 +239,18 @@ pub(crate) fn render_input_card(
         app.selected_model()
     };
 
+    let model_display = match app.active_variant() {
+        Some(variant) => format!("{model_text} · {variant}"),
+        None => model_text.to_string(),
+    };
+
     let mut meta_spans = vec![
         Span::styled(
             format!("[{}]", mode_label(app)),
             Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(model_text, Style::default().fg(theme.ink)),
+        Span::styled(model_display, Style::default().fg(theme.ink)),
         Span::raw("  "),
         Span::styled(provider_text, Style::default().fg(theme.quiet)),
     ];
@@ -608,11 +632,48 @@ pub(crate) fn status_label(app: &App) -> String {
 }
 
 pub(crate) fn identity_label(app: &App) -> String {
-    match (app.selected_provider(), app.selected_model()) {
-        ("", "") => "provider not connected".into(),
+    let base = match (app.selected_provider(), app.selected_model()) {
+        ("", "") => return "provider not connected".into(),
         (provider, "") => provider.to_owned(),
         (provider, model) => format!("{provider} / {model}"),
+    };
+    match app.active_variant() {
+        Some(variant) => format!("{base} · {variant}"),
+        None => base,
     }
+}
+
+pub(crate) fn render_pending_prompts_strip(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    mode_color: Color,
+) {
+    if area.width < 12 || area.height == 0 || app.pending_prompts().is_empty() {
+        return;
+    }
+    let count = app.pending_prompts().len();
+    let first = &app.pending_prompts()[0];
+    let has_steer = app.pending_prompts().iter().any(|p| p.delivery == "steer");
+    let prefix = format!("  {count} queued · ");
+    let suffix = if has_steer {
+        " · [steer] · /queued"
+    } else {
+        " · Enter steer · /queued"
+    };
+    let reserved = UnicodeWidthStr::width(prefix.as_str()) + UnicodeWidthStr::width(suffix) + 2;
+    let preview_budget = (area.width as usize).saturating_sub(reserved).max(4);
+    let preview = format_single_line_preview(&first.content, preview_budget);
+    let line = Line::from(vec![
+        Span::styled(
+            prefix,
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("\"{preview}\""), Style::default().fg(theme.ink)),
+        Span::styled(suffix, Style::default().fg(theme.quiet)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 pub(crate) fn render_command_popup(

@@ -64,6 +64,7 @@ impl App {
         let client = RuntimeClient::spawn_with_mcp(db, writer, provider, bus, mcp);
         self.runtime_events = Some(receiver);
         self.runtime = Some(client);
+        self.hydrate_kv_state();
         self.start_mcp_startup_probes();
     }
 
@@ -85,6 +86,25 @@ impl App {
         if let Some(session_id) = self.active_session_id
             && event.session_id != session_id
         {
+            if let Some(state) = self.sessions.get_mut(&event.session_id)
+                && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                && let Some(input_id) = payload.get("input_id").and_then(|v| v.as_i64())
+            {
+                match event.kind.as_str() {
+                    "prompt_updated" => {
+                        if let Some(delivery) = payload.get("delivery").and_then(|v| v.as_str())
+                            && let Some(item) =
+                                state.pending_prompts.iter_mut().find(|p| p.id == input_id)
+                        {
+                            item.delivery = delivery.to_string();
+                        }
+                    }
+                    "prompt_discarded" | "prompt_promoted" => {
+                        state.pending_prompts.retain(|p| p.id != input_id);
+                    }
+                    _ => {}
+                }
+            }
             return;
         }
         if event.seq > 0 {
@@ -126,8 +146,14 @@ impl App {
                             .map(|status| status == "cancelled")
                     })
                     .unwrap_or(false);
-            let is_session_event =
-                matches!(event.kind.as_str(), "prompt_admitted" | "prompt_promoted");
+            let is_session_event = matches!(
+                event.kind.as_str(),
+                "prompt_admitted"
+                    | "prompt_promoted"
+                    | "prompt_updated"
+                    | "prompt_discarded"
+                    | "tool_background_finished"
+            );
             if (ignored_generation && !cancellation_completion)
                 || (!is_session_event
                     && self
@@ -496,28 +522,28 @@ impl App {
                 }
                 self.active_generation_id = None;
                 self.refresh_active_tool();
-                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
-                    && let Some(status) = payload.get("status").and_then(|v| v.as_str())
-                {
-                    self.text_stream_active = false;
-                    let finish_reason = payload
-                        .get("finish_reason")
-                        .and_then(|v| v.as_str())
-                        .and_then(parse_finish_reason)
-                        .or_else(|| self.pending_finish_reason.take());
-                    let target_status = match status {
-                        "cancelled" => ConversationStatus::Cancelled,
-                        "failed" => ConversationStatus::Error,
-                        _ => ConversationStatus::Finished(
-                            finish_reason.unwrap_or(FinishReason::Stop),
-                        ),
-                    };
-                    if self.typewriter.is_typing() {
-                        self.typewriter.set_pending_status(target_status);
-                    } else {
-                        self.typewriter.reset();
-                        self.status = target_status;
-                    }
+                let payload = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                let status = payload
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("completed");
+                self.text_stream_active = false;
+                let finish_reason = payload
+                    .get("finish_reason")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_finish_reason)
+                    .or_else(|| self.pending_finish_reason.take());
+                let target_status = match status {
+                    "cancelled" => ConversationStatus::Cancelled,
+                    "failed" => ConversationStatus::Error,
+                    _ => ConversationStatus::Finished(finish_reason.unwrap_or(FinishReason::Stop)),
+                };
+                if self.typewriter.is_typing() {
+                    self.typewriter.set_pending_status(target_status);
+                } else {
+                    self.typewriter.reset();
+                    self.status = target_status;
                 }
             }
             "error" => {
@@ -544,12 +570,128 @@ impl App {
                     "prompt admitted"
                 );
             }
+            "prompt_updated" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    && let Some(input_id) = payload.get("input_id").and_then(|v| v.as_i64())
+                    && let Some(delivery) = payload.get("delivery").and_then(|v| v.as_str())
+                    && let Some(pos) = self.pending_prompts.iter().position(|p| p.id == input_id)
+                {
+                    let mut item = self.pending_prompts.remove(pos);
+                    item.delivery = delivery.to_string();
+                    if delivery == "steer" {
+                        let insert_at = self
+                            .pending_prompts
+                            .iter()
+                            .position(|p| p.delivery != "steer")
+                            .unwrap_or(self.pending_prompts.len());
+                        self.pending_prompts.insert(insert_at, item);
+                    } else {
+                        self.pending_prompts.push(item);
+                    }
+                    if let Some(dialog) = &mut self.queued_prompts_dialog {
+                        dialog.items = self.pending_prompts.clone();
+                    }
+                }
+            }
+            "prompt_discarded" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    && let Some(input_id) = payload.get("input_id").and_then(|v| v.as_i64())
+                {
+                    self.pending_prompts.retain(|p| p.id != input_id);
+                    if let Some(dialog) = &mut self.queued_prompts_dialog {
+                        dialog.items = self.pending_prompts.clone();
+                    }
+                }
+            }
             "prompt_promoted" => {
                 tracing::debug!(
                     session_id = event.session_id,
                     seq = event.seq,
                     "prompt promoted"
                 );
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    && let Some(input_id) = payload.get("input_id").and_then(|v| v.as_i64())
+                    && let Some(pos) = self.pending_prompts.iter().position(|p| p.id == input_id)
+                {
+                    let promoted = self.pending_prompts.remove(pos);
+                    if let Some(dialog) = &mut self.queued_prompts_dialog {
+                        dialog.items = self.pending_prompts.clone();
+                        if dialog.items.is_empty() {
+                            self.queued_prompts_dialog = None;
+                        }
+                    }
+                    self.reset_turn_view(false);
+                    let prompt = promoted.content;
+                    if self.transcript.is_empty() {
+                        self.transcript.push_str(&format!("> {prompt}\n\n"));
+                    } else {
+                        self.transcript.push_str(&format!("\n\n> {prompt}\n\n"));
+                    }
+                    self.truncate_transcript();
+                    self.push_stream_part(StreamPart::User(prompt.clone()));
+                    self.stream_base_len = Some(self.transcript.len());
+                    let provider = if self.provider.is_empty() {
+                        "anthropic".to_string()
+                    } else {
+                        self.provider.clone()
+                    };
+                    let model = if self.model.is_empty() {
+                        "claude-3-7-sonnet".to_string()
+                    } else {
+                        self.model.clone()
+                    };
+                    self.apply_conversation(
+                        crate::conversation::ConversationEvent::PromptSubmitted {
+                            prompt,
+                            provider,
+                            model,
+                        },
+                    );
+                }
+            }
+            "tool_background_finished" => {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                {
+                    let call_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = payload
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("bash");
+                    let success = payload
+                        .get("success")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let output = payload.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                    if let Some(row) = self.tool_rows.iter_mut().find(|r| r.call_id == call_id) {
+                        let mut meta = row
+                            .metadata
+                            .take()
+                            .and_then(|v| v.as_object().cloned())
+                            .unwrap_or_default();
+                        meta.insert("background".to_string(), serde_json::Value::Bool(true));
+                        meta.insert(
+                            "status".to_string(),
+                            serde_json::Value::String(
+                                if success { "completed" } else { "failed" }.to_string(),
+                            ),
+                        );
+                        row.metadata = Some(serde_json::Value::Object(meta));
+                        row.state = if success {
+                            ToolRowState::Completed
+                        } else {
+                            ToolRowState::Failed
+                        };
+                        if !output.is_empty() {
+                            row.output = bounded(output.to_string(), super::MAX_TOOL_OUTPUT_BYTES);
+                        }
+                        row.expandable = row.compute_expandable();
+                    }
+                    self.diagnostic = if success {
+                        format!("background shell finished: {name}")
+                    } else {
+                        format!("background shell failed: {name}")
+                    };
+                }
             }
             "assistant_message" => {
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload_json)

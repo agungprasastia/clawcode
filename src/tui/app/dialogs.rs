@@ -1,12 +1,11 @@
-use super::util::{bounded, is_sensitive_command, split_provider_model};
-use super::{
-    App, ConversationMode, ConversationStatus, Input, MAX_IDENTITY_BYTES, StreamPart, UiEvent,
-};
+use super::util::is_sensitive_command;
+use super::{App, ConversationMode, ConversationStatus, Input, StreamPart, UiEvent};
 use crate::tui::dialogs::{
     AgentsDialogState, GitDialogState, McpDialogItem, McpDialogState, McpDialogStatus,
     ModelsDialogState, PaletteAction, PaletteDialogState, PermissionDecision,
-    PermissionDialogState, QuestionDialogState, SessionRenameDialogState, SessionsDialogState,
-    SettingsDialogState, SkillsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState,
+    PermissionDialogState, QuestionDialogState, QueuedPromptsDialogState, SessionRenameDialogState,
+    SessionsDialogState, SettingsDialogState, SkillsDialogState, StashDialogState,
+    StatusDialogState, ThemesDialogState, VariantsDialogState, WhichKeyState,
 };
 
 impl App {
@@ -224,6 +223,168 @@ impl App {
         self.settings_dialog = None;
     }
 
+    pub fn queued_prompts_dialog(&self) -> Option<&QueuedPromptsDialogState> {
+        self.queued_prompts_dialog.as_ref()
+    }
+
+    pub fn queued_prompts_dialog_mut(&mut self) -> Option<&mut QueuedPromptsDialogState> {
+        self.queued_prompts_dialog.as_mut()
+    }
+
+    pub fn open_queued_prompts_dialog(&mut self) {
+        self.which_key.hide();
+        self.leader_pending = false;
+        self.leader_started_at = None;
+        if let (Some(runtime), Some(session_id)) = (self.runtime.as_ref(), self.active_session_id)
+            && let Ok(pending) = runtime.pending_inputs(session_id)
+        {
+            self.pending_prompts = pending
+                .into_iter()
+                .map(|input| crate::tui::dialogs::PendingPromptItem {
+                    id: input.id,
+                    content: input.content,
+                    delivery: input.delivery.as_str().to_string(),
+                })
+                .collect();
+        }
+        let count = self.pending_prompts.len();
+        self.queued_prompts_dialog =
+            Some(QueuedPromptsDialogState::new(self.pending_prompts.clone()));
+        self.diagnostic = format!("Queued prompts ({count}) - Enter steer, u undo, d discard");
+    }
+
+    pub fn close_queued_prompts_dialog(&mut self) {
+        self.queued_prompts_dialog = None;
+    }
+
+    pub fn stash_dialog(&self) -> Option<&StashDialogState> {
+        self.stash_dialog.as_ref()
+    }
+
+    pub fn stash_dialog_mut(&mut self) -> Option<&mut StashDialogState> {
+        self.stash_dialog.as_mut()
+    }
+
+    pub fn open_stash_dialog(&mut self) {
+        self.which_key.hide();
+        self.leader_pending = false;
+        self.leader_started_at = None;
+        let count = self.stash_entries.len();
+        self.stash_dialog = Some(StashDialogState::new(self.stash_entries.clone()));
+        self.diagnostic = format!("Prompt stash ({count}) - Enter restore, Ctrl+D delete");
+    }
+
+    pub fn close_stash_dialog(&mut self) {
+        self.stash_dialog = None;
+    }
+
+    pub fn variants_dialog(&self) -> Option<&VariantsDialogState> {
+        self.variants_dialog.as_ref()
+    }
+
+    pub fn variants_dialog_mut(&mut self) -> Option<&mut VariantsDialogState> {
+        self.variants_dialog.as_mut()
+    }
+
+    pub fn open_variants_dialog(&mut self) {
+        self.which_key.hide();
+        self.leader_pending = false;
+        self.leader_started_at = None;
+        let variants = self.available_variants();
+        if variants.is_empty() {
+            self.diagnostic = "No model variants available.".to_string();
+            return;
+        }
+        let active = self.active_variant().map(ToString::to_string);
+        self.variants_dialog = Some(VariantsDialogState::new(variants, active.as_deref()));
+        self.diagnostic = "Select model variant".to_string();
+    }
+
+    pub fn close_variants_dialog(&mut self) {
+        self.variants_dialog = None;
+    }
+
+    pub(crate) fn steer_first_queued_prompt(&mut self) -> bool {
+        let target_id = self
+            .pending_prompts
+            .iter()
+            .find(|item| item.delivery != "steer")
+            .or_else(|| self.pending_prompts.first())
+            .map(|item| item.id);
+        let Some(input_id) = target_id else {
+            return false;
+        };
+        self.steer_queued_prompt(input_id)
+    }
+
+    pub(crate) fn steer_queued_prompt(&mut self, input_id: i64) -> bool {
+        if let (Some(runtime), Some(session_id)) = (self.runtime.as_ref(), self.active_session_id) {
+            let _ = runtime.steer_input(session_id, input_id);
+        }
+        let mut updated = false;
+        if let Some(pos) = self.pending_prompts.iter().position(|p| p.id == input_id) {
+            let mut item = self.pending_prompts.remove(pos);
+            item.delivery = "steer".to_string();
+            let insert_at = self
+                .pending_prompts
+                .iter()
+                .position(|p| p.delivery != "steer")
+                .unwrap_or(self.pending_prompts.len());
+            self.pending_prompts.insert(insert_at, item);
+            updated = true;
+        }
+        if let Some(dialog) = &mut self.queued_prompts_dialog {
+            dialog.items = self.pending_prompts.clone();
+        }
+        if updated {
+            self.diagnostic = "queued prompt promoted to steer".to_string();
+        }
+        updated
+    }
+
+    pub(crate) fn discard_queued_prompt(
+        &mut self,
+        input_id: i64,
+        restore_to_composer: bool,
+    ) -> bool {
+        let mut removed_content = None;
+        if let (Some(runtime), Some(session_id)) = (self.runtime.as_ref(), self.active_session_id)
+            && let Ok(Some(content)) = runtime.discard_input(session_id, input_id)
+        {
+            removed_content = Some(content);
+        }
+        if let Some(pos) = self.pending_prompts.iter().position(|p| p.id == input_id) {
+            let item = self.pending_prompts.remove(pos);
+            if removed_content.is_none() {
+                removed_content = Some(item.content);
+            }
+        }
+        if let Some(dialog) = &mut self.queued_prompts_dialog {
+            dialog.items = self.pending_prompts.clone();
+            if dialog.selected >= dialog.items.len() && !dialog.items.is_empty() {
+                dialog.selected = dialog.items.len() - 1;
+            } else if dialog.items.is_empty() {
+                dialog.selected = 0;
+            }
+        }
+        if let Some(content) = removed_content {
+            if restore_to_composer {
+                if self.prompt.is_empty() {
+                    self.prompt = content;
+                } else {
+                    self.prompt = format!("{}\n{}", self.prompt, content);
+                }
+                self.cursor_position = self.prompt.chars().count();
+                self.diagnostic = "queued prompt restored to input".to_string();
+            } else {
+                self.diagnostic = "queued prompt discarded".to_string();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn open_session_rename_dialog(&mut self) {
         let Some(session_id) = self.active_session_id else {
             self.diagnostic = "no active session to rename".to_string();
@@ -439,15 +600,30 @@ impl App {
     }
 
     pub fn cycle_model(&mut self, reverse: bool) {
+        if self.recent_models.len() >= 2 {
+            let current_key = self.current_model_key();
+            let current = self
+                .recent_models
+                .iter()
+                .position(|id| id == &current_key || id == &self.model);
+            let len = self.recent_models.len();
+            let next = match (current, reverse) {
+                (Some(index), false) => (index + 1) % len,
+                (Some(index), true) => (index + len - 1) % len,
+                (None, false) => 0,
+                (None, true) => len - 1,
+            };
+            if let Some(chosen) = self.recent_models.get(next).cloned() {
+                self.apply_provider_and_model_without_reordering(&chosen);
+                self.diagnostic = format!("model switched to: {chosen}");
+            }
+            return;
+        }
         if self.available_models.is_empty() {
             self.diagnostic = "no models available".to_string();
             return;
         }
-        let current_id = if self.model.contains('/') || self.provider.is_empty() {
-            self.model.clone()
-        } else {
-            format!("{}/{}", self.provider, self.model)
-        };
+        let current_id = self.current_model_key();
         let current = self
             .available_models
             .iter()
@@ -467,12 +643,7 @@ impl App {
         };
         if let Some(model) = self.available_models.get(next) {
             let chosen = model.id.clone();
-            if let Some((provider, model_name)) = split_provider_model(&chosen) {
-                self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
-                self.model = bounded(model_name.to_string(), MAX_IDENTITY_BYTES);
-            } else {
-                self.model = bounded(chosen.clone(), MAX_IDENTITY_BYTES);
-            }
+            self.apply_provider_and_model_without_reordering(&chosen);
             self.diagnostic = format!("model switched to: {chosen}");
         }
     }
@@ -507,9 +678,25 @@ impl App {
             }
             PaletteAction::SwitchModel => {
                 let models = self.available_models.clone();
-                self.models_dialog = Some(ModelsDialogState::new(models, &self.model));
+                let active_key = self.current_model_key();
+                self.models_dialog = Some(ModelsDialogState::with_preferences(
+                    models,
+                    &active_key,
+                    self.favorite_models.clone(),
+                    self.recent_models.clone(),
+                ));
                 self.diagnostic = "Select model".to_string();
             }
+            PaletteAction::SwitchVariant => self.open_variants_dialog(),
+            PaletteAction::QueuedPrompts => self.open_queued_prompts_dialog(),
+            PaletteAction::PromptStash => {
+                if !self.prompt.trim().is_empty() {
+                    self.stash_current_prompt();
+                } else {
+                    self.open_stash_dialog();
+                }
+            }
+            PaletteAction::PromptStashList => self.open_stash_dialog(),
             PaletteAction::SwitchAgent => {
                 let current = match self.mode {
                     ConversationMode::Plan => "plan",
@@ -596,7 +783,13 @@ impl App {
             Input::Character('l') => self.open_sessions_dialog(),
             Input::Character('m') => {
                 let models = self.available_models.clone();
-                self.models_dialog = Some(ModelsDialogState::new(models, &self.model));
+                let active_key = self.current_model_key();
+                self.models_dialog = Some(ModelsDialogState::with_preferences(
+                    models,
+                    &active_key,
+                    self.favorite_models.clone(),
+                    self.recent_models.clone(),
+                ));
                 self.diagnostic = "Select model".to_string();
             }
             Input::Character('a') => {
@@ -896,6 +1089,9 @@ impl App {
             || self.skills_dialog.is_some()
             || self.mcp_dialog.is_some()
             || self.settings_dialog.is_some()
+            || self.queued_prompts_dialog.is_some()
+            || self.stash_dialog.is_some()
+            || self.variants_dialog.is_some()
             || self.palette_dialog.is_some()
             || self.session_rename_dialog.is_some();
         if !has_dialog {
@@ -1316,8 +1512,138 @@ impl App {
             return true;
         }
 
+        if self.queued_prompts_dialog.is_some() {
+            let mut close = false;
+            let mut steer_id = None;
+            let mut undo_id = None;
+            let mut discard_id = None;
+            if let Some(dialog) = &mut self.queued_prompts_dialog {
+                match event {
+                    UiEvent::Input(Input::Quit | Input::Cancel) => close = true,
+                    UiEvent::Input(
+                        Input::Up | Input::ScrollUp | Input::PageUp | Input::Palette,
+                    ) => dialog.previous(),
+                    UiEvent::Input(
+                        Input::Down | Input::ScrollDown | Input::PageDown | Input::ToggleMode,
+                    ) => dialog.next(),
+                    UiEvent::Input(Input::Submit) => {
+                        steer_id = dialog.selected_item().map(|item| item.id);
+                    }
+                    UiEvent::Input(Input::Character('u' | 'U') | Input::Backspace) => {
+                        undo_id = dialog.selected_item().map(|item| item.id);
+                    }
+                    UiEvent::Input(
+                        Input::Character('d' | 'D') | Input::Delete | Input::DeleteOrExit,
+                    ) => {
+                        discard_id = dialog.selected_item().map(|item| item.id);
+                    }
+                    _ => {}
+                }
+            }
+            if close {
+                self.queued_prompts_dialog = None;
+                self.diagnostic = "queued prompts closed".to_string();
+            } else if let Some(id) = steer_id {
+                self.steer_queued_prompt(id);
+            } else if let Some(id) = undo_id {
+                self.discard_queued_prompt(id, true);
+                if self.pending_prompts.is_empty() {
+                    self.queued_prompts_dialog = None;
+                }
+            } else if let Some(id) = discard_id {
+                self.discard_queued_prompt(id, false);
+                if self.pending_prompts.is_empty() {
+                    self.queued_prompts_dialog = None;
+                }
+            }
+            return true;
+        }
+
+        if self.stash_dialog.is_some() {
+            let mut close = false;
+            let mut restore_idx = None;
+            let mut delete_pressed = false;
+            let mut deleted_idx = None;
+            if let Some(dialog) = &mut self.stash_dialog {
+                match event {
+                    UiEvent::Input(Input::Quit | Input::Cancel) => close = true,
+                    UiEvent::Input(
+                        Input::Up | Input::ScrollUp | Input::PageUp | Input::Palette,
+                    ) => dialog.previous(),
+                    UiEvent::Input(
+                        Input::Down | Input::ScrollDown | Input::PageDown | Input::ToggleMode,
+                    ) => dialog.next(),
+                    UiEvent::Input(Input::DeleteOrExit | Input::Delete) => {
+                        delete_pressed = true;
+                        deleted_idx = dialog.request_or_confirm_delete();
+                    }
+                    UiEvent::Input(Input::Submit) => {
+                        restore_idx = dialog.selected_index();
+                    }
+                    UiEvent::Input(Input::Backspace) => dialog.pop_char(),
+                    UiEvent::Input(Input::Character(c)) => dialog.push_char(*c),
+                    UiEvent::Paste(text) => {
+                        for character in text.chars().filter(|character| !character.is_control()) {
+                            dialog.push_char(character);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if close {
+                self.stash_dialog = None;
+                self.diagnostic = "stash closed".to_string();
+            } else if let Some(idx) = restore_idx {
+                self.stash_dialog = None;
+                self.pop_stash_to_prompt(idx);
+            } else if delete_pressed {
+                if let Some(orig_idx) = deleted_idx {
+                    if orig_idx < self.stash_entries.len() {
+                        self.stash_entries.remove(orig_idx);
+                        self.persist_kv_json("prompt.stash", &self.stash_entries);
+                    }
+                    self.diagnostic = "stash entry deleted".to_string();
+                } else {
+                    self.diagnostic = "press Ctrl+D again to delete stash entry".to_string();
+                }
+            }
+            return true;
+        }
+
+        if self.variants_dialog.is_some() {
+            let mut close = false;
+            let mut chosen: Option<Option<String>> = None;
+            if let Some(dialog) = &mut self.variants_dialog {
+                match event {
+                    UiEvent::Input(Input::Quit | Input::Cancel) => close = true,
+                    UiEvent::Input(
+                        Input::Up | Input::ScrollUp | Input::PageUp | Input::Palette,
+                    ) => dialog.previous(),
+                    UiEvent::Input(
+                        Input::Down | Input::ScrollDown | Input::PageDown | Input::ToggleMode,
+                    ) => dialog.next(),
+                    UiEvent::Input(Input::Submit) => {
+                        chosen = dialog
+                            .selected_variant()
+                            .map(|opt| opt.map(ToString::to_string));
+                    }
+                    _ => {}
+                }
+            }
+            if close {
+                self.variants_dialog = None;
+                self.diagnostic = "variant picker closed".to_string();
+            } else if let Some(variant) = chosen {
+                self.variants_dialog = None;
+                self.set_active_variant(variant);
+            }
+            return true;
+        }
+
         if self.models_dialog.is_some() {
             let mut chosen = None;
+            let mut fav_toggled: Option<(String, bool)> = None;
+            let mut provider_cycled: Option<Option<String>> = None;
             if let Some(d) = &mut self.models_dialog {
                 match event {
                     UiEvent::Input(Input::Quit | Input::Cancel) => self.models_dialog = None,
@@ -1329,20 +1655,36 @@ impl App {
                     UiEvent::Input(
                         Input::Down | Input::ScrollDown | Input::PageDown | Input::ToggleMode,
                     ) => d.next(),
+                    UiEvent::Input(Input::End) => {
+                        d.selected = d.filtered_items().len().saturating_sub(1);
+                    }
+                    UiEvent::Input(Input::PinSession) => {
+                        fav_toggled = d.toggle_selected_favorite();
+                    }
+                    UiEvent::Input(Input::Home) => {
+                        provider_cycled = Some(d.cycle_provider_filter());
+                    }
                     UiEvent::Input(Input::Submit) => chosen = d.selected_model().cloned(),
                     _ => {}
                 }
             }
-            if matches!(event, UiEvent::Input(Input::Submit)) {
+            if let Some((id, is_fav)) = fav_toggled {
+                self.toggle_favorite_model(&id);
+                self.diagnostic = if is_fav {
+                    format!("model favorited: {id}")
+                } else {
+                    format!("model unfavorited: {id}")
+                };
+            } else if let Some(provider_opt) = provider_cycled {
+                self.diagnostic = match provider_opt {
+                    Some(p) => format!("provider filter: {p}"),
+                    None => "provider filter: all".to_string(),
+                };
+            } else if matches!(event, UiEvent::Input(Input::Submit)) {
                 self.models_dialog = None;
                 if let Some(m) = chosen {
                     let chosen_id = m.id;
-                    if let Some((provider, model)) = split_provider_model(&chosen_id) {
-                        self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
-                        self.model = bounded(model.to_string(), MAX_IDENTITY_BYTES);
-                    } else {
-                        self.model = bounded(chosen_id.clone(), MAX_IDENTITY_BYTES);
-                    }
+                    self.select_provider_and_model(&chosen_id);
                     self.diagnostic = format!("model switched to: {chosen_id}");
                 }
             }

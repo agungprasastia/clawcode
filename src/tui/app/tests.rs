@@ -1011,29 +1011,28 @@ fn settings_dialog_cycles_values_and_persists_to_config() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn render_text(app: &App) -> String {
+    let backend = ratatui::backend::TestBackend::new(100, 20);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::tui::render(frame, app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut out = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut row = String::new();
+        for x in 0..buffer.area.width {
+            row.push_str(buffer[(x, y)].symbol());
+        }
+        out.push(row);
+    }
+    out.join("\n")
+}
+
 #[test]
 fn transcript_respects_verbosity_grouping_markdown_and_sticky_scroll() {
     use crate::config::{
         Config, MarkdownMode, ThinkingDisplay, ToolGrouping, TranscriptVerbosity, TuiSettingsConfig,
-    };
-    use crate::tui::app::tool_rows::{ToolRow, ToolRowState};
-
-    let render_text = |app: &App| -> String {
-        let backend = ratatui::backend::TestBackend::new(100, 20);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| crate::tui::render(frame, app))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let mut out = Vec::new();
-        for y in 0..buffer.area.height {
-            let mut row = String::new();
-            for x in 0..buffer.area.width {
-                row.push_str(buffer[(x, y)].symbol());
-            }
-            out.push(row);
-        }
-        out.join("\n")
     };
 
     let mut app = App::default();
@@ -1139,4 +1138,280 @@ fn transcript_respects_verbosity_grouping_markdown_and_sticky_scroll() {
         y: badge_rect.y,
     });
     assert_eq!(app.chat_scroll(), 0);
+}
+
+#[test]
+fn submit_while_active_queues_instead_of_cancelling_and_undo_restores_prompt() {
+    let mut app = App::default();
+    let (_tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("first active prompt");
+    let session_a = app.active_session_id().expect("session A created");
+    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+    assert!(!app.take_cancellation());
+
+    let queued_text =
+        "cek 🚀日本語フォローアップ multi-byte queue preview panjang sekali agar dipotong aman";
+    for ch in queued_text.chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+
+    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+    assert!(
+        !app.take_cancellation(),
+        "submitting while active must queue instead of cancelling"
+    );
+    assert_eq!(app.pending_prompts().len(), 1);
+    assert_eq!(app.pending_prompts()[0].content, queued_text);
+    assert_eq!(app.pending_prompts()[0].delivery, "queue");
+
+    let rendered = render_text(&app);
+    assert!(rendered.contains("1 queued ·"));
+
+    // Empty Enter steers the first queued prompt.
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.pending_prompts()[0].delivery, "steer");
+
+    // Switching sessions isolates pending prompts per session.
+    app.new_session();
+    let session_b = app.active_session_id().expect("session B created");
+    assert_ne!(session_a, session_b);
+    assert!(app.pending_prompts().is_empty());
+
+    app.switch_session(session_a);
+    assert_eq!(app.pending_prompts().len(), 1);
+
+    // Open /queued dialog and press 'u' (undo) to restore prompt to composer.
+    for ch in "/queued".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.queued_prompts_dialog().is_some());
+    app.apply(UiEvent::Input(Input::Character('u')));
+    assert!(app.queued_prompts_dialog().is_none());
+    assert!(app.pending_prompts().is_empty());
+    assert_eq!(app.prompt(), queued_text);
+}
+
+#[test]
+fn ctrl_b_backgrounds_running_shell_when_prompt_empty_else_moves_cursor() {
+    let mut app = App::default();
+    app.submit_user_prompt("run long build");
+    app.set_tool_rows_for_test(vec![ToolRow {
+        call_id: "shell-1".into(),
+        name: "bash".into(),
+        desc: "cargo test".into(),
+        arguments: r#"{"command":"cargo test"}"#.into(),
+        output: "running suite...\n".into(),
+        state: ToolRowState::Running,
+        arguments_complete: true,
+        metadata: None,
+        started_at: std::time::Instant::now() - std::time::Duration::from_secs(4),
+        expandable: false,
+    }]);
+    app.set_stream_parts_for_test(
+        vec![
+            StreamPart::User("run long build".into()),
+            StreamPart::Tool("shell-1".into()),
+        ],
+        Some(0),
+    );
+
+    // 3-second hint renders inside running shell card.
+    let before_bg = render_text(&app);
+    assert!(before_bg.contains("Ctrl+B to run in background"));
+
+    // Non-empty prompt: Ctrl+B moves cursor left instead of backgrounding.
+    app.apply(UiEvent::Input(Input::Character('h')));
+    app.apply(UiEvent::Input(Input::Character('i')));
+    assert_eq!(app.cursor_position(), 2);
+    app.apply(UiEvent::Input(Input::BackgroundOrLeft));
+    assert_eq!(app.cursor_position(), 1);
+    assert_eq!(app.tool_rows()[0].state, ToolRowState::Running);
+
+    // Clear prompt: Ctrl+B detaches running shell into background.
+    app.apply(UiEvent::Input(Input::ClearOrExit));
+    assert!(app.prompt().is_empty());
+    app.apply(UiEvent::Input(Input::BackgroundOrLeft));
+    assert!(tool_is_background(&app.tool_rows()[0]));
+    let after_bg = render_text(&app);
+    assert!(after_bg.contains("Background"));
+}
+
+#[test]
+fn cycle_variant_and_model_favorites_recent_persist_in_kv_state() {
+    use crate::persistence::{Db, WriterHandle};
+    use crate::provider::{
+        ModelInfo, Provider, ProviderCapabilities, ProviderError, ProviderId, StreamRequest,
+        StreamResponse,
+    };
+
+    #[derive(Debug)]
+    struct TestModelProvider;
+    impl Provider for TestModelProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("openai"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: false,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            vec![
+                ModelInfo {
+                    id: "openai/o3-mini".into(),
+                    context_window: 200_000,
+                },
+                ModelInfo {
+                    id: "openai/gpt-4o".into(),
+                    context_window: 128_000,
+                },
+                ModelInfo {
+                    id: "anthropic/claude-sonnet-4".into(),
+                    context_window: 200_000,
+                },
+            ]
+        }
+        fn send(&self, _: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            Ok(StreamResponse { events: Vec::new() })
+        }
+    }
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!("clawcode-kv-tui-{nonce}.db"));
+    let db_rt = Db::open(&db_path).unwrap();
+    let db_wr = Db::open(&db_path).unwrap();
+    let writer = WriterHandle::spawn(db_wr);
+
+    let mut app = App::default();
+    app.attach_runtime(db_rt, writer, Box::new(TestModelProvider));
+    app.set_available_models_for_test(vec![
+        ModelInfo {
+            id: "openai/o3-mini".into(),
+            context_window: 200_000,
+        },
+        ModelInfo {
+            id: "openai/gpt-4o".into(),
+            context_window: 128_000,
+        },
+        ModelInfo {
+            id: "anthropic/claude-sonnet-4".into(),
+            context_window: 200_000,
+        },
+    ]);
+
+    for ch in "/model openai/o3-mini".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.selected_provider(), "openai");
+    assert_eq!(app.selected_model(), "o3-mini");
+
+    // Ctrl+T cycles default -> low -> medium -> high -> default for o3-mini.
+    assert_eq!(app.active_variant(), None);
+    app.apply(UiEvent::Input(Input::CycleVariant));
+    assert_eq!(app.active_variant(), Some("low"));
+    let rendered = render_text(&app);
+    assert!(rendered.contains("openai / o3-mini · low") || rendered.contains("o3-mini · low"));
+    app.apply(UiEvent::Input(Input::CycleVariant));
+    assert_eq!(app.active_variant(), Some("medium"));
+    app.apply(UiEvent::Input(Input::CycleVariant));
+    assert_eq!(app.active_variant(), Some("high"));
+    app.apply(UiEvent::Input(Input::CycleVariant));
+    assert_eq!(app.active_variant(), None);
+
+    // Open models dialog via palette / Ctrl+X m, favorite anthropic/claude-sonnet-4 with Ctrl+F (PinSession),
+    // and select openai/gpt-4o so recent has [openai/gpt-4o, openai/o3-mini].
+    app.apply(UiEvent::Input(Input::Leader));
+    app.apply(UiEvent::Input(Input::Character('m')));
+    assert!(app.models_dialog().is_some());
+    // Move to anthropic/claude-sonnet-4 and toggle favorite.
+    app.apply(UiEvent::Input(Input::End));
+    app.apply(UiEvent::Input(Input::PinSession));
+    assert!(
+        app.favorite_models()
+            .contains(&"anthropic/claude-sonnet-4".to_string())
+    );
+    // Select openai/gpt-4o.
+    app.apply(UiEvent::Input(Input::Cancel));
+    for ch in "/model openai/gpt-4o".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.selected_model(), "gpt-4o");
+
+    // F2 cycles through recent models (gpt-4o -> o3-mini).
+    app.apply(UiEvent::Input(Input::CycleModel));
+    assert_eq!(app.selected_model(), "o3-mini");
+    app.apply(UiEvent::Input(Input::CycleModelReverse));
+    assert_eq!(app.selected_model(), "gpt-4o");
+
+    // Verify kv_state persisted favorites, recent, and variants in SQLite.
+    let db_check = Db::open(&db_path).unwrap();
+    let fav_json = db_check
+        .get_kv("model.favorites")
+        .unwrap()
+        .expect("favorites saved");
+    assert!(fav_json.contains("anthropic/claude-sonnet-4"));
+    let recent_json = db_check
+        .get_kv("model.recent")
+        .unwrap()
+        .expect("recent saved");
+    assert!(recent_json.contains("openai/gpt-4o"));
+
+    drop(app);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn prompt_stash_pushes_pops_and_confirms_delete_with_utf8_bounds() {
+    let mut app = App::default();
+    let draft = "draft 🦀日本語 stash entry dengan karakter multi-byte untuk uji batas UTF-8";
+    for ch in draft.chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+
+    // Stash the current composer draft via the command palette.
+    app.open_palette();
+    for ch in "Stash prompt".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.prompt().is_empty(), "composer cleared after stashing");
+    assert_eq!(app.stash_entries().len(), 1);
+    assert_eq!(app.stash_entries()[0].content, draft);
+
+    // Pop via `/stash pop` restores draft to composer.
+    for ch in "/stash pop".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.prompt(), draft);
+    assert!(app.stash_entries().is_empty());
+
+    // Push again, open `/stash` dialog, and verify double Ctrl+D delete confirmation.
+    app.stash_current_prompt();
+    assert_eq!(app.stash_entries().len(), 1);
+    for ch in "/stash".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.stash_dialog().is_some());
+
+    // First Ctrl+D arms confirmation without deleting.
+    app.apply(UiEvent::Input(Input::DeleteOrExit));
+    assert_eq!(app.stash_entries().len(), 1);
+    assert_eq!(app.stash_dialog().unwrap().confirm_delete_index(), Some(0));
+
+    // Second Ctrl+D confirms deletion.
+    app.apply(UiEvent::Input(Input::DeleteOrExit));
+    assert!(app.stash_entries().is_empty());
 }

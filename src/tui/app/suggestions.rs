@@ -119,6 +119,26 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
         template: "/thinking",
     },
     CommandSuggestion {
+        name: "/queued",
+        description: "Manage queued or steered follow-up prompts",
+        template: "/queued",
+    },
+    CommandSuggestion {
+        name: "/stash",
+        description: "Open or manage stashed prompt drafts",
+        template: "/stash",
+    },
+    CommandSuggestion {
+        name: "/variant",
+        description: "Switch reasoning/effort variant for active model",
+        template: "/variant",
+    },
+    CommandSuggestion {
+        name: "/background",
+        description: "Move running foreground shell tool to background",
+        template: "/background",
+    },
+    CommandSuggestion {
         name: "/help",
         description: "Show manual, commands & shortcuts",
         template: "/help",

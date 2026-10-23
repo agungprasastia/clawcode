@@ -15,6 +15,9 @@ pub struct ModelsDialogState {
     pub selected: usize,
     pub filter: String,
     pub scroll_offset: usize,
+    pub favorites: Vec<String>,
+    pub recent: Vec<String>,
+    pub provider_filter: Option<String>,
 }
 
 fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
@@ -40,25 +43,141 @@ fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
 
 impl ModelsDialogState {
     pub fn new(items: Vec<ModelInfo>, active_model: &str) -> Self {
-        let selected = items.iter().position(|m| m.id == active_model).unwrap_or(0);
+        let selected = items
+            .iter()
+            .position(|m| m.id == active_model || m.id.ends_with(&format!("/{active_model}")))
+            .unwrap_or(0);
         Self {
             items,
             selected,
             filter: String::new(),
             scroll_offset: 0,
+            favorites: Vec::new(),
+            recent: Vec::new(),
+            provider_filter: None,
         }
     }
 
-    pub fn filtered_items(&self) -> Vec<&ModelInfo> {
-        if self.filter.is_empty() {
-            self.items.iter().collect()
+    pub fn with_preferences(
+        items: Vec<ModelInfo>,
+        active_model: &str,
+        favorites: Vec<String>,
+        recent: Vec<String>,
+    ) -> Self {
+        let mut state = Self {
+            items,
+            selected: 0,
+            filter: String::new(),
+            scroll_offset: 0,
+            favorites,
+            recent,
+            provider_filter: None,
+        };
+        let ordered = state.filtered_items();
+        state.selected = ordered
+            .iter()
+            .position(|m| m.id == active_model || m.id.ends_with(&format!("/{active_model}")))
+            .unwrap_or(0);
+        state
+    }
+
+    pub fn is_favorite(&self, id: &str) -> bool {
+        self.favorites.iter().any(|fav| fav == id)
+    }
+
+    pub fn is_recent(&self, id: &str) -> bool {
+        self.recent.iter().any(|rec| rec == id)
+    }
+
+    pub fn toggle_selected_favorite(&mut self) -> Option<(String, bool)> {
+        let selected_id = self.selected_model()?.id.clone();
+        let is_fav = if let Some(pos) = self.favorites.iter().position(|f| f == &selected_id) {
+            self.favorites.remove(pos);
+            false
         } else {
-            let q = self.filter.to_lowercase();
-            self.items
-                .iter()
-                .filter(|m| m.id.to_lowercase().contains(&q))
-                .collect()
+            self.favorites.push(selected_id.clone());
+            true
+        };
+        let ordered = self.filtered_items();
+        self.selected = ordered
+            .iter()
+            .position(|m| m.id == selected_id)
+            .unwrap_or(0);
+        Some((selected_id, is_fav))
+    }
+
+    pub fn providers(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for item in &self.items {
+            if let Some((provider, _)) = item.id.split_once('/')
+                && !provider.is_empty()
+                && !out.iter().any(|p| p == provider)
+            {
+                out.push(provider.to_string());
+            }
         }
+        out
+    }
+
+    pub fn cycle_provider_filter(&mut self) -> Option<String> {
+        let providers = self.providers();
+        if providers.is_empty() {
+            self.provider_filter = None;
+            return None;
+        }
+        self.provider_filter = match &self.provider_filter {
+            None => Some(providers[0].clone()),
+            Some(current) => match providers.iter().position(|p| p == current) {
+                Some(idx) if idx + 1 < providers.len() => Some(providers[idx + 1].clone()),
+                _ => None,
+            },
+        };
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.provider_filter.clone()
+    }
+
+    pub fn filtered_items(&self) -> Vec<&ModelInfo> {
+        let base_iter = self.items.iter().filter(|m| {
+            if let Some(provider) = &self.provider_filter {
+                let prefix = format!("{provider}/");
+                if !m.id.starts_with(&prefix) {
+                    return false;
+                }
+            }
+            if !self.filter.is_empty() {
+                let q = self.filter.to_lowercase();
+                if !m.id.to_lowercase().contains(&q) {
+                    return false;
+                }
+            }
+            true
+        });
+
+        let base: Vec<&ModelInfo> = base_iter.collect();
+        if !self.filter.is_empty() || (self.favorites.is_empty() && self.recent.is_empty()) {
+            return base;
+        }
+
+        let mut ordered = Vec::with_capacity(base.len());
+        for fav in &self.favorites {
+            if let Some(&model) = base.iter().find(|m| &m.id == fav) {
+                ordered.push(model);
+            }
+        }
+        for rec in &self.recent {
+            if !self.is_favorite(rec)
+                && let Some(&model) = base.iter().find(|m| &m.id == rec)
+            {
+                ordered.push(model);
+            }
+        }
+        for model in base {
+            if !self.is_favorite(&model.id) && !self.is_recent(&model.id) {
+                ordered.push(model);
+            }
+        }
+        ordered
     }
 
     pub fn selected_model(&self) -> Option<&ModelInfo> {
@@ -138,10 +257,15 @@ pub fn render_models_dialog(
 
     let total_count = dialog.items.len();
     let filtered_count = filtered.len();
-    let title_text = if dialog.filter.is_empty() {
+    let provider_tag = dialog
+        .provider_filter
+        .as_deref()
+        .map(|p| format!(" [{p}]"))
+        .unwrap_or_default();
+    let title_text = if dialog.filter.is_empty() && dialog.provider_filter.is_none() {
         format!(" Select Model ({total_count}) ")
     } else {
-        format!(" Select Model ({filtered_count}/{total_count}) ")
+        format!(" Select Model ({filtered_count}/{total_count}){provider_tag} ")
     };
 
     let block = Block::default()
@@ -239,10 +363,18 @@ pub fn render_models_dialog(
             .map(|(rel_idx, model)| {
                 let actual_idx = scroll_offset + rel_idx;
                 let is_selected = actual_idx == selected_idx;
-                let is_active = model.id.as_str() == active_model;
+                let is_active = model.id.as_str() == active_model
+                    || model.id.ends_with(&format!("/{active_model}"));
+                let is_fav = dialog.is_favorite(&model.id);
 
                 let cursor = if is_selected { " › " } else { "   " };
-                let active_dot = if is_active { "● " } else { "  " };
+                let active_dot = if is_active {
+                    "● "
+                } else if is_fav {
+                    "★ "
+                } else {
+                    "  "
+                };
 
                 let cursor_style = if is_selected {
                     Style::default().fg(theme.teal).add_modifier(Modifier::BOLD)
@@ -253,6 +385,10 @@ pub fn render_models_dialog(
                 let dot_style = if is_active {
                     Style::default()
                         .fg(theme.success)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_fav {
+                    Style::default()
+                        .fg(theme.amber)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.dim)
@@ -344,19 +480,26 @@ pub fn render_models_dialog(
         ),
         Span::styled("select  ", Style::default().fg(theme.dim)),
         Span::styled(
+            "Ctrl+F ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("★  ", Style::default().fg(theme.dim)),
+        Span::styled(
+            "Ctrl+A ",
+            Style::default()
+                .fg(theme.amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("provider  ", Style::default().fg(theme.dim)),
+        Span::styled(
             "Esc ",
             Style::default()
                 .fg(theme.amber)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("close  ", Style::default().fg(theme.dim)),
-        Span::styled(
-            "Type ",
-            Style::default()
-                .fg(theme.amber)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("filter", Style::default().fg(theme.dim)),
+        Span::styled("close", Style::default().fg(theme.dim)),
     ]);
     frame.render_widget(Paragraph::new(footer_line), chunks[4]);
 }

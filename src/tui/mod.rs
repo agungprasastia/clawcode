@@ -26,11 +26,13 @@ pub use chat::{
 };
 pub use dialogs::{
     AgentItem, AgentsDialogState, McpDialogItem, McpDialogState, McpDialogStatus, McpErrorDetail,
-    ModelsDialogState, PaletteAction, PaletteDialogState, PermissionDecision,
-    PermissionDialogState, PermissionPrompt, QuestionDialogState, SessionRenameDialogState,
-    SessionsDialogState, SettingKey, SettingsDialogState, StatusDialogState, ThemesDialogState,
+    ModelsDialogState, PaletteAction, PaletteDialogState, PendingPromptItem, PermissionDecision,
+    PermissionDialogState, PermissionPrompt, QuestionDialogState, QueuedPromptsDialogState,
+    SessionRenameDialogState, SessionsDialogState, SettingKey, SettingsDialogState,
+    StashDialogState, StashEntry, StatusDialogState, ThemesDialogState, VariantsDialogState,
     WhichKeyState, render_mcp_dialog, render_permission_dialog, render_question_dialog,
-    render_settings_dialog,
+    render_queued_prompts_dialog, render_settings_dialog, render_stash_dialog,
+    render_variants_dialog,
 };
 pub use diff::{DiffLine, DiffOp, DiffResult, compute_diff};
 pub use home::HomeState;

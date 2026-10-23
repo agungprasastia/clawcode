@@ -112,7 +112,7 @@ fn translate_key(key: KeyEvent) -> Option<Input> {
         KeyCode::Char('u') if control(&key) => Some(Input::DeleteToLineStart),
         KeyCode::Char('k') if control(&key) => Some(Input::DeleteToLineEnd),
         KeyCode::Char('w') if control(&key) => Some(Input::DeleteWord),
-        KeyCode::Char('b') if control(&key) => Some(Input::Left),
+        KeyCode::Char('b') if control(&key) => Some(Input::BackgroundOrLeft),
         KeyCode::Char('n') if control(&key) => Some(Input::Down),
         KeyCode::Char('l') if control(&key) => Some(Input::Clear),
         KeyCode::Char('v') if control(&key) => Some(Input::Paste),

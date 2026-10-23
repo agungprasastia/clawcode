@@ -1,7 +1,7 @@
-# OpenCode v2.1.2 parity
+# OpenCode v2.1.3 parity
 
-Reference source: tag `v2.1.2`, commit `a517687fde98a7329ada3ae644a01a9fc6c4e99e`.
-Reference binary: `@opencode/cli` 2.1.2.
+Reference source: tag `v2.1.3` (superset of `v2.1.2` commit `a517687fde98a7329ada3ae644a01a9fc6c4e99e`).
+Reference binary: `@opencode/cli` 2.1.3 (reverse-engineered via REA).
 
 Parity means matching OpenCode behavior. clawcode keeps its own visual design.
 
@@ -20,16 +20,16 @@ Parity means matching OpenCode behavior. clawcode keeps its own visual design.
 | ACP | partial | NDJSON JSON-RPC transport; initialize/auth; session new/load/list/delete/resume/close/fork; workspace activation; prompt streaming; text, reasoning, and tool-call updates; cancellation; history replay; per-session modes/models; stdio and HTTP MCP attachments with advertised capabilities | Permission/form requests, image prompts, child-session updates |
 | Service lifecycle | partial | Status and config get/set/unset | Start/restart/stop and background server supervision |
 | Pairing | partial | Pair command and URL/config plumbing | Device-code exchange and secure credential storage |
-| TUI keybindings | mostly complete | Leader, palette, escape interrupt, Ctrl+C/D context rules, agents, sessions, tabs, model cycling, pinning, rename, delete, word editing, multiline input with grow/scroll, newline bindings, paste normalization, input undo/redo | Selection bindings, external editor |
+| TUI keybindings | mostly complete | Leader, palette, escape interrupt, Ctrl+C/D context rules, Ctrl+B running-shell backgrounding, Ctrl+T variant cycling, F2/Shift+F2 recent-model cycling, Ctrl+Alt+B/F/U/D/Y/E/G + Ctrl+G + Alt+Home/End + leader u transcript scrolling, agents, sessions, tabs, pinning, rename, delete, word editing, multiline input with grow/scroll, newline bindings, paste normalization, input undo/redo | Selection bindings, external editor |
 | TUI session tabs | complete | Open/switch/cycle/close/reopen, quick slots, cached titles, tab bar for multiple tabs, rename propagation | Unread markers, tab history |
 | TUI terminal pane | missing | Leader chord reports shell guidance | Embedded PTY pane, focus cycling, shell lifecycle |
 | TUI session timeline | missing | Leader chord reports shell guidance | Timeline panel, jump-to-turn, branch visualization |
 | TUI undo/redo | missing | Workspace snapshots exist below the TUI | Revert/redo bindings and diff dialog wiring |
-| TUI model variants | partial | Model list and cycling | Reasoning-effort/variant selection |
-| TUI MCP/settings dialogs | partial | `/mcps` and palette MCP dialog: searchable server list, eager startup probes, connect/disconnect/retry, failed-server error details with copy | MCP OAuth sign-in (`needs_auth`), settings editor |
+| TUI model variants | complete | Built-in and custom model variant discovery, OpenAI `reasoning_effort` + Anthropic `thinking` budget serialization, `Ctrl+T` / `/variant` cycling & picker, `Favorites` (`Ctrl+F`) + `Recent` (`F2`) + provider filter (`Ctrl+A`) in `/models`, SQLite `kv_state` persistence | Provider-specific custom effort presets |
+| TUI MCP/settings dialogs | mostly complete | `/mcps` and palette MCP dialog (searchable server list, eager startup probes, connect/disconnect/retry, failed-server error details with copy); `/settings` interactive editor with atomic comment-preserving persistence to `clawcode.jsonc` (`animations`, `thinking`, `grouping`, `verbosity`, `markdown`, `tps`, `turn_tokens`, `timestamps`, `scrollbar`, `scroll_speed`, `scroll_acceleration`, `mouse`, `leader_timeout_ms`) | MCP OAuth sign-in (`needs_auth`) |
 | TUI images | missing | Text transcript and tool cards | Attach, preview, and image tool parts |
-| TUI queued prompts / background tools | partial | Background shell execution and streaming cards | Queue editing, Ctrl+B blocking-tool backgrounding |
-| Streaming and tool cards | complete | Grouped exploration, foreground/background shell, durable parts, replay, malformed-stream handling | New provider-specific part types |
+| TUI queued prompts / background tools | complete | Non-cancelling queue-on-submit while active, empty-submit steer promotion, `/queued` dialog (steer, undo-to-composer, discard), `/stash` prompt stash with UTF-8 bounds and double `Ctrl+D` delete confirmation, `Ctrl+B` / `/background` non-blocking foreground shell detachment with 3-second hint and `tool_background_finished` reconciliation | Multi-part attachment queueing |
+| Streaming and tool cards | complete | Grouped exploration, foreground/background shell, durable parts, replay, malformed-stream handling, live `tok/s` status + configurable turn token footer, sticky scroll compensation while scrolled up + clickable `Jump to latest ↓` badge, configurable thinking/markdown/verbosity modes | New provider-specific part types |
 | Providers | partial | OpenAI-compatible, Anthropic, Ollama, discovery, normalization | Full provider catalog and provider-specific auth |
 | LSP | missing | Configuration passthrough only | Diagnostics, symbols, navigation, edit integration |
 | Plugin runtime | missing | Configuration-backed CLI list/add/remove | Plugin loading, hooks, OpenCode plugin API |
@@ -44,4 +44,4 @@ Parity means matching OpenCode behavior. clawcode keeps its own visual design.
 - Compare help text against the installed OpenCode binary for each command family.
 - Use REA on the shipped binary when source and observed behavior disagree.
 
-Last full test run: 265 library tests and 110 TUI tests passing, plus all other integration targets. Strict Clippy and formatting checks pass.
+Last full test run: 272 library tests and 110 TUI tests passing, plus all other integration targets. Strict Clippy and formatting checks pass.

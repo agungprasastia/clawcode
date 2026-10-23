@@ -179,27 +179,6 @@ impl RuntimeClient {
         })
     }
 
-    /// Queue a generation start with an explicit model variant (`None` uses default).
-    pub fn start_generation_with_variant(
-        &self,
-        session_id: i64,
-        agent_mode: &str,
-        provider: &str,
-        model: &str,
-        variant: Option<&str>,
-        prompt: &str,
-    ) -> Result<(), String> {
-        self.start_generation_request(GenerationRequest {
-            session_id,
-            agent_mode,
-            provider,
-            model,
-            variant,
-            prompt,
-            mcp: None,
-        })
-    }
-
     /// Queue a generation with a session-specific MCP registry. `None` uses
     /// the registry supplied when the runtime was spawned.
     pub fn start_generation_request(&self, request: GenerationRequest<'_>) -> Result<(), String> {
@@ -236,40 +215,42 @@ impl RuntimeClient {
         model: &str,
         prompt: &str,
     ) -> Result<i64, String> {
-        self.start_generation_admitted_with_variant(
-            session_id, agent_mode, provider, model, None, prompt,
-        )
+        self.start_generation_admitted_request(GenerationRequest {
+            session_id,
+            agent_mode,
+            provider,
+            model,
+            variant: None,
+            prompt,
+            mcp: None,
+        })
     }
 
-    /// Queue a generation start with an optional model variant and block until durably admitted.
-    pub fn start_generation_admitted_with_variant(
+    /// Queue a generation start from a structured request and block until durably admitted.
+    pub fn start_generation_admitted_request(
         &self,
-        session_id: i64,
-        agent_mode: &str,
-        provider: &str,
-        model: &str,
-        variant: Option<&str>,
-        prompt: &str,
+        request: GenerationRequest<'_>,
     ) -> Result<i64, String> {
-        if prompt.len() > MAX_MESSAGE_BYTES {
+        if request.prompt.len() > MAX_MESSAGE_BYTES {
             return Err(format!(
                 "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
-                prompt.len()
+                request.prompt.len()
             ));
         }
         let (reply, reply_rx) = mpsc::channel();
         self.send(ClientCommand::StartGeneration {
-            session_id,
-            agent_mode: agent_mode.to_string(),
-            provider: provider.to_string(),
-            model: model.to_string(),
-            variant: variant
+            session_id: request.session_id,
+            agent_mode: request.agent_mode.to_string(),
+            provider: request.provider.to_string(),
+            model: request.model.to_string(),
+            variant: request
+                .variant
                 .map(str::trim)
                 .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("default"))
                 .map(str::to_string),
-            prompt: prompt.to_string(),
+            prompt: request.prompt.to_string(),
             reply: Some(reply),
-            mcp: None,
+            mcp: request.mcp,
         })?;
         reply_rx.recv().map_err(|error| error.to_string())?
     }
@@ -1041,15 +1022,7 @@ fn drain_session_loop(
 
         let gen_runtime = runtime.clone();
         let gen_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_generation(
-                &ctx,
-                &gen_runtime,
-                &config.model,
-                config.variant.as_deref(),
-                &promoted_input.content,
-                &config.agent_mode,
-                &config.provider,
-            );
+            run_generation(&ctx, &gen_runtime, &config, &promoted_input.content);
         }));
 
         if gen_result.is_err() {
@@ -1510,12 +1483,13 @@ fn bound_tool_text(mut value: String) -> String {
 fn run_generation(
     ctx: &SharedGenerationCtx,
     runtime: &GenerationRuntime,
-    model: &str,
-    variant: Option<&str>,
+    config: &SessionConfig,
     prompt: &str,
-    agent_mode: &str,
-    provider_name: &str,
 ) {
+    let model = config.model.as_str();
+    let variant = config.variant.as_deref();
+    let agent_mode = config.agent_mode.as_str();
+    let provider_name = config.provider.as_str();
     ctx.emit(
         "generation_started",
         &serde_json::json!({
