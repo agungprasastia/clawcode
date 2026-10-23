@@ -6,17 +6,19 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::chat::render_chat;
 
 use super::App;
 use super::dialogs::{
-    render_agents_dialog, render_git_dialog, render_model_suggestions_popup, render_models_dialog,
-    render_permission_dialog, render_question_dialog, render_sessions_dialog,
-    render_sessions_panel, render_skills_dialog, render_status_dialog, render_themes_dialog,
-    render_which_key,
+    render_agents_dialog, render_git_dialog, render_mcp_dialog, render_model_suggestions_popup,
+    render_models_dialog, render_palette_dialog, render_permission_dialog, render_question_dialog,
+    render_session_rename_dialog, render_sessions_dialog, render_sessions_panel,
+    render_skills_dialog, render_status_dialog, render_themes_dialog, render_which_key,
 };
 use super::home::render_home;
+use super::tabs::render_session_tabs;
 use super::theme::Theme;
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
@@ -40,6 +42,17 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     let workspace_area = main_chunks[0];
     let status_bar_area = main_chunks[1];
 
+    let workspace_area = if app.open_session_tabs().len() > 1 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(workspace_area);
+        render_session_tabs(frame, chunks[0], app, &theme);
+        chunks[1]
+    } else {
+        workspace_area
+    };
+
     if app.transcript().is_empty() && app.stream_parts().is_empty() && app.tool_rows().is_empty() {
         render_home(frame, workspace_area, app, &theme, mode_color);
     } else {
@@ -52,6 +65,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         render_permission_dialog(frame, area, dialog, &theme);
     } else if let Some(dialog) = app.question_dialog() {
         render_question_dialog(frame, area, dialog, &theme);
+    } else if let Some(dialog) = app.palette_dialog() {
+        render_palette_dialog(frame, area, dialog, &theme);
+    } else if let Some(dialog) = app.session_rename_dialog() {
+        render_session_rename_dialog(frame, area, dialog, &theme);
     } else if app.which_key().visible {
         render_which_key(frame, area, &theme);
     } else if let Some(dialog) = app.status_dialog() {
@@ -60,6 +77,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         render_git_dialog(frame, area, dialog, &theme);
     } else if let Some(dialog) = app.skills_dialog() {
         render_skills_dialog(frame, area, dialog, &theme);
+    } else if let Some(dialog) = app.mcp_dialog() {
+        render_mcp_dialog(frame, area, dialog, &theme);
     } else if let Some(dialog) = app.sessions_dialog() {
         render_sessions_dialog(frame, area, dialog, app.active_session_id(), &theme);
     } else if let Some(dialog) = app.agents_dialog() {
@@ -71,6 +90,45 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     } else if !app.session_listings().is_empty() {
         render_sessions_panel(frame, area, app, &theme);
     }
+}
+
+pub(crate) const MAX_INPUT_PROMPT_ROWS: u16 = 6;
+
+pub(crate) fn input_content_width(card_width: u16) -> u16 {
+    card_width.saturating_sub(5).max(1)
+}
+
+pub(crate) fn input_card_height(app: &App, card_width: u16) -> u16 {
+    let lines = wrap_prompt(app.prompt(), input_content_width(card_width))
+        .len()
+        .min(MAX_INPUT_PROMPT_ROWS as usize);
+    4 + lines.max(1) as u16
+}
+
+fn wrap_prompt(prompt: &str, width: u16) -> Vec<String> {
+    let width = width.max(1) as usize;
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for character in prompt.chars() {
+        if character == '\n' {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+            continue;
+        }
+        let character_width = match character {
+            '\t' => 4,
+            other => UnicodeWidthChar::width(other).unwrap_or(0),
+        };
+        if current_width > 0 && current_width + character_width > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(character);
+        current_width += character_width;
+    }
+    lines.push(current);
+    lines
 }
 
 pub(crate) fn render_input_card(
@@ -132,17 +190,21 @@ pub(crate) fn render_input_card(
 
     let content_area = h_chunks[1];
 
-    let prompt_text = if app.prompt().is_empty() {
-        Line::from(Span::styled(
-            app.placeholder(),
-            Style::default().fg(theme.dim),
-        ))
+    let prompt_is_empty = app.prompt().is_empty();
+    let prompt_lines = if prompt_is_empty {
+        vec![app.placeholder().to_string()]
     } else {
-        Line::from(Span::styled(
-            app.prompt(),
-            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-        ))
+        wrap_prompt(app.prompt(), content_area.width)
     };
+    let prompt_style = if prompt_is_empty {
+        Style::default().fg(theme.dim)
+    } else {
+        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)
+    };
+    let prompt_text = Line::from(Span::styled(
+        prompt_lines.first().cloned().unwrap_or_default(),
+        prompt_style,
+    ));
 
     let provider_text = if app.selected_provider().is_empty() {
         "disconnected"
@@ -182,7 +244,9 @@ pub(crate) fn render_input_card(
     }
 
     let cursor_prefix: String = app.prompt().chars().take(app.cursor_position()).collect();
-    let cursor_width = ratatui::text::Span::raw(&cursor_prefix).width();
+    let cursor_lines = wrap_prompt(&cursor_prefix, content_area.width);
+    let cursor_line = cursor_lines.len().saturating_sub(1);
+    let cursor_width = cursor_lines.last().map(|line| line.width()).unwrap_or(0);
 
     if area.height <= 2 {
         let cursor_x =
@@ -263,35 +327,44 @@ pub(crate) fn render_input_card(
         return;
     }
 
-    // Standard 5-row input card layout matching Crabcode
+    // Prompt rows grow with explicit newlines; metadata and cap stay docked.
+    let prompt_height = area.height.saturating_sub(4).max(1);
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Row 0: Top padding
-            Constraint::Length(1), // Row 1: Prompt / placeholder
-            Constraint::Length(1), // Row 2: Separator padding
-            Constraint::Length(1), // Row 3: Metadata chips ([PLAN] model provider)
-            Constraint::Length(1), // Row 4: Cap row (╹▀▀▀...)
+            Constraint::Length(1),
+            Constraint::Length(prompt_height),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(inner_area);
 
-    // Hardware terminal cursor positioning
+    let visible_rows = prompt_height as usize;
+    let start = (cursor_line + 1)
+        .saturating_sub(visible_rows)
+        .min(prompt_lines.len().saturating_sub(visible_rows));
+    let visible_lines: Vec<Line> = prompt_lines
+        .iter()
+        .skip(start)
+        .take(visible_rows)
+        .map(|line| Line::from(Span::styled(line.clone(), prompt_style)))
+        .collect();
+
     let cursor_x = content_area.x + (cursor_width as u16).min(content_area.width.saturating_sub(1));
-    let cursor_y = v_chunks[1].y;
+    let cursor_y = v_chunks[1].y + (cursor_line.saturating_sub(start) as u16);
     frame.set_cursor_position((cursor_x, cursor_y));
 
-    // Row 1: Prompt or placeholder
     frame.render_widget(
-        Paragraph::new(prompt_text),
+        Paragraph::new(visible_lines),
         Rect {
             x: content_area.x,
             y: v_chunks[1].y,
             width: content_area.width,
-            height: 1,
+            height: prompt_height,
         },
     );
 
-    // Row 3: Metadata chips
     frame.render_widget(
         Paragraph::new(Line::from(meta_spans)),
         Rect {
@@ -302,7 +375,6 @@ pub(crate) fn render_input_card(
         },
     );
 
-    // Row 4: Bottom cap row
     let cap_fill_width = area.width.saturating_sub(1) as usize;
     let cap_row = Paragraph::new(Line::from(vec![
         Span::styled("╹", Style::default().fg(mode_color)),

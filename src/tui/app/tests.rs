@@ -668,3 +668,296 @@ fn reasoning_steps_are_separate_and_restart_timer_after_tools() {
         other => panic!("expected active second reasoning, got {other:?}"),
     }
 }
+
+#[test]
+fn ctrl_c_clears_prompt_before_exiting() {
+    let mut app = App {
+        prompt: "draft text".into(),
+        ..App::default()
+    };
+    app.apply(UiEvent::Input(Input::ClearOrExit));
+    assert!(app.is_running());
+    assert_eq!(app.prompt(), "");
+    assert_eq!(app.cursor_position(), 0);
+
+    app.apply(UiEvent::Input(Input::ClearOrExit));
+    assert!(!app.is_running());
+}
+
+#[test]
+fn ctrl_d_deletes_forward_then_exits_when_empty() {
+    let mut app = App {
+        prompt: "ab".into(),
+        cursor_position: 0,
+        ..App::default()
+    };
+    app.apply(UiEvent::Input(Input::DeleteOrExit));
+    assert_eq!(app.prompt(), "b");
+    assert_eq!(app.cursor_position(), 0);
+
+    app.apply(UiEvent::Input(Input::DeleteOrExit));
+    assert_eq!(app.prompt(), "");
+    assert!(app.is_running());
+
+    app.apply(UiEvent::Input(Input::DeleteOrExit));
+    assert!(!app.is_running());
+}
+
+#[test]
+fn ctrl_x_leader_opens_models_without_inserting_text() {
+    let mut app = App::default();
+    app.apply(UiEvent::Input(Input::Leader));
+    assert!(app.which_key().visible);
+    assert_eq!(app.prompt(), "");
+
+    app.apply(UiEvent::Input(Input::Character('m')));
+    assert!(!app.which_key().visible);
+    assert!(app.models_dialog().is_some());
+    assert_eq!(app.prompt(), "");
+}
+
+#[test]
+fn leader_escape_dismisses_without_cancelling_turn() {
+    let mut app = App {
+        status: ConversationStatus::Active,
+        ..App::default()
+    };
+    app.apply(UiEvent::Input(Input::Leader));
+    app.apply(UiEvent::Input(Input::Cancel));
+
+    assert!(!app.which_key().visible);
+    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+}
+
+#[test]
+fn palette_filters_and_runs_exit_command() {
+    let mut app = App::default();
+    app.apply(UiEvent::Input(Input::Palette));
+    assert!(app.palette_dialog().is_some());
+
+    for character in "exit".chars() {
+        app.apply(UiEvent::Input(Input::Character(character)));
+    }
+    assert_eq!(
+        app.palette_dialog()
+            .and_then(|dialog| dialog.selected_item())
+            .map(|item| item.title),
+        Some("Exit the app")
+    );
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(!app.is_running());
+}
+
+#[test]
+fn rename_dialog_updates_persisted_session_title() {
+    let mut app = App::default();
+    app.new_session();
+    let session_id = app.active_session_id().unwrap();
+    assert!(app.is_running());
+
+    app.open_session_rename_dialog();
+    let dialog = app.session_rename_dialog.as_mut().unwrap();
+    dialog.title = "Renamed session".into();
+    dialog.cursor = dialog.title.chars().count();
+    app.apply(UiEvent::Input(Input::Submit));
+
+    let sessions = app.command_service.list_sessions().unwrap();
+    let session = sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .unwrap();
+    assert_eq!(session.title, "Renamed session");
+    assert!(app.session_rename_dialog().is_none());
+}
+
+#[test]
+fn ctrl_f_toggles_session_pin() {
+    let mut app = App::default();
+    app.new_session();
+    let session_id = app.active_session_id().unwrap();
+
+    app.apply(UiEvent::Input(Input::PinSession));
+    let pinned = app
+        .command_service
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .unwrap()
+        .pinned;
+    assert!(pinned);
+
+    app.apply(UiEvent::Input(Input::PinSession));
+    let pinned = app
+        .command_service
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .unwrap()
+        .pinned;
+    assert!(!pinned);
+}
+
+#[test]
+fn word_deletion_handles_unicode_and_word_boundaries() {
+    let mut app = App {
+        prompt: "alpha beta gamma".into(),
+        cursor_position: 16,
+        ..App::default()
+    };
+    app.handle_input_key(Input::DeleteWord);
+    assert_eq!(app.prompt(), "alpha beta ");
+    assert_eq!(app.cursor_position(), 11);
+
+    app.handle_input_key(Input::WordLeft);
+    assert_eq!(app.cursor_position(), 6);
+    app.handle_input_key(Input::DeleteWordForward);
+    assert_eq!(app.prompt(), "alpha ");
+}
+
+#[test]
+fn session_tabs_cycle_close_and_reopen() {
+    let mut app = App::default();
+    app.new_session();
+    let first = app.active_session_id().unwrap();
+    app.new_session();
+    let second = app.active_session_id().unwrap();
+
+    assert_eq!(app.open_session_tabs(), &[first, second]);
+    assert_eq!(app.active_session_id(), Some(second));
+
+    app.apply(UiEvent::Input(Input::SessionPrevious));
+    assert_eq!(app.active_session_id(), Some(first));
+
+    app.close_active_session_tab();
+    assert_eq!(app.active_session_id(), Some(second));
+    assert_eq!(app.open_session_tabs(), &[second]);
+
+    app.apply(UiEvent::Input(Input::ReopenTab));
+    assert_eq!(app.active_session_id(), Some(first));
+    assert_eq!(app.open_session_tabs(), &[second, first]);
+
+    app.apply(UiEvent::Input(Input::SelectSession(0)));
+    assert_eq!(app.active_session_id(), Some(second));
+}
+
+#[test]
+fn rename_updates_cached_session_tab_title() {
+    let mut app = App::default();
+    app.new_session();
+    let session_id = app.active_session_id().unwrap();
+    app.open_session_rename_dialog();
+    let dialog = app.session_rename_dialog.as_mut().unwrap();
+    dialog.title = "Renamed tab".into();
+    dialog.cursor = dialog.title.chars().count();
+    app.apply(UiEvent::Input(Input::Submit));
+
+    assert_eq!(app.session_tab_title(session_id), Some("Renamed tab"));
+}
+
+#[test]
+fn mcp_dialog_lists_disabled_servers_without_connecting() {
+    use crate::tui::dialogs::McpDialogStatus;
+
+    let mut app = App::default();
+    app.mcp_servers.clear();
+    app.mcp_servers.insert(
+        "offline".to_string(),
+        crate::config::McpServerConfig {
+            enabled: false,
+            command: vec!["definitely-not-a-real-mcp-command".to_string()],
+            ..crate::config::McpServerConfig::default()
+        },
+    );
+    let cwd = std::env::current_dir().unwrap();
+    app.mcp_registry = crate::mcp::McpRegistry::new(&app.mcp_servers, &cwd);
+
+    app.prompt = "/mcps".to_string();
+    app.submit_prompt();
+
+    let dialog = app.mcp_dialog().unwrap();
+    assert_eq!(dialog.items.len(), 1);
+    assert_eq!(dialog.items[0].name, "offline");
+    assert_eq!(dialog.items[0].status, McpDialogStatus::Disabled);
+    assert!(app.mcp_probing.is_empty());
+}
+
+#[test]
+fn mcp_dialog_probe_results_update_status() {
+    use crate::tui::dialogs::{McpDialogItem, McpDialogState, McpDialogStatus};
+
+    let mut app = App {
+        mcp_dialog: Some(McpDialogState::new(vec![McpDialogItem::new(
+            "local",
+            McpDialogStatus::Pending,
+        )])),
+        ..App::default()
+    };
+    app.mcp_probing.insert("local".to_string());
+    app.mcp_probe_tx
+        .send(McpProbeOutcome {
+            name: "local".to_string(),
+            result: Ok(3),
+        })
+        .unwrap();
+
+    assert!(app.poll_mcp_probes());
+    assert!(app.mcp_probing.is_empty());
+    assert_eq!(
+        app.mcp_dialog().unwrap().items[0].status,
+        McpDialogStatus::Connected { tool_count: 3 }
+    );
+
+    app.mcp_probing.insert("local".to_string());
+    app.mcp_probe_tx
+        .send(McpProbeOutcome {
+            name: "local".to_string(),
+            result: Err("connection refused".to_string()),
+        })
+        .unwrap();
+    assert!(app.poll_mcp_probes());
+    assert_eq!(
+        app.mcp_dialog().unwrap().items[0].status,
+        McpDialogStatus::Failed("connection refused".to_string())
+    );
+}
+
+#[test]
+fn mcp_dialog_can_disconnect_and_show_error_details() {
+    use crate::tui::dialogs::{McpDialogItem, McpDialogState, McpDialogStatus};
+
+    let mut app = App::default();
+    app.mcp_servers.clear();
+    app.mcp_servers.insert(
+        "local".to_string(),
+        crate::config::McpServerConfig {
+            enabled: true,
+            command: vec!["definitely-not-a-real-mcp-command".to_string()],
+            ..crate::config::McpServerConfig::default()
+        },
+    );
+    let cwd = std::env::current_dir().unwrap();
+    let registry = crate::mcp::McpRegistry::new(&app.mcp_servers, &cwd).unwrap();
+    app.mcp_registry = Some(registry);
+    app.mcp_dialog = Some(McpDialogState::new(vec![
+        McpDialogItem::new(
+            "broken",
+            McpDialogStatus::Failed("connection refused".to_string()),
+        ),
+        McpDialogItem::new("local", McpDialogStatus::Connected { tool_count: 2 }),
+    ]));
+
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.mcp_dialog().unwrap().detail.is_some());
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.mcp_dialog().unwrap().detail.is_none());
+
+    app.mcp_dialog.as_mut().unwrap().selected = 1;
+    app.apply(UiEvent::Input(Input::Character(' ')));
+    assert_eq!(
+        app.mcp_dialog().unwrap().items[1].status,
+        McpDialogStatus::Disabled
+    );
+    assert!(!app.mcp_registry.as_ref().unwrap().is_enabled("local"));
+}

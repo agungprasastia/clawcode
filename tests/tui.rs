@@ -1,3 +1,4 @@
+use clawcode::conversation::ConversationEvent;
 use clawcode::tui::{App, Input, UiEvent, UiEventQueue, render_to_test_backend, runtime_step};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -82,6 +83,11 @@ fn stream_flood_is_coalesced_and_priority_quit_bounds_redraws() {
 #[test]
 fn cancel_has_priority_over_stream_flood_without_quitting() {
     let mut app = App::default();
+    app.apply_conversation(ConversationEvent::PromptSubmitted {
+        provider: "openai".into(),
+        model: "mock".into(),
+        prompt: "run".into(),
+    });
     let mut events = UiEventQueue::new(4);
     for _ in 0..10_000 {
         events.push(UiEvent::StreamDelta("x".to_owned()));
@@ -245,6 +251,11 @@ fn retained_transcript_is_bounded_with_visible_truncation_marker() {
 #[test]
 fn runtime_step_keeps_bare_q_as_prompt_text_during_stream_flood() {
     let mut app = App::default();
+    app.apply_conversation(ConversationEvent::PromptSubmitted {
+        provider: "openai".into(),
+        model: "mock".into(),
+        prompt: "run".into(),
+    });
     let mut events = UiEventQueue::new(8);
     for _ in 0..10_000 {
         events.push(UiEvent::StreamDelta("x".to_owned()));
@@ -253,10 +264,7 @@ fn runtime_step_keeps_bare_q_as_prompt_text_during_stream_flood() {
     runtime_step(
         &mut app,
         &mut events,
-        Some(Event::Key(KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ))),
+        Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
         |_| Ok::<_, std::convert::Infallible>(()),
     )
     .unwrap();
@@ -1180,15 +1188,15 @@ fn agents_dialog_opens_navigates_filters_and_switches_mode() {
 }
 
 #[test]
-fn which_key_shortcuts_cheatsheet_toggle_and_direct_key_actions() {
+fn leader_shortcuts_cheatsheet_and_chords() {
     let mut app = App::default();
     assert!(!app.which_key().visible);
 
-    // Trigger via Ctrl+X (WhichKey)
-    app.apply(UiEvent::Input(Input::WhichKey));
+    // Ctrl+X starts leader mode.
+    app.apply(UiEvent::Input(Input::Leader));
     assert!(app.which_key().visible);
 
-    // Render WhichKey test
+    // Render the cheatsheet.
     let backend = ratatui::backend::TestBackend::new(100, 30);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal.draw(|f| clawcode::tui::render(f, &app)).unwrap();
@@ -1203,44 +1211,41 @@ fn which_key_shortcuts_cheatsheet_toggle_and_direct_key_actions() {
     }
     let text = lines.join("\n");
     assert!(text.contains("Keyboard Shortcuts (Cheatsheet)"));
-    assert!(text.contains("Toggle Plan/Build"));
-    assert!(text.contains("Open Agents dialog"));
+    assert!(text.contains("Command palette"));
+    assert!(text.contains("New session"));
+    assert!(text.contains("Exit app"));
 
-    // Direct key 'a' opens agents dialog and closes which_key
+    // Leader chord 'a' opens the agents dialog and consumes the chord.
     app.apply(UiEvent::Input(Input::Character('a')));
     assert!(!app.which_key().visible);
     assert!(app.agents_dialog().is_some());
+    assert_eq!(app.prompt(), "");
 
-    // Close agents dialog
+    // Close agents dialog.
     app.apply(UiEvent::Input(Input::Cancel));
     assert!(app.agents_dialog().is_none());
 
-    // Trigger via /keys
+    // /keys shows the cheatsheet again.
     for ch in "/keys".chars() {
         app.apply(UiEvent::Input(Input::Character(ch)));
     }
     app.apply(UiEvent::Input(Input::Submit));
     assert!(app.which_key().visible);
 
-    // Direct key 't' opens themes dialog
+    // Leader 't' is the terminal pane placeholder, not the old themes shortcut.
     app.apply(UiEvent::Input(Input::Character('t')));
     assert!(!app.which_key().visible);
-    assert!(app.themes_dialog().is_some());
-
-    app.apply(UiEvent::Input(Input::Cancel));
     assert!(app.themes_dialog().is_none());
+    assert!(app.diagnostic().contains("Terminal pane"));
 
-    // Direct mode toggle via 'b' and 'p'
-    app.apply(UiEvent::Input(Input::WhichKey));
-    app.apply(UiEvent::Input(Input::Character('b')));
+    // Shift+Tab cycles Plan/Build agents.
+    app.apply(UiEvent::Input(Input::CycleAgent));
     assert_eq!(app.mode(), clawcode::tui::ConversationMode::Build);
-
-    app.apply(UiEvent::Input(Input::WhichKey));
-    app.apply(UiEvent::Input(Input::Character('p')));
+    app.apply(UiEvent::Input(Input::CycleAgent));
     assert_eq!(app.mode(), clawcode::tui::ConversationMode::Plan);
 
-    // Esc dismisses which_key
-    app.apply(UiEvent::Input(Input::WhichKey));
+    // Esc dismisses leader without changing app state.
+    app.apply(UiEvent::Input(Input::Leader));
     assert!(app.which_key().visible);
     app.apply(UiEvent::Input(Input::Cancel));
     assert!(!app.which_key().visible);
@@ -1563,7 +1568,7 @@ fn sessions_switching_hydrates_messages_from_database() {
 }
 
 #[test]
-fn which_key_r_opens_sessions_dialog() {
+fn leader_l_opens_sessions_dialog() {
     let db = clawcode::persistence::Db::open_in_memory().unwrap();
     let _s = db.create_session("Mock session").unwrap();
 
@@ -1571,12 +1576,12 @@ fn which_key_r_opens_sessions_dialog() {
     let service = clawcode::cli::CommandService::with_db(clawcode::cli::CliDiscovery::new(), db);
     app.set_command_service(service);
 
-    // Open WhichKey
-    app.apply(UiEvent::Input(Input::WhichKey));
+    // Open leader mode.
+    app.apply(UiEvent::Input(Input::Leader));
     assert!(app.which_key().visible);
 
-    // 'r' opens sessions dialog
-    app.apply(UiEvent::Input(Input::Character('r')));
+    // 'l' opens sessions dialog.
+    app.apply(UiEvent::Input(Input::Character('l')));
     assert!(!app.which_key().visible);
     assert!(app.sessions_dialog().is_some());
 }
@@ -5568,4 +5573,153 @@ fn reasoning_after_tools_renders_at_tail_with_fresh_thinking_label() {
         thinking_y > tool_y,
         "active reasoning should render after the tool step\n{text}"
     );
+}
+
+#[test]
+fn multiline_editing_moves_between_logical_lines() {
+    let mut app = App::default();
+    app.insert_str_at_cursor("alpha\nbeta");
+    assert_eq!(app.prompt(), "alpha\nbeta");
+    assert_eq!(app.cursor_position(), 10);
+
+    app.apply(UiEvent::Input(Input::Up));
+    assert_eq!(app.cursor_position(), 4);
+    app.apply(UiEvent::Input(Input::Down));
+    assert_eq!(app.cursor_position(), 10);
+
+    app.apply(UiEvent::Input(Input::Home));
+    assert_eq!(app.cursor_position(), 6);
+    app.apply(UiEvent::Input(Input::End));
+    assert_eq!(app.cursor_position(), 10);
+
+    app.apply(UiEvent::Input(Input::Newline));
+    assert_eq!(app.prompt(), "alpha\nbeta\n");
+    assert_eq!(app.cursor_position(), 11);
+}
+
+#[test]
+fn pasted_crlf_is_normalized_to_newlines() {
+    let mut app = App::default();
+    app.insert_str_at_cursor("first\r\nsecond\rthird");
+    assert_eq!(app.prompt(), "first\nsecond\nthird");
+    assert_eq!(app.cursor_position(), 18);
+}
+
+#[test]
+fn multiline_prompt_renders_on_separate_rows() {
+    let mut app = App::default();
+    app.insert_str_at_cursor("first line\nsecond line");
+
+    let backend = ratatui::backend::TestBackend::new(80, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
+    let text = (0..30)
+        .map(|y| {
+            (0..80)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("first line"), "{text}");
+    assert!(text.contains("second line"), "{text}");
+}
+
+#[test]
+fn input_undo_redo_coalesces_typing_and_deleting() {
+    let mut app = App::default();
+    for character in "hello".chars() {
+        app.apply(UiEvent::Input(Input::Character(character)));
+    }
+    assert_eq!(app.prompt(), "hello");
+
+    app.apply(UiEvent::Input(Input::Undo));
+    assert_eq!(app.prompt(), "");
+    assert_eq!(app.cursor_position(), 0);
+
+    app.apply(UiEvent::Input(Input::Redo));
+    assert_eq!(app.prompt(), "hello");
+    assert_eq!(app.cursor_position(), 5);
+
+    app.apply(UiEvent::Input(Input::Left));
+    app.apply(UiEvent::Input(Input::Backspace));
+    assert_eq!(app.prompt(), "helo");
+    app.apply(UiEvent::Input(Input::Undo));
+    assert_eq!(app.prompt(), "hello");
+    app.apply(UiEvent::Input(Input::Redo));
+    assert_eq!(app.prompt(), "helo");
+}
+
+#[test]
+fn cursor_movement_splits_input_undo_runs() {
+    let mut app = App::default();
+    app.apply(UiEvent::Input(Input::Character('a')));
+    app.apply(UiEvent::Input(Input::Character('b')));
+    app.apply(UiEvent::Input(Input::Left));
+    app.apply(UiEvent::Input(Input::Character('X')));
+    assert_eq!(app.prompt(), "aXb");
+
+    app.apply(UiEvent::Input(Input::Undo));
+    assert_eq!(app.prompt(), "ab");
+    app.apply(UiEvent::Input(Input::Undo));
+    assert_eq!(app.prompt(), "");
+    app.apply(UiEvent::Input(Input::Redo));
+    assert_eq!(app.prompt(), "ab");
+    app.apply(UiEvent::Input(Input::Redo));
+    assert_eq!(app.prompt(), "aXb");
+}
+
+#[test]
+fn pasted_text_and_cleared_prompt_are_undoable() {
+    let mut app = App::default();
+    app.insert_str_at_cursor("first\nsecond");
+    assert_eq!(app.prompt(), "first\nsecond");
+    app.apply(UiEvent::Input(Input::Undo));
+    assert_eq!(app.prompt(), "");
+
+    app.apply(UiEvent::Input(Input::Redo));
+    app.apply(UiEvent::Input(Input::ClearOrExit));
+    assert_eq!(app.prompt(), "");
+    app.apply(UiEvent::Input(Input::Undo));
+    assert_eq!(app.prompt(), "first\nsecond");
+}
+
+#[test]
+fn multiple_session_tabs_render_and_close_back_to_single_view() {
+    let mut app = App::default();
+    app.new_session();
+    app.new_session();
+
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
+    let text = (0..30)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("1. New session"), "{text}");
+    assert!(text.contains("2. New session"), "{text}");
+
+    app.close_active_session_tab();
+    assert_eq!(app.open_session_tabs().len(), 1);
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, &app))
+        .unwrap();
+    let text = (0..30)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("2. New session"), "{text}");
 }

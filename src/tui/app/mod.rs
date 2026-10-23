@@ -5,6 +5,7 @@ pub mod runtime_bridge;
 pub mod session_sync;
 pub mod streaming;
 pub mod suggestions;
+pub mod tabs;
 pub mod tool_rows;
 pub mod util;
 
@@ -13,7 +14,9 @@ mod tests;
 
 use ratatui::layout::Rect;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+use std::sync::mpsc;
 
 use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
 use crate::conversation::ConversationEvent;
@@ -23,9 +26,9 @@ use crate::runtime::RuntimeEvent;
 use crate::runtime::client::RuntimeClient;
 
 use super::dialogs::{
-    AgentsDialogState, GitDialogState, ModelsDialogState, PermissionDecision,
-    PermissionDialogState, QuestionDialogState, SessionsDialogState, SkillsDialogState,
-    StatusDialogState, ThemesDialogState, WhichKeyState,
+    AgentsDialogState, GitDialogState, McpDialogState, ModelsDialogState, PaletteDialogState,
+    PermissionDecision, PermissionDialogState, QuestionDialogState, SessionRenameDialogState,
+    SessionsDialogState, SkillsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState,
 };
 use super::home::HomeState;
 
@@ -71,15 +74,29 @@ pub enum Input {
     Quit,
     Cancel,
     Clear,
+    ClearOrExit,
+    DeleteOrExit,
     Character(char),
     Paste,
     Backspace,
+    Delete,
+    DeleteWord,
+    DeleteWordForward,
+    DeleteToLineStart,
+    DeleteToLineEnd,
+    DeleteLine,
     Submit,
+    Newline,
+    Undo,
+    Redo,
     ToggleMode,
+    CycleAgent,
     Up,
     Down,
     Left,
     Right,
+    WordLeft,
+    WordRight,
     ScrollUp,
     ScrollDown,
     PageUp,
@@ -87,7 +104,25 @@ pub enum Input {
     Home,
     End,
     WhichKey,
+    Leader,
+    Palette,
+    OpenMenu,
+    RenameSession,
+    PinSession,
+    CycleModel,
+    CycleModelReverse,
+    CycleVariant,
+    SessionNext,
+    SessionPrevious,
+    ReopenTab,
+    SelectSession(usize),
     Click { column: u16, row: u16 },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum InputEditKind {
+    Typing,
+    Deleting,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -97,6 +132,11 @@ pub enum UiEvent {
     StreamDelta(String),
     Paste(String),
     MouseClick { x: u16, y: u16 },
+}
+
+pub(crate) struct McpProbeOutcome {
+    pub name: String,
+    pub result: Result<usize, String>,
 }
 
 pub struct App {
@@ -120,6 +160,12 @@ pub struct App {
     sessions: std::collections::HashMap<i64, ClientSessionState>,
     /// Snapshot shown by the /sessions panel.
     session_listings: Vec<crate::persistence::Session>,
+    /// Session ids currently open as tabs, in display order.
+    open_session_tabs: Vec<i64>,
+    /// Most recently closed tabs, newest last.
+    recently_closed_tabs: Vec<i64>,
+    /// Cached tab titles so rendering does not query SQLite every frame.
+    session_titles: std::collections::HashMap<i64, String>,
     permission_dialog: Option<PermissionDialogState>,
     last_permission_decision: Option<PermissionDecision>,
     question_dialog: Option<QuestionDialogState>,
@@ -131,10 +177,22 @@ pub struct App {
     status_dialog: Option<StatusDialogState>,
     git_dialog: Option<GitDialogState>,
     skills_dialog: Option<SkillsDialogState>,
+    mcp_dialog: Option<McpDialogState>,
+    mcp_registry: Option<Arc<crate::mcp::McpRegistry>>,
+    mcp_servers: BTreeMap<String, crate::config::McpServerConfig>,
+    mcp_probe_tx: mpsc::Sender<McpProbeOutcome>,
+    mcp_probe_rx: mpsc::Receiver<McpProbeOutcome>,
+    mcp_probing: HashSet<String>,
     /// Active theme color scheme.
     theme: crate::tui::ThemeKind,
     /// Quick keyboard shortcuts popup status.
     which_key: WhichKeyState,
+    /// True while Ctrl+X leader mode is waiting for a chord.
+    leader_pending: bool,
+    /// Command palette overlay.
+    palette_dialog: Option<PaletteDialogState>,
+    /// Inline editor for renaming the active session.
+    session_rename_dialog: Option<SessionRenameDialogState>,
     /// Cached list of discovered models for suggestions and selection.
     available_models: Vec<crate::provider::ModelInfo>,
     /// Cached git branch of the workspace
@@ -161,6 +219,9 @@ pub struct App {
     history_index: Option<usize>,
     /// Saved draft when user was typing and started navigating history with Up arrow.
     draft_prompt: String,
+    input_undo: Vec<(String, usize)>,
+    input_redo: Vec<(String, usize)>,
+    last_input_edit: Option<InputEditKind>,
     active_tool: Option<ActiveToolInfo>,
     tool_rows: Vec<ToolRow>,
     active_generation_id: Option<i64>,
@@ -194,6 +255,8 @@ impl App {
         let mut command_service =
             cli::runtime_service_with_config(&config).expect("in-memory runtime database");
         let available_models = command_service.models().unwrap_or_default();
+        let mcp_servers = config.mcp.clone();
+        let (mcp_probe_tx, mcp_probe_rx) = mpsc::channel();
         Self {
             running: true,
             cancellation_pending: false,
@@ -212,6 +275,9 @@ impl App {
             active_session_id: None,
             sessions: std::collections::HashMap::new(),
             session_listings: Vec::new(),
+            open_session_tabs: Vec::new(),
+            recently_closed_tabs: Vec::new(),
+            session_titles: std::collections::HashMap::new(),
             permission_dialog: None,
             last_permission_decision: None,
             question_dialog: None,
@@ -223,8 +289,17 @@ impl App {
             status_dialog: None,
             git_dialog: None,
             skills_dialog: None,
+            mcp_dialog: None,
+            mcp_registry: None,
+            mcp_servers,
+            mcp_probe_tx,
+            mcp_probe_rx,
+            mcp_probing: HashSet::new(),
             theme: crate::tui::ThemeKind::default(),
             which_key: WhichKeyState::default(),
+            leader_pending: false,
+            palette_dialog: None,
+            session_rename_dialog: None,
             available_models,
             git_branch: crate::platform::get_current_branch(),
             home_state: HomeState::new(),
@@ -238,6 +313,9 @@ impl App {
             prompt_history: Vec::new(),
             history_index: None,
             draft_prompt: String::new(),
+            input_undo: Vec::new(),
+            input_redo: Vec::new(),
+            last_input_edit: None,
             active_tool: None,
             tool_rows: Vec::new(),
             active_generation_id: None,
@@ -303,19 +381,9 @@ impl App {
             return true;
         };
 
-        let quitting = event == UiEvent::Input(Input::Quit)
-            && self.session_listings.is_empty()
-            && self.permission_dialog.is_none()
-            && self.question_dialog.is_none()
-            && self.sessions_dialog.is_none()
-            && self.models_dialog.is_none()
-            && self.agents_dialog.is_none()
-            && self.themes_dialog.is_none()
-            && self.status_dialog.is_none()
-            && !self.which_key.visible;
         let cancelling = event == UiEvent::Input(Input::Cancel);
         self.apply(event);
-        if quitting || cancelling {
+        if !self.running || cancelling {
             events.clear();
         } else {
             let pending = events.drain();

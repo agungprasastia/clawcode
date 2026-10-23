@@ -1,5 +1,6 @@
 use clawcode::persistence::{
-    Db, InputDelivery, InputStatus, MAX_MESSAGE_BYTES, NewToolCall, WriterHandle,
+    Db, ForkBoundaryType, ForkSessionError, InputDelivery, InputStatus, MAX_MESSAGE_BYTES,
+    NewToolCall, RevertError, SavedPermissionError, WriterHandle,
 };
 use std::path::PathBuf;
 
@@ -41,6 +42,208 @@ fn session_crud_and_restart_recovery() {
     assert!(db.list_sessions().unwrap().is_empty());
     assert!(db.messages(session_id).unwrap().is_empty());
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn fork_copies_history_and_remaps_tool_calls() {
+    let db = Db::open_in_memory().unwrap();
+    let source = db.create_session("fork me").unwrap();
+    let user = db.append_message(source.id, "user", "hello").unwrap();
+    let assistant = db.append_message(source.id, "assistant", "hi").unwrap();
+    let generation = db
+        .start_generation(source.id, "build", "test", "model")
+        .unwrap();
+    let (tool, _) = db
+        .create_tool_call(NewToolCall {
+            session_id: source.id,
+            generation_id: generation.id,
+            assistant_message_id: assistant.id,
+            call_id: "call-1",
+            tool_name: "read_file",
+            arguments: "{}",
+        })
+        .unwrap();
+
+    let forked = db.fork_session(source.id).unwrap();
+    assert_ne!(forked.id, source.id);
+    assert_eq!(forked.title, source.title);
+    assert_eq!(forked.workspace_id, source.workspace_id);
+
+    let source_messages = db.messages(source.id).unwrap();
+    let forked_messages = db.messages(forked.id).unwrap();
+    let summary = |messages: &[clawcode::persistence::Message]| {
+        messages
+            .iter()
+            .map(|message| (message.role.clone(), message.content.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(summary(&source_messages), summary(&forked_messages));
+    assert!(
+        forked_messages
+            .iter()
+            .all(|message| message.id != user.id && message.id != assistant.id)
+    );
+
+    let forked_tools = db.tool_calls(forked.id).unwrap();
+    assert_eq!(forked_tools.len(), 1);
+    assert_eq!(forked_tools[0].call_id, tool.call_id);
+    assert_eq!(forked_tools[0].session_id, forked.id);
+    assert_eq!(forked_tools[0].assistant_message_id, forked_messages[1].id);
+    assert!(db.tool_calls(source.id).unwrap()[0].id == tool.id);
+}
+
+#[test]
+fn fork_before_copies_strictly_earlier_history_and_records_parent() {
+    let db = Db::open_in_memory().unwrap();
+    let source = db.create_session("branch").unwrap();
+    db.append_message(source.id, "user", "one").unwrap();
+    let boundary = db.append_message(source.id, "assistant", "two").unwrap();
+    db.append_message(source.id, "user", "three").unwrap();
+
+    let forked = db
+        .fork_session_before(source.id, Some(boundary.id))
+        .unwrap();
+    let messages = db.messages(forked.id).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "one");
+
+    let summary = db
+        .session_summaries(true, 20)
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == forked.id)
+        .unwrap();
+    assert_eq!(summary.parent_id, Some(source.id));
+    assert_eq!(summary.fork_boundary_type, Some(ForkBoundaryType::Before));
+    assert_eq!(summary.fork_boundary_message_id, Some(boundary.id));
+}
+
+#[test]
+fn fork_through_copies_full_history_and_reports_boundary_errors() {
+    let db = Db::open_in_memory().unwrap();
+    let source = db.create_session("full").unwrap();
+    let first = db.append_message(source.id, "user", "one").unwrap();
+    let last = db.append_message(source.id, "assistant", "two").unwrap();
+
+    let forked = db.fork_session(source.id).unwrap();
+    assert_eq!(db.messages(forked.id).unwrap().len(), 2);
+    let summary = db
+        .session_summaries(true, 20)
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == forked.id)
+        .unwrap();
+    assert_eq!(summary.fork_boundary_type, Some(ForkBoundaryType::Through));
+    assert_eq!(summary.fork_boundary_message_id, Some(last.id));
+
+    let missing = db
+        .fork_session_before(source.id, Some(first.id + last.id + 10_000))
+        .unwrap_err();
+    assert!(matches!(missing, ForkSessionError::MessageNotFound(_)));
+
+    let empty = db.create_session("empty").unwrap();
+    assert!(matches!(
+        db.fork_session(empty.id).unwrap_err(),
+        ForkSessionError::Empty(id) if id == empty.id
+    ));
+
+    assert!(matches!(
+        db.fork_session(9_999_999).unwrap_err(),
+        ForkSessionError::SessionNotFound
+    ));
+}
+
+#[test]
+fn saved_permissions_add_list_update_conflict_and_remove() {
+    let db = Db::open_in_memory().unwrap();
+    db.add_saved_permissions(
+        "prj_one",
+        "bash",
+        &["git status".to_string(), "cargo test".to_string()],
+    )
+    .unwrap();
+    db.add_saved_permissions("prj_one", "bash", &["git status".to_string()])
+        .unwrap();
+    db.add_saved_permissions("prj_two", "bash", &["git status".to_string()])
+        .unwrap();
+
+    let saved = db.saved_permissions(Some("prj_one")).unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[0].action, "bash");
+    assert_eq!(saved[0].resource, "git status");
+    assert_eq!(db.saved_permissions(None).unwrap().len(), 3);
+
+    let updated = db
+        .update_saved_permission(saved[0].id, Some("edit"), Some("src/*"))
+        .unwrap();
+    assert_eq!(updated.action, "edit");
+    assert_eq!(updated.resource, "src/*");
+
+    let conflict = db
+        .update_saved_permission(saved[1].id, Some("edit"), Some("src/*"))
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        SavedPermissionError::Conflict { action, resource }
+            if action == "edit" && resource == "src/*"
+    ));
+
+    db.remove_saved_permission(updated.id).unwrap();
+    assert_eq!(db.saved_permissions(Some("prj_one")).unwrap().len(), 1);
+    db.remove_saved_permission(updated.id).unwrap();
+    assert!(matches!(
+        db.update_saved_permission(updated.id, None, None)
+            .unwrap_err(),
+        SavedPermissionError::NotFound(_)
+    ));
+}
+
+#[test]
+fn revert_stage_clear_and_commit_boundary_and_queued_inputs() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db.create_session("revert").unwrap();
+    let session_id = session.id;
+    db.append_message(session.id, "user", "one").unwrap();
+    let boundary = db.append_message(session.id, "assistant", "two").unwrap();
+    db.append_message(session.id, "user", "three").unwrap();
+    let (queued, _) = db
+        .admit_input(session.id, "queued after boundary", InputDelivery::Queue)
+        .unwrap();
+
+    let staged = db.stage_revert(session.id, boundary.id).unwrap();
+    assert_eq!(staged.message_id, boundary.id);
+    let summary = db
+        .session_summaries(true, 20)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == session_id)
+        .unwrap();
+    assert_eq!(summary.revert_message_id, Some(boundary.id));
+
+    db.clear_revert(session.id).unwrap();
+    assert_eq!(db.messages(session.id).unwrap().len(), 3);
+    assert!(db.session_input(queued.id).unwrap().is_some());
+
+    db.stage_revert(session.id, boundary.id).unwrap();
+    db.commit_revert(session.id).unwrap();
+    let messages = db.messages(session.id).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "one");
+    assert!(db.session_input(queued.id).unwrap().is_none());
+    let summary = db
+        .session_summaries(true, 20)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == session_id)
+        .unwrap();
+    assert_eq!(summary.revert_message_id, None);
+
+    let unknown = db.stage_revert(session.id, boundary.id).unwrap_err();
+    assert!(matches!(unknown, RevertError::MessageNotFound(_)));
+    assert!(matches!(
+        db.stage_revert(9_999_999, boundary.id).unwrap_err(),
+        RevertError::SessionNotFound
+    ));
 }
 
 #[test]

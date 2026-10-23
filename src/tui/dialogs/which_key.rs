@@ -68,16 +68,17 @@ pub fn render_which_key(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         return;
     }
 
-    let shortcuts: [(&str, &str, &str, &str); 7] = [
-        ("Tab", "Toggle Plan/Build", "a", "Open Agents dialog"),
-        ("Ctrl+X", "Toggle Shortcuts", "t", "Open Themes dialog"),
-        ("Ctrl+C", "Cancel Turn", "m", "Open Models dialog"),
-        ("Ctrl+L", "Clear Screen", "s", "System Status dialog"),
-        ("Esc", "Dismiss Dialog / Panel", "p", "Switch to Plan mode"),
-        ("↑ / ↓", "History & Selection", "b", "Switch to Build mode"),
+    let shortcuts: [(&str, &str, &str, &str); 8] = [
+        ("Ctrl+P", "Command palette", "Ctrl+X n", "New session"),
+        ("Ctrl+O", "Sessions & projects", "Ctrl+X l", "List sessions"),
+        ("Shift+Tab", "Cycle agent", "Ctrl+X m", "Models"),
+        ("Ctrl+R", "Rename session", "Ctrl+X a", "Agents"),
+        ("Ctrl+F", "Pin session", "Ctrl+X s", "System status"),
+        ("Esc", "Interrupt session", "Ctrl+X c", "Compact session"),
+        ("Ctrl+C", "Clear input / exit", "Ctrl+X q", "Exit app"),
         (
             "/connect",
-            "Connect AI provider",
+            "Connect provider",
             "/sessions",
             "List saved sessions",
         ),
@@ -121,17 +122,17 @@ pub fn render_which_key(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
                 .fg(theme.amber)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" or ", Style::default().fg(theme.dim)),
+        Span::styled(
+            " to dismiss, or complete a ",
+            Style::default().fg(theme.dim),
+        ),
         Span::styled(
             "Ctrl+X",
             Style::default()
                 .fg(theme.amber)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            " to dismiss, or press highlighted keys directly.",
-            Style::default().fg(theme.dim),
-        ),
+        Span::styled(" leader chord.", Style::default().fg(theme.dim)),
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);

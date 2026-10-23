@@ -15,7 +15,35 @@
     "provider": { "type": "object" },
     "providers": { "type": "object" },
     "agent": { "type": "object" },
-    "agents": { "type": "object" }
+    "agents": { "type": "object" },
+    "mcp": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string" },
+          "enabled": { "type": "boolean" },
+          "disabled": { "type": "boolean" },
+          "command": {
+            "anyOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "environment": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "url": { "type": "string" },
+          "headers": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "oauth": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    }
   },
   "additionalProperties": false
 }

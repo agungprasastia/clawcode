@@ -85,6 +85,24 @@ pub struct ConfigAgent {
     pub temperature: Option<u32>,
 }
 
+/// One MCP server from `mcp`/`mcp.servers`. Local servers are spawned over
+/// stdio; remote servers use streamable HTTP.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct McpServerConfig {
+    pub enabled: bool,
+    pub command: Vec<String>,
+    pub environment: BTreeMap<String, String>,
+    pub url: Option<String>,
+    pub headers: BTreeMap<String, String>,
+    pub oauth: bool,
+}
+
+impl McpServerConfig {
+    pub fn is_remote(&self) -> bool {
+        self.url.is_some()
+    }
+}
+
 /// Manual Debug: SecretRef already redacts values; keep Config debug safe.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -94,6 +112,7 @@ pub struct Config {
     pub api_key: Option<SecretRef>,
     pub providers: BTreeMap<String, CustomProviderConfig>,
     pub agents: BTreeMap<String, ConfigAgent>,
+    pub mcp: BTreeMap<String, McpServerConfig>,
 }
 
 impl Default for Config {
@@ -105,6 +124,7 @@ impl Default for Config {
             api_key: None,
             providers: BTreeMap::new(),
             agents: BTreeMap::new(),
+            mcp: BTreeMap::new(),
         }
     }
 }
@@ -442,6 +462,129 @@ fn parse_agents(
     Ok(map)
 }
 
+fn parse_string_map(
+    path: &str,
+    val: &jsonc::Value,
+    field: &str,
+) -> Result<BTreeMap<String, String>, ConfigDiagnostic> {
+    let obj = val.as_object().ok_or_else(|| ConfigDiagnostic::Parse {
+        path: path.to_string(),
+        line: val.line(),
+        column: 1,
+        message: format!("{field} must be an object"),
+    })?;
+    let mut map = BTreeMap::new();
+    for (key, value) in obj {
+        let value = value.as_str().ok_or_else(|| ConfigDiagnostic::Parse {
+            path: path.to_string(),
+            line: value.line(),
+            column: 1,
+            message: format!("{field}.{key} must be a string"),
+        })?;
+        map.insert(key.clone(), value.to_string());
+    }
+    Ok(map)
+}
+
+fn parse_mcp_servers(
+    path: &str,
+    val: &jsonc::Value,
+) -> Result<BTreeMap<String, McpServerConfig>, ConfigDiagnostic> {
+    let obj = val.as_object().ok_or_else(|| ConfigDiagnostic::Parse {
+        path: path.to_string(),
+        line: val.line(),
+        column: 1,
+        message: "mcp must be an object".into(),
+    })?;
+    let entries = obj
+        .iter()
+        .find(|(key, _)| key == "servers")
+        .map(|(_, servers)| {
+            servers.as_object().ok_or_else(|| ConfigDiagnostic::Parse {
+                path: path.to_string(),
+                line: servers.line(),
+                column: 1,
+                message: "mcp.servers must be an object".into(),
+            })
+        })
+        .transpose()?
+        .unwrap_or(obj);
+
+    let mut map = BTreeMap::new();
+    for (name, value) in entries {
+        let server = value.as_object().ok_or_else(|| ConfigDiagnostic::Parse {
+            path: path.to_string(),
+            line: value.line(),
+            column: 1,
+            message: format!("mcp server `{name}` must be an object"),
+        })?;
+        let mut config = McpServerConfig {
+            enabled: true,
+            oauth: true,
+            ..McpServerConfig::default()
+        };
+        for (key, value) in server {
+            match key.as_str() {
+                "enabled" => config.enabled = value.as_bool().unwrap_or(true),
+                "disabled" => {
+                    if value.as_bool() == Some(true) {
+                        config.enabled = false;
+                    }
+                }
+                "command" => {
+                    config.command = if let Some(command) = value.as_str() {
+                        vec![command.to_string()]
+                    } else if let Some(items) = value.as_array() {
+                        items
+                            .iter()
+                            .map(|item| {
+                                item.as_str().map(str::to_string).ok_or_else(|| {
+                                    ConfigDiagnostic::Parse {
+                                        path: path.to_string(),
+                                        line: item.line(),
+                                        column: 1,
+                                        message: format!(
+                                            "mcp server `{name}` command entries must be strings"
+                                        ),
+                                    }
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        return Err(ConfigDiagnostic::Parse {
+                            path: path.to_string(),
+                            line: value.line(),
+                            column: 1,
+                            message: format!("mcp server `{name}` command must be a string array"),
+                        });
+                    };
+                }
+                "environment" | "env" => {
+                    config.environment =
+                        parse_string_map(path, value, &format!("mcp server `{name}` environment"))?;
+                }
+                "url" => config.url = value.as_str().map(str::to_string),
+                "headers" => {
+                    config.headers =
+                        parse_string_map(path, value, &format!("mcp server `{name}` headers"))?;
+                }
+                "oauth" => config.oauth = value.as_bool().unwrap_or(true),
+                _ => {}
+            }
+        }
+        if config.enabled && config.command.is_empty() && config.url.is_none() {
+            return Err(ConfigDiagnostic::Parse {
+                path: path.to_string(),
+                line: value.line(),
+                column: 1,
+                message: format!("mcp server `{name}` needs a command or url"),
+            });
+        }
+        map.insert(name.clone(), config);
+    }
+    Ok(map)
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
@@ -583,6 +726,14 @@ impl ConfigLoader {
             }
         }
 
+        let mut mcp = BTreeMap::new();
+        for (k, v) in object {
+            if k == "mcp" {
+                let parsed = parse_mcp_servers(&path, v)?;
+                mcp.extend(parsed);
+            }
+        }
+
         Ok(Config {
             schema_version: CURRENT_SCHEMA_VERSION,
             model: get_non_empty_str("model"),
@@ -590,6 +741,7 @@ impl ConfigLoader {
             api_key,
             providers,
             agents,
+            mcp,
         })
     }
 
@@ -697,6 +849,8 @@ impl Config {
         providers.extend(project.providers);
         let mut agents = global.agents;
         agents.extend(project.agents);
+        let mut mcp = global.mcp;
+        mcp.extend(project.mcp);
 
         Ok(Self {
             schema_version: project.schema_version,
@@ -705,6 +859,7 @@ impl Config {
             api_key: project.api_key.or(global.api_key),
             providers,
             agents,
+            mcp,
         })
     }
 }

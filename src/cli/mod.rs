@@ -1,3 +1,8 @@
+pub mod acp;
+pub mod opencode;
+pub mod server;
+pub mod spec;
+
 use crate::persistence::{Db, Message, Session};
 use crate::provider::{DiscoveryService, DiscoverySource, ModelInfo, ProviderError, ProviderId};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -393,6 +398,27 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
                     .map_err(|error| ProviderError::Protocol(error.to_string()))
             })
     }
+
+    pub fn rename_session(&self, session_id: i64, title: &str) -> Result<(), ProviderError> {
+        let title = bounded_title(title);
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.rename_session(session_id, &title)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn set_session_pinned(&self, session_id: i64, pinned: bool) -> Result<(), ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.set_session_pinned(session_id, pinned)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
 }
 
 const MAX_SESSION_TITLE_BYTES: usize = 80;
@@ -410,11 +436,13 @@ fn bounded_title(title: &str) -> String {
 
 pub fn run() -> std::io::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if arguments.first().map(String::as_str) == Some("--version") {
-        println!("clawcode {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+    if arguments.is_empty() {
+        return crate::tui::run();
     }
-    if !arguments.is_empty() {
+
+    // Slash commands remain available as a compatibility surface for scripts
+    // written against the pre-subcommand CLI.
+    if arguments[0].starts_with('/') {
         let command = parse_command(&arguments.join(" ")).map_err(std::io::Error::other)?;
         let mut service = runtime_service().map_err(|e| std::io::Error::other(e.to_string()))?;
         let output = service
@@ -424,7 +452,7 @@ pub fn run() -> std::io::Result<()> {
         return Ok(());
     }
 
-    crate::tui::run()
+    opencode::run(arguments).map_err(|error| std::io::Error::other(error.0))
 }
 
 #[cfg(test)]

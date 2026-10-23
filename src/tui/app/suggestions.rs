@@ -64,6 +64,11 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
         template: "/git",
     },
     CommandSuggestion {
+        name: "/mcps",
+        description: "Connect and inspect MCP servers",
+        template: "/mcps",
+    },
+    CommandSuggestion {
         name: "/skills",
         description: "Interactive skill picker & library",
         template: "/skills",

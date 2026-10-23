@@ -25,13 +25,16 @@ pub use chat::{
     format_transcript_lines, format_transcript_lines_with_width, render_chat, strip_ansi_codes,
 };
 pub use dialogs::{
-    AgentItem, AgentsDialogState, ModelsDialogState, PermissionDecision, PermissionDialogState,
-    PermissionPrompt, QuestionDialogState, SessionsDialogState, StatusDialogState,
-    ThemesDialogState, WhichKeyState, render_permission_dialog, render_question_dialog,
+    AgentItem, AgentsDialogState, McpDialogItem, McpDialogState, McpDialogStatus, McpErrorDetail,
+    ModelsDialogState, PaletteAction, PaletteDialogState, PermissionDecision,
+    PermissionDialogState, PermissionPrompt, QuestionDialogState, SessionRenameDialogState,
+    SessionsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState, render_mcp_dialog,
+    render_permission_dialog, render_question_dialog,
 };
 pub use diff::{DiffLine, DiffOp, DiffResult, compute_diff};
 pub use home::HomeState;
 pub use render::render;
+mod tabs;
 pub use theme::{Theme, ThemeKind};
 pub use typewriter::TypewriterState;
 pub use wave_spinner::WaveSpinner;
@@ -90,8 +93,10 @@ pub fn attach_production_runtime(app: &mut App) {
     }
 
     let writer = crate::persistence::WriterHandle::spawn(db_writer);
+    let mcp_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mcp = crate::mcp::McpRegistry::new(&config.mcp, &mcp_cwd);
     let router = crate::adapters::ConfiguredRouter::new(config);
-    app.attach_runtime(db_runtime, writer, Box::new(router));
+    app.attach_runtime_with_mcp(db_runtime, writer, Box::new(router), mcp);
 }
 
 pub fn run() -> io::Result<()> {

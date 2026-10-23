@@ -362,3 +362,92 @@ fn loads_from_opencode_directory_fallback() {
 
     let _ = std::fs::remove_dir_all(temp);
 }
+
+#[test]
+fn parses_mcp_local_and_remote_servers() {
+    let config = ConfigLoader
+        .parse_str(
+            "project.jsonc",
+            r#"{
+              "schema_version": 1,
+              "mcp": {
+                "local": {
+                  "type": "local",
+                  "command": ["npx", "-y", "server"],
+                  "environment": {"TOKEN": "abc"}
+                },
+                "remote": {
+                  "type": "remote",
+                  "url": "https://example.test/mcp",
+                  "headers": {"Authorization": "Bearer test"},
+                  "enabled": false
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+    let local = config.mcp.get("local").unwrap();
+    assert!(local.enabled);
+    assert!(!local.is_remote());
+    assert_eq!(local.command, ["npx", "-y", "server"]);
+    assert_eq!(
+        local.environment.get("TOKEN").map(String::as_str),
+        Some("abc")
+    );
+
+    let remote = config.mcp.get("remote").unwrap();
+    assert!(!remote.enabled);
+    assert!(remote.is_remote());
+    assert_eq!(remote.url.as_deref(), Some("https://example.test/mcp"));
+    assert_eq!(
+        remote.headers.get("Authorization").map(String::as_str),
+        Some("Bearer test")
+    );
+}
+
+#[test]
+fn parses_mcp_servers_shape_and_merges_by_name() {
+    let global = ConfigLoader
+        .parse_str(
+            "global.jsonc",
+            r#"{
+              "schema_version": 1,
+              "mcp": {
+                "servers": {
+                  "one": {"url": "https://one.test/mcp"},
+                  "two": {"command": "two-server", "disabled": true}
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+    let project = ConfigLoader
+        .parse_str(
+            "project.jsonc",
+            r#"{
+              "schema_version": 1,
+              "mcp": {"two": {"command": ["two", "--verbose"]}}
+            }"#,
+        )
+        .unwrap();
+    let merged = Config::merge(global, project).unwrap();
+
+    assert!(merged.mcp.contains_key("one"));
+    assert!(merged.mcp.get("two").unwrap().enabled);
+    assert_eq!(merged.mcp["two"].command, ["two", "--verbose"]);
+}
+
+#[test]
+fn rejects_mcp_server_without_transport() {
+    let error = ConfigLoader
+        .parse_str(
+            "project.jsonc",
+            r#"{"schema_version": 1, "mcp": {"broken": {}}}"#,
+        )
+        .unwrap_err();
+    let ConfigDiagnostic::Parse { message, .. } = error else {
+        panic!("expected Parse");
+    };
+    assert!(message.contains("needs a command or url"), "{message}");
+}

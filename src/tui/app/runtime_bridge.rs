@@ -47,11 +47,24 @@ impl App {
         writer: crate::persistence::WriterHandle,
         provider: Box<dyn crate::provider::Provider + Send + Sync>,
     ) {
+        self.attach_runtime_with_mcp(db, writer, provider, None);
+    }
+
+    /// Attach a runtime with MCP servers from the resolved configuration.
+    pub fn attach_runtime_with_mcp(
+        &mut self,
+        db: crate::persistence::Db,
+        writer: crate::persistence::WriterHandle,
+        provider: Box<dyn crate::provider::Provider + Send + Sync>,
+        mcp: Option<std::sync::Arc<crate::mcp::McpRegistry>>,
+    ) {
         let bus = EventBus::new();
         let (_subscription_id, receiver) = bus.subscribe(None);
-        let client = RuntimeClient::spawn(db, writer, provider, bus);
+        self.mcp_registry = mcp.clone();
+        let client = RuntimeClient::spawn_with_mcp(db, writer, provider, bus, mcp);
         self.runtime_events = Some(receiver);
         self.runtime = Some(client);
+        self.start_mcp_startup_probes();
     }
 
     pub fn set_runtime_receiver(&mut self, receiver: std::sync::mpsc::Receiver<RuntimeEvent>) {
@@ -586,10 +599,10 @@ impl App {
         {
             self.available_models = models;
         }
+        let mut had_events = self.poll_mcp_probes();
         let Some(receiver) = self.runtime_events.take() else {
-            return false;
+            return had_events;
         };
-        let mut had_events = false;
         while let Ok(event) = receiver.try_recv() {
             had_events = true;
             self.handle_runtime_event(event);

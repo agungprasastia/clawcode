@@ -42,9 +42,23 @@ pub enum ClientCommand {
         provider: String,
         model: String,
         prompt: String,
+        /// When present, the worker reports the admitted input id.
+        reply: Option<mpsc::Sender<Result<i64, String>>>,
+        /// Per-generation MCP servers, overriding the worker registry.
+        mcp: Option<Arc<crate::mcp::McpRegistry>>,
     },
     /// Request cancellation of the active generation for a session.
     CancelGeneration { session_id: i64 },
+}
+
+/// One generation request, including an optional session-scoped MCP registry.
+pub struct GenerationRequest<'a> {
+    pub session_id: i64,
+    pub agent_mode: &'a str,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub prompt: &'a str,
+    pub mcp: Option<Arc<crate::mcp::McpRegistry>>,
 }
 
 /// Handle for talking to the runtime worker.
@@ -65,6 +79,18 @@ impl RuntimeClient {
         provider: Box<dyn Provider + Send + Sync>,
         bus: EventBus,
     ) -> Self {
+        Self::spawn_with_mcp(db, writer, provider, bus, None)
+    }
+
+    /// Spawn the worker with an MCP registry shared by every tool thread.
+    /// `spawn` is the same runtime without MCP servers.
+    pub fn spawn_with_mcp(
+        db: Db,
+        writer: WriterHandle,
+        provider: Box<dyn Provider + Send + Sync>,
+        bus: EventBus,
+        mcp: Option<Arc<crate::mcp::McpRegistry>>,
+    ) -> Self {
         db.set_busy_timeout(DB_BUSY_TIMEOUT);
         let db = Arc::new(Mutex::new(db));
         let client_db = Arc::clone(&db);
@@ -73,12 +99,16 @@ impl RuntimeClient {
         let worker_coordinator = Arc::clone(&coordinator);
         let worker_bus = bus.clone();
         let worker = thread::spawn(move || {
+            let runtime = GenerationRuntime {
+                provider: Arc::from(provider),
+                mcp,
+            };
             worker_loop(
                 SharedDb::new(db.clone()),
                 writer,
-                Arc::from(provider),
                 worker_bus,
                 worker_coordinator,
+                runtime,
                 receiver,
             );
             db
@@ -112,19 +142,64 @@ impl RuntimeClient {
         model: &str,
         prompt: &str,
     ) -> Result<(), String> {
+        self.start_generation_request(GenerationRequest {
+            session_id,
+            agent_mode,
+            provider,
+            model,
+            prompt,
+            mcp: None,
+        })
+    }
+
+    /// Queue a generation with a session-specific MCP registry. `None` uses
+    /// the registry supplied when the runtime was spawned.
+    pub fn start_generation_request(&self, request: GenerationRequest<'_>) -> Result<(), String> {
+        if request.prompt.len() > MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
+                request.prompt.len()
+            ));
+        }
+        self.try_send(ClientCommand::StartGeneration {
+            session_id: request.session_id,
+            agent_mode: request.agent_mode.to_string(),
+            provider: request.provider.to_string(),
+            model: request.model.to_string(),
+            prompt: request.prompt.to_string(),
+            reply: None,
+            mcp: request.mcp,
+        })
+    }
+
+    /// Queue a generation start and block until the input is durably admitted.
+    /// Returns the runtime input id, which callers can correlate with
+    /// `prompt_admitted` and `prompt_promoted` events.
+    pub fn start_generation_admitted(
+        &self,
+        session_id: i64,
+        agent_mode: &str,
+        provider: &str,
+        model: &str,
+        prompt: &str,
+    ) -> Result<i64, String> {
         if prompt.len() > MAX_MESSAGE_BYTES {
             return Err(format!(
                 "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
                 prompt.len()
             ));
         }
-        self.try_send(ClientCommand::StartGeneration {
+        let (reply, reply_rx) = mpsc::channel();
+        self.send(ClientCommand::StartGeneration {
             session_id,
             agent_mode: agent_mode.to_string(),
             provider: provider.to_string(),
             model: model.to_string(),
             prompt: prompt.to_string(),
-        })
+            reply: Some(reply),
+            mcp: None,
+        })?;
+        reply_rx.recv().map_err(|error| error.to_string())?
     }
 
     /// Request cancellation of the session's active generation.
@@ -380,14 +455,20 @@ impl SharedDb {
     }
 }
 
+#[derive(Clone)]
+struct GenerationRuntime {
+    provider: Arc<dyn Provider + Send + Sync>,
+    mcp: Option<Arc<crate::mcp::McpRegistry>>,
+}
+
 /// Worker main loop: control commands run inline; each `StartGeneration`
 /// spawns its own thread so the loop never waits on a provider turn.
 fn worker_loop(
     db: SharedDb,
     writer: WriterHandle,
-    provider: Arc<dyn Provider + Send + Sync>,
     bus: EventBus,
     coordinator: Arc<SessionCoordinator>,
+    runtime: GenerationRuntime,
     receiver: mpsc::Receiver<ClientCommand>,
 ) {
     let mut handles: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -412,7 +493,13 @@ fn worker_loop(
                 provider: provider_name,
                 model,
                 prompt,
+                reply,
+                mcp: generation_mcp,
             } => {
+                let generation_runtime = GenerationRuntime {
+                    provider: Arc::clone(&runtime.provider),
+                    mcp: generation_mcp.or_else(|| runtime.mcp.clone()),
+                };
                 let (input, admit_seq) = match writer.admit_input(
                     session_id,
                     &prompt,
@@ -420,10 +507,16 @@ fn worker_loop(
                 ) {
                     Ok(result) => result,
                     Err(error) => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Err(error.clone()));
+                        }
                         publish_error(&bus, session_id, None, &error);
                         continue;
                     }
                 };
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(input.id));
+                }
                 bus.publish(RuntimeEvent {
                     seq: admit_seq,
                     session_id,
@@ -452,7 +545,7 @@ fn worker_loop(
                         let drain_writer = writer.clone();
                         let drain_bus = bus.clone();
                         let drain_coordinator = Arc::clone(&coordinator);
-                        let drain_provider = Arc::clone(&provider);
+                        let drain_runtime = generation_runtime;
                         handles.push(thread::spawn(move || {
                             let res =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -461,7 +554,7 @@ fn worker_loop(
                                         drain_writer,
                                         drain_bus,
                                         drain_coordinator.clone(),
-                                        drain_provider,
+                                        drain_runtime,
                                         session_id,
                                     );
                                 }));
@@ -505,7 +598,7 @@ fn drain_session_loop(
     writer: WriterHandle,
     bus: EventBus,
     coordinator: Arc<SessionCoordinator>,
-    provider: Arc<dyn Provider + Send + Sync>,
+    runtime: GenerationRuntime,
     session_id: i64,
 ) {
     loop {
@@ -691,11 +784,11 @@ fn drain_session_loop(
             generation_id: generation.id,
         };
 
-        let gen_provider = Arc::clone(&provider);
+        let gen_runtime = runtime.clone();
         let gen_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_generation(
                 &ctx,
-                gen_provider.as_ref(),
+                &gen_runtime,
                 &config.model,
                 &promoted_input.content,
                 &config.agent_mode,
@@ -895,6 +988,7 @@ struct LocalToolTask {
     tool_name: String,
     args: String,
     progress: Option<Arc<crate::conversation::tools::ToolProgress>>,
+    mcp: Option<Arc<crate::mcp::McpRegistry>>,
 }
 
 /// Runs every local tool call on its own thread, matching OpenCode's fiber per
@@ -928,6 +1022,7 @@ impl ToolWorkers {
             tool_name,
             args,
             progress,
+            mcp,
         } = task;
         self.expected += 1;
         let tx = self.tx.clone();
@@ -942,6 +1037,25 @@ impl ToolWorkers {
                     };
                 let outcome = if cancel_requested(&db, generation_id) {
                     LocalToolOutcome::Cancelled
+                } else if let Some(registry) = mcp
+                    .as_ref()
+                    .filter(|registry| registry.has_known_tool(&tool_name))
+                {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let arguments = serde_json::from_str::<serde_json::Value>(&args)
+                            .map_err(|error| format!("Invalid JSON arguments: {error}"))?;
+                        registry.call_tool(&tool_name, &arguments).map(|output| {
+                            crate::conversation::tools::ToolExecution {
+                                output: bound_tool_text(output),
+                                metadata: Some(serde_json::json!({ "mcp": true })),
+                            }
+                        })
+                    }));
+                    match result {
+                        Ok(Ok(execution)) => LocalToolOutcome::Completed(execution),
+                        Ok(Err(error)) => LocalToolOutcome::Failed(error),
+                        Err(_) => LocalToolOutcome::Failed("MCP tool thread panicked".to_string()),
+                    }
                 } else {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         match crate::workspace::Workspace::with_filesystem(
@@ -1024,7 +1138,7 @@ fn bound_tool_text(mut value: String) -> String {
 /// `message.part.delta` and `message.part.updated`.
 fn run_generation(
     ctx: &SharedGenerationCtx,
-    provider: &dyn Provider,
+    runtime: &GenerationRuntime,
     model: &str,
     prompt: &str,
     agent_mode: &str,
@@ -1199,7 +1313,10 @@ fn run_generation(
         });
     }
 
-    let tools = crate::conversation::tools::coding_tools_schemas();
+    let mut tools = crate::conversation::tools::coding_tools_schemas();
+    if let Some(registry) = &runtime.mcp {
+        tools.extend(registry.tool_schemas());
+    }
     const MAX_AGENT_TURNS: usize = 25;
     let mut total_usage = crate::provider::Usage {
         input_tokens: 0,
@@ -1222,7 +1339,7 @@ fn run_generation(
             tools: tools.clone(),
         };
 
-        let mut stream = match provider.stream(&request) {
+        let mut stream = match runtime.provider.stream(&request) {
             Ok(stream) => stream,
             Err(error) => {
                 ctx.db.last_error(ctx.session_id, &error.to_string());
@@ -1458,6 +1575,7 @@ fn run_generation(
                             tool_name,
                             args: args_str,
                             progress,
+                            mcp: runtime.mcp.clone(),
                         });
                     } else {
                         malformed_tool_stream = true;
@@ -1983,6 +2101,46 @@ mod tests {
                 ],
             })
         }
+    }
+
+    #[test]
+    fn admitted_generation_returns_the_persisted_input_id() {
+        let path = std::env::temp_dir().join(format!(
+            "clawcode-test-client-admitted-{}.db",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        let session = db.create_session("admitted_test").unwrap();
+        let session_id = session.id;
+        let bus = EventBus::new();
+        let writer = WriterHandle::spawn(Db::open(&path).unwrap());
+        let client = RuntimeClient::spawn(db, writer, Box::new(TextProvider), bus.clone());
+        let (_sub_id, rx) = bus.subscribe(Some(session_id));
+
+        let input_id = client
+            .start_generation_admitted(session_id, "plan", "fake", "text", "hello")
+            .unwrap();
+        assert!(input_id > 0);
+
+        let start = std::time::Instant::now();
+        let mut admitted_id = None;
+        while start.elapsed() < std::time::Duration::from_secs(2) {
+            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+                && event.kind == "prompt_admitted"
+            {
+                admitted_id = serde_json::from_str::<serde_json::Value>(&event.payload_json)
+                    .ok()
+                    .and_then(|payload| payload.get("input_id")?.as_i64());
+                break;
+            }
+        }
+        assert_eq!(admitted_id, Some(input_id));
+
+        let _ = client.shutdown();
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

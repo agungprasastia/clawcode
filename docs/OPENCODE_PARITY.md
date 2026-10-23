@@ -1,0 +1,47 @@
+# OpenCode v2.1.2 parity
+
+Reference source: tag `v2.1.2`, commit `a517687fde98a7329ada3ae644a01a9fc6c4e99e`.
+Reference binary: `@opencode/cli` 2.1.2.
+
+Parity means matching OpenCode behavior. clawcode keeps its own visual design.
+
+## Status
+
+| Area | Status | Implemented | Remaining |
+| --- | --- | --- | --- |
+| CLI command tree and help | complete | Subcommands, global flags, argument parsing, help layout, completions, invalid-flag diagnostics | Re-check new commands as they land |
+| `run`, `mini`, default TUI launch | partial | Prompt execution, model selection, JSON output, directory/session/continue flags, streaming events | Attach/continue semantics, full headless parity |
+| `models`, `stats`, `debug`, `session *` | complete | JSON/text output, session IDs, import/export, config/agents/paths | Minor output-shape checks |
+| Auth CLI | partial | List/logout/export/import/switch over configuration-backed credentials | Interactive provider login, OAuth device flow, credential persistence |
+| MCP CLI | partial | List, add, remove, enable/disable, status | OAuth login/logout, live connection handshake |
+| MCP runtime | partial | Top-level and nested config shapes, lazy stdio and streamable HTTP clients, paginated tool discovery, OpenCode-style tool names, runtime schema advertisement and tool execution, per-session ACP registries, status snapshots (enabled/connected/tool count/error), explicit probe and disconnect | OAuth, server notifications/list-changed, automatic reconnect, image results |
+| Plugin CLI | partial | List, add, remove from configuration | Update/check against registry versions |
+| Server and HTTP API | partial | `serve`, `serve --stdio`, health, config, v1 session CRUD/message list, v2 `/api/session` CRUD/message list, prompt admission, interrupt, session fork with before/through boundaries, revert stage/clear/commit, permission request/saved routes with pending events, SSE `/api/event` with runtime event translation, OpenAPI, CORS, local web page, config MCP servers | File/image prompt parts, file snapshot restore on revert, config-rule enforcement during tool execution, provider/model management, durable event replay; v2.1.2 defines no session share route |
+| ACP | partial | NDJSON JSON-RPC transport; initialize/auth; session new/load/list/delete/resume/close/fork; workspace activation; prompt streaming; text, reasoning, and tool-call updates; cancellation; history replay; per-session modes/models; stdio and HTTP MCP attachments with advertised capabilities | Permission/form requests, image prompts, child-session updates |
+| Service lifecycle | partial | Status and config get/set/unset | Start/restart/stop and background server supervision |
+| Pairing | partial | Pair command and URL/config plumbing | Device-code exchange and secure credential storage |
+| TUI keybindings | mostly complete | Leader, palette, escape interrupt, Ctrl+C/D context rules, agents, sessions, tabs, model cycling, pinning, rename, delete, word editing, multiline input with grow/scroll, newline bindings, paste normalization, input undo/redo | Selection bindings, external editor |
+| TUI session tabs | complete | Open/switch/cycle/close/reopen, quick slots, cached titles, tab bar for multiple tabs, rename propagation | Unread markers, tab history |
+| TUI terminal pane | missing | Leader chord reports shell guidance | Embedded PTY pane, focus cycling, shell lifecycle |
+| TUI session timeline | missing | Leader chord reports shell guidance | Timeline panel, jump-to-turn, branch visualization |
+| TUI undo/redo | missing | Workspace snapshots exist below the TUI | Revert/redo bindings and diff dialog wiring |
+| TUI model variants | partial | Model list and cycling | Reasoning-effort/variant selection |
+| TUI MCP/settings dialogs | partial | `/mcps` and palette MCP dialog: searchable server list, eager startup probes, connect/disconnect/retry, failed-server error details with copy | MCP OAuth sign-in (`needs_auth`), settings editor |
+| TUI images | missing | Text transcript and tool cards | Attach, preview, and image tool parts |
+| TUI queued prompts / background tools | partial | Background shell execution and streaming cards | Queue editing, Ctrl+B blocking-tool backgrounding |
+| Streaming and tool cards | complete | Grouped exploration, foreground/background shell, durable parts, replay, malformed-stream handling | New provider-specific part types |
+| Providers | partial | OpenAI-compatible, Anthropic, Ollama, discovery, normalization | Full provider catalog and provider-specific auth |
+| LSP | missing | Configuration passthrough only | Diagnostics, symbols, navigation, edit integration |
+| Plugin runtime | missing | Configuration-backed CLI list/add/remove | Plugin loading, hooks, OpenCode plugin API |
+| Web UI | minimal | Local sessions page | OpenCode v2 web application |
+| Notifications | complete | Desktop, terminal bell, sound behind `Notifier` | Platform-specific polish |
+
+## Verification
+
+- `cargo test --all-targets --all-features --locked`
+- `cargo clippy --all-targets --all-features --locked -- -D warnings`
+- `cargo fmt --all -- --check`
+- Compare help text against the installed OpenCode binary for each command family.
+- Use REA on the shipped binary when source and observed behavior disagree.
+
+Last full test run: 265 library tests and 110 TUI tests passing, plus all other integration targets. Strict Clippy and formatting checks pass.

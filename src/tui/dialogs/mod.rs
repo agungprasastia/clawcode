@@ -1,9 +1,12 @@
 pub mod agents;
 pub mod git;
+pub mod mcp;
 pub mod model_suggestions;
 pub mod models;
+pub mod palette;
 pub mod permission;
 pub mod question;
+pub mod session_rename;
 pub mod sessions;
 pub mod sessions_panel;
 pub mod skills;
@@ -13,13 +16,18 @@ pub mod which_key;
 
 pub use agents::{AgentItem, AgentsDialogState, render_agents_dialog};
 pub use git::{GitDialogState, render_git_dialog};
+pub use mcp::{McpDialogItem, McpDialogState, McpDialogStatus, McpErrorDetail, render_mcp_dialog};
 pub use models::{
     ModelsDialogState, format_context_window, render_model_suggestions_popup, render_models_dialog,
+};
+pub use palette::{
+    PALETTE_ITEMS, PaletteAction, PaletteDialogState, PaletteItem, render_palette_dialog,
 };
 pub use permission::{
     PermissionDecision, PermissionDialogState, PermissionPrompt, render_permission_dialog,
 };
 pub use question::{QuestionDialogState, render_question_dialog};
+pub use session_rename::{SessionRenameDialogState, render_session_rename_dialog};
 pub use sessions::{SessionsDialogState, render_sessions_dialog, render_sessions_panel};
 pub use skills::{SkillsDialogState, render_skills_dialog};
 pub use status::{StatusDialogState, render_status_dialog};

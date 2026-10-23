@@ -14,8 +14,8 @@ use super::app::{
     tool_uses_generic_detail,
 };
 use super::render::{
-    identity_label, mode_label, render_command_popup, render_hints_row, render_input_card,
-    status_label,
+    identity_label, input_card_height, mode_label, render_command_popup, render_hints_row,
+    render_input_card, status_label,
 };
 use super::theme::Theme;
 
@@ -25,6 +25,7 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         return;
     }
     let has_gap = area.height >= 16;
+    let input_height = input_card_height(app, area.width).min(area.height.saturating_sub(9).max(5));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -35,7 +36,7 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
             } else {
                 Constraint::Length(0)
             },
-            Constraint::Length(5),
+            Constraint::Length(input_height),
             Constraint::Length(1),
         ])
         .split(area);

@@ -13,6 +13,8 @@ use crate::runtime::RuntimeEvent;
 pub struct ClientSessionState {
     pub transcript: String,
     pub input_draft: String,
+    pub input_undo: Vec<(String, usize)>,
+    pub input_redo: Vec<(String, usize)>,
     pub scroll: u16,
     pub loaded_until_seq: i64,
     pub status: ConversationStatus,
@@ -31,6 +33,8 @@ impl Default for ClientSessionState {
         Self {
             transcript: String::new(),
             input_draft: String::new(),
+            input_undo: Vec::new(),
+            input_redo: Vec::new(),
             scroll: 0,
             loaded_until_seq: -1,
             status: ConversationStatus::Idle,
@@ -61,6 +65,8 @@ impl App {
         let state = self.sessions.entry(session_id).or_default();
         state.transcript = std::mem::take(&mut self.transcript);
         state.input_draft = std::mem::take(&mut self.prompt);
+        state.input_undo = std::mem::take(&mut self.input_undo);
+        state.input_redo = std::mem::take(&mut self.input_redo);
         state.scroll = self.chat_scroll;
         state.loaded_until_seq = self.loaded_until_seq;
         state.status = self.status;
@@ -78,6 +84,9 @@ impl App {
         let state = self.sessions.entry(session_id).or_default();
         self.transcript = std::mem::take(&mut state.transcript);
         self.prompt = std::mem::take(&mut state.input_draft);
+        self.input_undo = std::mem::take(&mut state.input_undo);
+        self.input_redo = std::mem::take(&mut state.input_redo);
+        self.last_input_edit = None;
         self.cursor_position = self.prompt.chars().count();
         self.chat_scroll = state.scroll;
         self.loaded_until_seq = state.loaded_until_seq;

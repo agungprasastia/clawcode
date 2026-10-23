@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 
 /// Current persistence schema version.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Apply all migrations up to [`SCHEMA_VERSION`]. Idempotent.
 pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
@@ -191,6 +191,56 @@ pub fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         } else {
             connection.execute_batch("PRAGMA user_version = 7;")?;
         }
+    }
+    if current < 8 {
+        let column_exists = |name: &str| -> rusqlite::Result<bool> {
+            connection.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?1
+                 )",
+                rusqlite::params![name],
+                |row| row.get(0),
+            )
+        };
+        let mut migration = String::from("BEGIN;\n");
+        if !column_exists("parent_id")? {
+            migration.push_str(
+                "ALTER TABLE sessions ADD COLUMN parent_id INTEGER
+                     REFERENCES sessions(id) ON DELETE CASCADE;\n",
+            );
+        }
+        if !column_exists("fork_boundary_type")? {
+            migration.push_str("ALTER TABLE sessions ADD COLUMN fork_boundary_type TEXT;\n");
+        }
+        if !column_exists("fork_boundary_message_id")? {
+            migration
+                .push_str("ALTER TABLE sessions ADD COLUMN fork_boundary_message_id INTEGER;\n");
+        }
+        if !column_exists("revert_message_id")? {
+            migration.push_str("ALTER TABLE sessions ADD COLUMN revert_message_id INTEGER;\n");
+        }
+        migration.push_str(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_id);
+             PRAGMA user_version = 8;
+             COMMIT;",
+        );
+        connection.execute_batch(&migration)?;
+    }
+    if current < 9 {
+        connection.execute_batch(
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS saved_permissions (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 project_id TEXT NOT NULL,
+                 action TEXT NOT NULL,
+                 resource TEXT NOT NULL,
+                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                 UNIQUE(project_id, action, resource)
+             );
+             PRAGMA user_version = 9;
+             COMMIT;",
+        )?;
     }
     Ok(())
 }

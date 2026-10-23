@@ -6,10 +6,11 @@ pub mod schema;
 pub mod writer;
 
 pub use db::{
-    ContextEpoch, Db, Generation, GenerationEvent, GenerationStatus, InputDelivery, InputStatus,
-    MAX_MESSAGE_BYTES, MAX_MESSAGES_PER_SESSION, MAX_SESSIONS, MAX_TOOL_OUTPUT_BYTES, Message,
-    MessageTooLarge, NewToolCall, Session, SessionInput, SessionStatus, ToolCall, ToolCallStatus,
-    Workspace,
+    ContextEpoch, Db, DbStats, ForkBoundaryType, ForkSessionError, Generation, GenerationEvent,
+    GenerationStatus, InputDelivery, InputStatus, MAX_MESSAGE_BYTES, MAX_MESSAGES_PER_SESSION,
+    MAX_SESSIONS, MAX_TOOL_OUTPUT_BYTES, Message, MessageTooLarge, NewToolCall, RevertError,
+    SavedPermission, SavedPermissionError, Session, SessionInput, SessionRevert, SessionStatus,
+    SessionSummary, ToolCall, ToolCallStatus, Workspace,
 };
 pub use schema::{SCHEMA_VERSION, SchemaTooNew, migrate};
 pub use writer::{WRITER_CHANNEL_CAPACITY, WriterHandle};
