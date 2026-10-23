@@ -20,6 +20,7 @@ pub enum PaletteAction {
     ConnectIntegration,
     ReleaseHighlights,
     Settings,
+    ToggleThinking,
     ViewStatus,
     Update,
     PairDevice,
@@ -99,7 +100,13 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
         action: PaletteAction::Settings,
         title: "Open settings",
         category: "System",
-        shortcut: "",
+        shortcut: "/settings",
+    },
+    PaletteItem {
+        action: PaletteAction::ToggleThinking,
+        title: "Toggle thinking blocks",
+        category: "Transcript",
+        shortcut: "/thinking",
     },
     PaletteItem {
         action: PaletteAction::ViewStatus,

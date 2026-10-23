@@ -58,6 +58,12 @@ impl TypewriterState {
         let est_tokens = delta.len().div_ceil(4);
         self.token_count += est_tokens.max(1);
 
+        if !self.enabled {
+            let mut flushed = std::mem::take(&mut self.queue);
+            flushed.push_str(delta);
+            return Some(flushed);
+        }
+
         let total_len = self.queue.len() + delta.len();
         if total_len <= Self::MAX_QUEUE_BYTES {
             self.queue.push_str(delta);
@@ -124,6 +130,16 @@ impl TypewriterState {
     /// Set whether typewriter pacing is enabled.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+    }
+
+    /// Set whether typewriter animations are enabled.
+    pub fn set_animations_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Inspect whether typewriter animations are enabled.
+    pub fn animations_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Drain a batch of characters based on adaptive pacing.
@@ -331,5 +347,17 @@ mod tests {
         assert_eq!(total.len(), huge_chunk.len());
         assert_eq!(total.chars().count(), huge_chunk.chars().count());
         assert_eq!(total, huge_chunk);
+    }
+
+    #[test]
+    fn typewriter_animations_disabled_flushes_immediately() {
+        let mut state = TypewriterState::new();
+        state.set_animations_enabled(false);
+        state.start_stream();
+
+        let immediate = state.push_delta("Halo 🦀 dunia");
+        assert_eq!(immediate.as_deref(), Some("Halo 🦀 dunia"));
+        assert!(!state.is_typing());
+        assert_eq!(state.char_count(), 0);
     }
 }

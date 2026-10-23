@@ -578,7 +578,9 @@ impl App {
                                 }
                                 self.transcript.push_str(&format!("{trimmed}\n\n"));
                                 self.truncate_transcript();
-                                self.scroll_to_bottom();
+                                if self.chat_scroll == 0 {
+                                    self.scroll_to_bottom();
+                                }
                             }
                         }
                     }

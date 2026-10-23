@@ -26,6 +26,7 @@ pub struct ClientSessionState {
     pub stream_parts: Vec<StreamPart>,
     pub stream_base_len: Option<usize>,
     pub expanded_tool_rows: HashSet<String>,
+    pub collapsed_tool_rows: HashSet<String>,
 }
 
 impl Default for ClientSessionState {
@@ -46,6 +47,7 @@ impl Default for ClientSessionState {
             stream_parts: Vec::new(),
             stream_base_len: None,
             expanded_tool_rows: HashSet::new(),
+            collapsed_tool_rows: HashSet::new(),
         }
     }
 }
@@ -77,6 +79,7 @@ impl App {
         state.stream_parts = std::mem::take(&mut self.stream_parts);
         state.stream_base_len = self.stream_base_len;
         state.expanded_tool_rows = std::mem::take(&mut self.expanded_tool_rows);
+        state.collapsed_tool_rows = std::mem::take(&mut self.collapsed_tool_rows);
     }
 
     /// Restore the target session's state into the live view fields.
@@ -97,6 +100,7 @@ impl App {
         self.stream_parts = std::mem::take(&mut state.stream_parts);
         self.stream_base_len = state.stream_base_len;
         self.expanded_tool_rows = std::mem::take(&mut state.expanded_tool_rows);
+        self.collapsed_tool_rows = std::mem::take(&mut state.collapsed_tool_rows);
         self.tool_rows = std::mem::take(&mut state.tool_rows);
         self.refresh_active_tool();
         self.metrics = None;
@@ -309,7 +313,9 @@ impl App {
                             }
                             self.transcript.push_str(&format!("{trimmed}\n\n"));
                             self.truncate_transcript();
-                            self.scroll_to_bottom();
+                            if self.chat_scroll == 0 {
+                                self.scroll_to_bottom();
+                            }
                         }
                     }
                 }

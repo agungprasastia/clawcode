@@ -1,6 +1,19 @@
+use unicode_width::UnicodeWidthStr;
+
 use super::tool_rows::ToolRowState;
 use super::util::{ceil_char_boundary, find_user_turn_boundary, floor_char_boundary};
 use super::{App, ConversationStatus};
+
+fn estimate_visual_rows(text: &str, terminal_width: u16) -> u16 {
+    let wrap_width = terminal_width.saturating_sub(4).max(1) as usize;
+    let mut rows = 0usize;
+    for line in text.split('\n') {
+        let w = UnicodeWidthStr::width(line);
+        let r = if w == 0 { 1 } else { w.div_ceil(wrap_width) };
+        rows = rows.saturating_add(r);
+    }
+    rows.min(u16::MAX as usize) as u16
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamPart {
@@ -27,6 +40,7 @@ impl App {
             self.stream_parts.clear();
             self.tool_rows.clear();
             self.expanded_tool_rows.clear();
+            self.collapsed_tool_rows.clear();
         }
         for row in &mut self.tool_rows {
             if matches!(row.state, ToolRowState::Pending | ToolRowState::Running) {
@@ -43,7 +57,7 @@ impl App {
         if let Some(generation_id) = self.active_generation_id.take() {
             self.ignored_generation_ids.insert(generation_id);
         }
-        self.thought_expanded = false;
+        self.thought_expanded = self.tui_settings.thinking == crate::config::ThinkingDisplay::Show;
         self.chat_scroll = 0;
     }
 
@@ -144,8 +158,14 @@ impl App {
         if !matches!(part, StreamPart::Reasoning(_)) {
             self.flush_reasoning();
         }
+        let sticky = self.chat_scroll > 0 && self.chat_scroll < u16::MAX;
+        let term_width = self.terminal_size.get().0;
+        let mut added_rows = 0u16;
         match part {
             StreamPart::User(prompt) => {
+                if sticky {
+                    added_rows = estimate_visual_rows(&prompt, term_width).saturating_add(2);
+                }
                 self.stream_parts.push(StreamPart::User(prompt));
             }
             StreamPart::Reasoning(delta) => {
@@ -155,40 +175,80 @@ impl App {
                 if !matches!(self.stream_parts.last(), Some(StreamPart::Reasoning(_))) {
                     self.flush_reasoning();
                 }
+                let thought_expanded = self.thought_expanded;
                 if let Some(StreamPart::Reasoning(existing)) = self.stream_parts.last_mut() {
+                    let before = if sticky && thought_expanded {
+                        estimate_visual_rows(existing, term_width)
+                    } else {
+                        0
+                    };
                     existing.push_str(&delta);
                     if existing.len() > Self::MAX_TRANSCRIPT_BYTES {
                         existing
                             .truncate(floor_char_boundary(existing, Self::MAX_TRANSCRIPT_BYTES));
                     }
+                    if sticky && thought_expanded {
+                        let after = estimate_visual_rows(existing, term_width);
+                        added_rows = after.saturating_sub(before);
+                    }
                 } else {
+                    if sticky {
+                        added_rows = if thought_expanded {
+                            estimate_visual_rows(&delta, term_width).saturating_add(1)
+                        } else {
+                            1
+                        };
+                    }
                     self.stream_parts.push(StreamPart::Reasoning(delta));
                 }
             }
             StreamPart::Text(delta) => {
                 if let Some(StreamPart::Text(existing)) = self.stream_parts.last_mut() {
+                    let before = if sticky {
+                        estimate_visual_rows(existing, term_width)
+                    } else {
+                        0
+                    };
                     existing.push_str(&delta);
                     if existing.len() > Self::MAX_TRANSCRIPT_BYTES {
                         existing
                             .truncate(floor_char_boundary(existing, Self::MAX_TRANSCRIPT_BYTES));
                     }
+                    if sticky {
+                        let after = estimate_visual_rows(existing, term_width);
+                        added_rows = after.saturating_sub(before);
+                    }
                 } else {
+                    if sticky {
+                        added_rows = estimate_visual_rows(&delta, term_width).saturating_add(1);
+                    }
                     self.stream_parts.push(StreamPart::Text(delta));
                 }
             }
-            done @ StreamPart::ReasoningDone { .. } => self.stream_parts.push(done),
+            done @ StreamPart::ReasoningDone { .. } => {
+                if sticky {
+                    added_rows = 2;
+                }
+                self.stream_parts.push(done);
+            }
             StreamPart::Tool(call_id) => {
                 if !self
                     .stream_parts
                     .iter()
                     .any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id))
                 {
+                    if sticky {
+                        added_rows = 1;
+                    }
                     self.stream_parts.push(StreamPart::Tool(call_id.clone()));
                 }
                 if let Some(row) = self.tool_rows.iter_mut().find(|r| r.call_id == call_id) {
                     row.expandable = row.compute_expandable();
                 }
             }
+        }
+        if sticky && added_rows > 0 {
+            self.chat_scroll = self.chat_scroll.saturating_add(added_rows);
         }
         if self.stream_parts.len() > 1024 {
             self.stream_parts.drain(..self.stream_parts.len() - 1024);
@@ -203,6 +263,9 @@ impl App {
             .iter()
             .any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id))
         {
+            if self.chat_scroll > 0 && self.chat_scroll < u16::MAX {
+                self.chat_scroll = self.chat_scroll.saturating_add(1);
+            }
             self.stream_parts.push(StreamPart::Tool(call_id.clone()));
         }
         if let Some(row) = self.tool_rows.iter_mut().find(|r| r.call_id == call_id) {

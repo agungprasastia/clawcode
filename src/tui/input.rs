@@ -12,8 +12,8 @@ pub fn translate(event: Event) -> Option<UiEvent> {
             translate_key(key).map(UiEvent::Input)
         }
         Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => Some(UiEvent::Input(Input::ScrollUp)),
-            MouseEventKind::ScrollDown => Some(UiEvent::Input(Input::ScrollDown)),
+            MouseEventKind::ScrollUp => Some(UiEvent::MouseScroll { up: true }),
+            MouseEventKind::ScrollDown => Some(UiEvent::MouseScroll { up: false }),
             MouseEventKind::Down(MouseButton::Left) => Some(UiEvent::MouseClick {
                 x: mouse.column,
                 y: mouse.row,
@@ -56,10 +56,12 @@ fn translate_key(key: KeyEvent) -> Option<Input> {
         KeyCode::F(2) => Some(Input::CycleModel),
         KeyCode::PageUp => Some(Input::PageUp),
         KeyCode::PageDown => Some(Input::PageDown),
-        KeyCode::Home if alt(&key) || control(&key) || shift(&key) || key.modifiers.is_empty() => {
+        KeyCode::Home if alt(&key) => Some(Input::FirstMessage),
+        KeyCode::Home if control(&key) || shift(&key) || key.modifiers.is_empty() => {
             Some(Input::Home)
         }
-        KeyCode::End if alt(&key) || control(&key) || shift(&key) || key.modifiers.is_empty() => {
+        KeyCode::End if alt(&key) => Some(Input::LastMessage),
+        KeyCode::End if control(&key) || shift(&key) || key.modifiers.is_empty() => {
             Some(Input::End)
         }
         KeyCode::Up if alt(&key) && shift(&key) => Some(Input::SessionPrevious),
@@ -80,12 +82,16 @@ fn translate_key(key: KeyEvent) -> Option<Input> {
         KeyCode::Backspace if control(&key) || alt(&key) => Some(Input::DeleteWord),
         KeyCode::Backspace if key.modifiers.is_empty() || shift(&key) => Some(Input::Backspace),
         KeyCode::Char(character) if control(&key) && alt(&key) => match character {
-            'b' => Some(Input::ScrollUp),
-            'f' => Some(Input::ScrollDown),
-            'u' => Some(Input::PageUp),
-            'd' => Some(Input::PageDown),
+            'b' => Some(Input::PageUp),
+            'f' => Some(Input::PageDown),
+            'u' => Some(Input::HalfPageUp),
+            'd' => Some(Input::HalfPageDown),
+            'y' => Some(Input::ScrollUp),
+            'e' => Some(Input::ScrollDown),
+            'g' => Some(Input::LastMessage),
             _ => None,
         },
+        KeyCode::Char('g') if control(&key) => Some(Input::FirstMessage),
         KeyCode::Char('x') if control(&key) => Some(Input::Leader),
         KeyCode::Char('p') if control(&key) => Some(Input::Palette),
         KeyCode::Char('o') if control(&key) => Some(Input::OpenMenu),

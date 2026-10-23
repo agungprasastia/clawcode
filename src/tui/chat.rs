@@ -108,11 +108,12 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         append_stream_parts(&mut ctx, app.stream_parts());
         ordered
     } else {
-        let mut ordered = format_transcript_lines_with_width(
+        let mut ordered = format_transcript_lines_with_mode(
             app.transcript(),
             theme,
             mode_color,
             Some(chunks[1].width),
+            app.tui_settings().markdown,
         );
         for line in &mut ordered {
             indent_assistant_line(line);
@@ -174,14 +175,34 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         ));
 
         if let Some(usage) = metrics.usage() {
-            let dur_secs = metrics.duration.as_secs_f64();
-            let tps = if dur_secs > 0.05 {
-                format!("{:.0}t/s", (usage.output_tokens as f64) / dur_secs)
-            } else {
-                format!("{}t", usage.output_tokens)
-            };
-            meta_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
-            meta_spans.push(Span::styled(tps, Style::default().fg(theme.dim)));
+            if app.tui_settings().tps {
+                let dur_secs = metrics.duration.as_secs_f64();
+                let tps = if dur_secs > 0.05 {
+                    format!("{:.0}t/s", (usage.output_tokens as f64) / dur_secs)
+                } else {
+                    format!("{}t", usage.output_tokens)
+                };
+                meta_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+                meta_spans.push(Span::styled(tps, Style::default().fg(theme.dim)));
+            }
+            match app.tui_settings().turn_tokens {
+                crate::config::TurnTokensMode::Off => {}
+                crate::config::TurnTokensMode::Compact => {
+                    let total = usage.input_tokens.saturating_add(usage.output_tokens);
+                    meta_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+                    meta_spans.push(Span::styled(
+                        format!("{total}tok"),
+                        Style::default().fg(theme.dim),
+                    ));
+                }
+                crate::config::TurnTokensMode::Verbose => {
+                    meta_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+                    meta_spans.push(Span::styled(
+                        format!("in:{} out:{}", usage.input_tokens, usage.output_tokens),
+                        Style::default().fg(theme.dim),
+                    ));
+                }
+            }
         }
 
         let dur_str = if metrics.duration.as_secs() > 0 {
@@ -192,8 +213,43 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         meta_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
         meta_spans.push(Span::styled(dur_str, Style::default().fg(theme.dim)));
 
+        if matches!(
+            app.conversation_status(),
+            super::ConversationStatus::Cancelled
+        ) {
+            meta_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+            meta_spans.push(Span::styled(
+                "interrupted",
+                Style::default().fg(theme.warning),
+            ));
+        }
+
         lines.push(Line::from(String::new()));
         lines.push(Line::from(meta_spans));
+    } else if matches!(
+        app.conversation_status(),
+        super::ConversationStatus::Cancelled
+    ) && !lines.is_empty()
+    {
+        let model = if !app.selected_model().is_empty() {
+            app.selected_model()
+        } else {
+            "default"
+        };
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                "▣ ",
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                mode_label(app),
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" · {model} · "), Style::default().fg(theme.dim)),
+            Span::styled("interrupted", Style::default().fg(theme.warning)),
+        ]));
     }
 
     let transcript_area = chunks[1];
@@ -246,7 +302,7 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         transcript_area,
     );
 
-    if total_visual_lines > visible_height && visible_height > 0 {
+    if app.tui_settings().scrollbar && total_visual_lines > visible_height && visible_height > 0 {
         let mut scrollbar_state =
             ScrollbarState::new(total_visual_lines as usize).position(scroll_y as usize);
         let scrollbar = Scrollbar::default()
@@ -259,9 +315,14 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         frame.render_stateful_widget(scrollbar, transcript_area, &mut scrollbar_state);
     }
 
-    if scroll_offset > 0 && transcript_area.width >= 30 && transcript_area.height >= 2 {
-        let badge_text = format!(" ↓ {scroll_offset} lines up (End to bottom) ");
-        let badge_width = badge_text.len() as u16;
+    app.set_jump_to_latest_area(None);
+    if scroll_offset > 0 && transcript_area.width >= 26 && transcript_area.height >= 2 {
+        let badge_text = if transcript_area.width >= 60 {
+            format!(" Jump to latest ↓ · {scroll_offset} lines up (End to bottom) ")
+        } else {
+            format!(" Jump to latest ↓ ({scroll_offset}) ")
+        };
+        let badge_width = UnicodeWidthStr::width(badge_text.as_str()) as u16;
         if transcript_area.width > badge_width + 2 {
             let offset_x = transcript_area
                 .width
@@ -274,6 +335,7 @@ pub fn render_chat(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
                 width: badge_width,
                 height: 1,
             };
+            app.set_jump_to_latest_area(Some(badge_area));
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     badge_text,
@@ -431,7 +493,7 @@ fn render_exploration_group(ctx: &mut ChatRenderContext<'_>, ids: &[String], com
     let marker = if complete {
         "→ ".to_string()
     } else {
-        format!("{} ", ctx.app.wave_spinner().compact_frame())
+        format!("{} ", ctx.app.compact_spinner_frame())
     };
     let line_index = ctx.lines.len();
     ctx.lines.push(Line::from(vec![
@@ -470,9 +532,105 @@ fn render_exploration_group(ctx: &mut ChatRenderContext<'_>, ids: &[String], com
     }
 }
 
+fn activity_run(app: &App, parts: &[StreamPart], start: usize) -> Option<(usize, String, bool)> {
+    let mut len = 0usize;
+    let mut tool_count = 0usize;
+    let mut thought_count = 0usize;
+    let mut active = false;
+    for part in &parts[start..] {
+        match part {
+            StreamPart::Tool(call_id) => {
+                let Some(row) = app.tool_rows().iter().find(|row| row.call_id == *call_id) else {
+                    break;
+                };
+                if row.state == ToolRowState::Failed {
+                    break;
+                }
+                if !tool_row_is_terminal(row) {
+                    active = true;
+                }
+                tool_count += 1;
+                len += 1;
+            }
+            StreamPart::Reasoning(_) => {
+                active = true;
+                thought_count += 1;
+                len += 1;
+            }
+            StreamPart::ReasoningDone { .. } => {
+                thought_count += 1;
+                len += 1;
+            }
+            StreamPart::User(_) | StreamPart::Text(_) => break,
+        }
+    }
+    if len == 0 {
+        return None;
+    }
+    let mut segments = Vec::new();
+    if tool_count > 0 {
+        segments.push(format!(
+            "{tool_count} {}",
+            if tool_count == 1 { "tool" } else { "tools" }
+        ));
+    }
+    if thought_count > 0 {
+        segments.push(format!(
+            "{thought_count} {}",
+            if thought_count == 1 {
+                "thought"
+            } else {
+                "thoughts"
+            }
+        ));
+    }
+    Some((len, format!("Activity: {}", segments.join(", ")), !active))
+}
+
 fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
+    append_stream_parts_inner(ctx, parts, true);
+}
+
+fn append_stream_parts_inner(
+    ctx: &mut ChatRenderContext<'_>,
+    parts: &[StreamPart],
+    allow_activity_fold: bool,
+) {
     let mut index = 0;
     while index < parts.len() {
+        if allow_activity_fold
+            && ctx.app.tui_settings().verbosity == crate::config::TranscriptVerbosity::Low
+            && let Some((len, label, complete)) = activity_run(ctx.app, parts, index)
+        {
+            let activity_id = format!("activity:{index}");
+            let expanded = ctx.app.is_tool_expanded(&activity_id);
+            let marker = if !complete {
+                format!("{} ", ctx.app.compact_spinner_frame())
+            } else if expanded {
+                "- ".to_string()
+            } else {
+                "+ ".to_string()
+            };
+            let line_index = ctx.lines.len();
+            ctx.lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    format!("{marker}{label}"),
+                    Style::default().fg(if complete {
+                        ctx.theme.quiet
+                    } else {
+                        ctx.theme.amber
+                    }),
+                ),
+            ]));
+            ctx.tool_row_lines.push((activity_id, line_index));
+            if expanded {
+                append_stream_parts_inner(ctx, &parts[index..index + len], false);
+            }
+            ctx.lines.push(Line::from(""));
+            index += len;
+            continue;
+        }
         let part = &parts[index];
         match part {
             StreamPart::User(prompt) => {
@@ -538,11 +696,12 @@ fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
                 ctx.lines.push(Line::from(""));
             }
             StreamPart::Text(text) => {
-                let mut rendered = format_transcript_lines_with_width(
+                let mut rendered = format_transcript_lines_with_mode(
                     text,
                     ctx.theme,
                     ctx.mode_color,
                     Some(ctx.width),
+                    ctx.app.tui_settings().markdown,
                 );
                 for line in &mut rendered {
                     indent_assistant_line(line);
@@ -559,7 +718,7 @@ fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
                     Span::styled(
                         format!(
                             "{} {}",
-                            ctx.app.wave_spinner().compact_frame(),
+                            ctx.app.compact_spinner_frame(),
                             reasoning_label(text, false)
                         ),
                         Style::default()
@@ -567,6 +726,14 @@ fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
+                if ctx.app.is_thought_expanded() {
+                    for l in text.lines() {
+                        ctx.lines.push(Line::from(vec![
+                            Span::raw("      │ "),
+                            Span::styled(l.to_string(), Style::default().fg(ctx.theme.quiet)),
+                        ]));
+                    }
+                }
             }
             StreamPart::ReasoningDone { text, duration } => {
                 let dur_str = format!("{:.1}s", duration.as_secs_f64().max(0.1));
@@ -600,7 +767,9 @@ fn append_stream_parts(ctx: &mut ChatRenderContext<'_>, parts: &[StreamPart]) {
                 ctx.lines.push(Line::from(""));
             }
             StreamPart::Tool(call_id) => {
-                if let Some((ids, complete)) = exploration_run(ctx.app, parts, index) {
+                if ctx.app.tui_settings().grouping == crate::config::ToolGrouping::Auto
+                    && let Some((ids, complete)) = exploration_run(ctx.app, parts, index)
+                {
                     let len = ids.len();
                     render_exploration_group(ctx, &ids, complete);
                     index += len;
@@ -796,7 +965,7 @@ fn render_shell_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
         tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
 
         // Line 2: command line
-        let spinner_frame = format!("{} ", app.wave_spinner().compact_frame());
+        let spinner_frame = format!("{} ", app.compact_spinner_frame());
         let marker_color = if row.state == ToolRowState::Pending {
             theme.dim
         } else {
@@ -1074,7 +1243,7 @@ fn render_diff_card(ctx: &mut ChatRenderContext<'_>, row: &ToolRow) {
         tool_row_lines.push((row.call_id.clone(), lines.len() - 1));
 
         // Line 2: command line
-        let spinner_frame = format!("{} ", app.wave_spinner().compact_frame());
+        let spinner_frame = format!("{} ", app.compact_spinner_frame());
         let marker_color = if row.state == ToolRowState::Pending {
             theme.dim
         } else {
@@ -1778,7 +1947,7 @@ fn compact_tool_line(
     let active = matches!(row.state, ToolRowState::Pending | ToolRowState::Running);
     let canonical = canonical_tool_name(&row.name);
     let marker_text = if active {
-        app.wave_spinner().compact_frame().to_string()
+        app.compact_spinner_frame().to_string()
     } else {
         tool_completed_icon(&row.name, row.state).to_string()
     };
@@ -1918,6 +2087,49 @@ fn truncate_tool_text(text: &str, max_width: usize) -> String {
     result.push_str(ellipsis);
     result
 }
+fn format_plain_bold(text: &str, theme: &Theme) -> Vec<Span<'static>> {
+    if !text.contains("**") {
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(theme.ink),
+        )];
+    }
+    let mut spans = Vec::new();
+    let mut remainder = text;
+    while let Some(start_idx) = remainder.find("**") {
+        let after_open = &remainder[start_idx + 2..];
+        if let Some(end_idx) = after_open.find("**") {
+            let bold_content = &after_open[..end_idx];
+            if !bold_content.is_empty() {
+                let before = &remainder[..start_idx];
+                if !before.is_empty() {
+                    spans.push(Span::styled(
+                        before.to_string(),
+                        Style::default().fg(theme.ink),
+                    ));
+                }
+                spans.push(Span::styled(
+                    bold_content.to_string(),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ));
+                remainder = &after_open[end_idx + 2..];
+                continue;
+            }
+        }
+        break;
+    }
+    if !remainder.is_empty() {
+        spans.push(Span::styled(
+            remainder.to_string(),
+            Style::default().fg(theme.ink),
+        ));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), Style::default().fg(theme.ink)));
+    }
+    spans
+}
+
 fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     if let Some(open) = text.find('[')
         && let Some(label_end) = text[open + 1..].find("](")
@@ -1937,10 +2149,7 @@ fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
         }
     }
     if !text.contains('`') {
-        return vec![Span::styled(
-            text.to_string(),
-            Style::default().fg(theme.ink),
-        )];
+        return format_plain_bold(text, theme);
     }
 
     let mut spans = Vec::new();
@@ -1950,10 +2159,7 @@ fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
         let before = &remainder[..start_idx];
         if let Some(end_idx) = remainder[start_idx + 1..].find('`') {
             if !before.is_empty() {
-                spans.push(Span::styled(
-                    before.to_string(),
-                    Style::default().fg(theme.ink),
-                ));
+                spans.extend(format_plain_bold(before, theme));
             }
             let code_content = &remainder[start_idx + 1..start_idx + 1 + end_idx];
             spans.push(Span::styled(
@@ -1967,10 +2173,7 @@ fn format_inline_code(text: &str, theme: &Theme) -> Vec<Span<'static>> {
     }
 
     if !remainder.is_empty() {
-        spans.push(Span::styled(
-            remainder.to_string(),
-            Style::default().fg(theme.ink),
-        ));
+        spans.extend(format_plain_bold(remainder, theme));
     }
 
     if spans.is_empty() {
@@ -1994,6 +2197,22 @@ pub fn format_transcript_lines_with_width(
     mode_color: Color,
     width: Option<u16>,
 ) -> Vec<Line<'static>> {
+    format_transcript_lines_with_mode(
+        transcript,
+        theme,
+        mode_color,
+        width,
+        crate::config::MarkdownMode::Rendered,
+    )
+}
+
+pub fn format_transcript_lines_with_mode(
+    transcript: &str,
+    theme: &Theme,
+    mode_color: Color,
+    width: Option<u16>,
+    markdown_mode: crate::config::MarkdownMode,
+) -> Vec<Line<'static>> {
     let raw_lines: Vec<&str> = transcript.lines().collect();
     let transcript_width = raw_lines
         .iter()
@@ -2003,6 +2222,36 @@ pub fn format_transcript_lines_with_width(
     let card_width = width
         .map(|w| (w as usize).saturating_sub(2).max(20))
         .unwrap_or_else(|| transcript_width.max(20));
+    if markdown_mode == crate::config::MarkdownMode::Source {
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(raw_lines.len());
+        for line in &raw_lines {
+            if *line == "[earlier transcript compacted]" {
+                lines.push(Line::from(Span::styled(
+                    (*line).to_string(),
+                    Style::default().fg(theme.dim),
+                )));
+            } else if let Some(prompt) = line.strip_prefix("> ") {
+                let content_line = Line::from(vec![
+                    Span::styled(
+                        "▌ ",
+                        Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        prompt.to_string(),
+                        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    ),
+                ]);
+                lines.push(pad_card_line(content_line, card_width, theme.bg_element));
+                lines.push(Line::from(""));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    (*line).to_string(),
+                    Style::default().fg(theme.ink),
+                )));
+            }
+        }
+        return lines;
+    }
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(raw_lines.len());
     let mut in_code_block = false;
     let mut compaction_marker_seen = false;

@@ -470,16 +470,15 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                     .as_deref()
                     .map(str::trim)
                     .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("default"));
-                let thinking_budget: Option<u32> = active_variant.map(|variant| {
-                    match variant.to_ascii_lowercase().as_str() {
+                let thinking_budget: Option<u32> =
+                    active_variant.map(|variant| match variant.to_ascii_lowercase().as_str() {
                         "minimal" => 512,
                         "low" => 1024,
                         "medium" => 4096,
                         "high" => 16_000,
                         "max" => 31_999,
                         _ => 4096,
-                    }
-                });
+                    });
                 let max_tokens = match thinking_budget {
                     Some(budget) if request.max_output_tokens <= budget => {
                         budget.saturating_add(4096)

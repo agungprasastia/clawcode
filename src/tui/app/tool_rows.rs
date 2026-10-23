@@ -731,11 +731,25 @@ impl App {
     }
 
     pub fn is_tool_expanded(&self, call_id: &str) -> bool {
-        self.expanded_tool_rows.contains(call_id)
+        if self.tui_settings.verbosity == crate::config::TranscriptVerbosity::High
+            && !call_id.starts_with("group:")
+            && !call_id.starts_with("activity:")
+        {
+            !self.collapsed_tool_rows.contains(call_id)
+        } else {
+            self.expanded_tool_rows.contains(call_id)
+        }
     }
 
     pub fn toggle_tool_expanded(&mut self, call_id: &str) {
-        if !self.expanded_tool_rows.insert(call_id.to_string()) {
+        if self.tui_settings.verbosity == crate::config::TranscriptVerbosity::High
+            && !call_id.starts_with("group:")
+            && !call_id.starts_with("activity:")
+        {
+            if !self.collapsed_tool_rows.insert(call_id.to_string()) {
+                self.collapsed_tool_rows.remove(call_id);
+            }
+        } else if !self.expanded_tool_rows.insert(call_id.to_string()) {
             self.expanded_tool_rows.remove(call_id);
         }
     }

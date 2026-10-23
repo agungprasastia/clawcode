@@ -961,3 +961,182 @@ fn mcp_dialog_can_disconnect_and_show_error_details() {
     );
     assert!(!app.mcp_registry.as_ref().unwrap().is_enabled("local"));
 }
+
+#[test]
+fn settings_dialog_cycles_values_and_persists_to_config() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "clawcode_settings_test_{}_{}",
+        std::process::id(),
+        unique
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("clawcode.jsonc");
+    std::fs::write(
+        &config_path,
+        "{\n  // preserve user comment\n  \"schema_version\": 1\n}\n",
+    )
+    .unwrap();
+
+    let mut app = App::default();
+    app.with_config_settings(crate::config::Config::default(), Some(config_path.clone()));
+
+    app.prompt = "/settings".to_string();
+    app.submit_prompt();
+    assert!(app.settings_dialog().is_some());
+
+    for ch in "verbosity".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Right));
+
+    assert_eq!(
+        app.tui_settings().verbosity,
+        crate::config::TranscriptVerbosity::High
+    );
+
+    let saved_raw = std::fs::read_to_string(&config_path).unwrap();
+    assert!(saved_raw.contains("// preserve user comment"));
+    let reloaded = crate::config::ConfigLoader
+        .parse_str(config_path.display().to_string(), &saved_raw)
+        .unwrap();
+    assert_eq!(
+        reloaded.tui.verbosity,
+        crate::config::TranscriptVerbosity::High
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn transcript_respects_verbosity_grouping_markdown_and_sticky_scroll() {
+    use crate::config::{
+        Config, MarkdownMode, ThinkingDisplay, ToolGrouping, TranscriptVerbosity, TuiSettingsConfig,
+    };
+    use crate::tui::app::tool_rows::{ToolRow, ToolRowState};
+
+    let render_text = |app: &App| -> String {
+        let backend = ratatui::backend::TestBackend::new(100, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| crate::tui::render(frame, app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut out = Vec::new();
+        for y in 0..buffer.area.height {
+            let mut row = String::new();
+            for x in 0..buffer.area.width {
+                row.push_str(buffer[(x, y)].symbol());
+            }
+            out.push(row);
+        }
+        out.join("\n")
+    };
+
+    let mut app = App::default();
+    let now = std::time::Instant::now();
+    app.set_tool_rows_for_test(vec![
+        ToolRow {
+            call_id: "r1".into(),
+            name: "read".into(),
+            desc: "src/main.rs".into(),
+            arguments: r#"{"path":"src/main.rs"}"#.into(),
+            output: "fn main() {}".into(),
+            state: ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: now,
+            expandable: false,
+        },
+        ToolRow {
+            call_id: "r2".into(),
+            name: "read".into(),
+            desc: "src/lib.rs".into(),
+            arguments: r#"{"path":"src/lib.rs"}"#.into(),
+            output: "pub mod cli;".into(),
+            state: ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: now,
+            expandable: false,
+        },
+    ]);
+    let mut body = String::from("Use **bold** text\n");
+    for idx in 1..=25 {
+        body.push_str(&format!("filler line {idx}\n"));
+    }
+    app.set_stream_parts_for_test(
+        vec![
+            StreamPart::User("inspect".into()),
+            StreamPart::Tool("r1".into()),
+            StreamPart::Tool("r2".into()),
+            StreamPart::ReasoningDone {
+                text: "deep internal check".into(),
+                duration: std::time::Duration::from_secs(1),
+            },
+            StreamPart::Text(body.clone()),
+        ],
+        Some(0),
+    );
+
+    app.scroll_to_top();
+    let default_rendered = render_text(&app);
+    assert!(default_rendered.contains("Explored: 2 reads"));
+    assert!(default_rendered.contains("+ Thought"));
+    assert!(!default_rendered.contains("deep internal check"));
+    assert!(default_rendered.contains("Use bold text"));
+    assert!(!default_rendered.contains("**bold**"));
+
+    let mut source_cfg = Config::default();
+    source_cfg.tui = TuiSettingsConfig {
+        markdown: MarkdownMode::Source,
+        grouping: ToolGrouping::None,
+        thinking: ThinkingDisplay::Show,
+        ..TuiSettingsConfig::default()
+    };
+    app.with_config_settings(source_cfg, None);
+    let source_rendered = render_text(&app);
+    assert!(source_rendered.contains("**bold**"));
+    assert!(source_rendered.contains("Read src/main.rs"));
+    assert!(source_rendered.contains("Read src/lib.rs"));
+    assert!(!source_rendered.contains("Explored: 2 reads"));
+    assert!(source_rendered.contains("deep internal check"));
+
+    let mut low_cfg = Config::default();
+    low_cfg.tui = TuiSettingsConfig {
+        verbosity: TranscriptVerbosity::Low,
+        ..TuiSettingsConfig::default()
+    };
+    app.with_config_settings(low_cfg, None);
+    let low_rendered = render_text(&app);
+    assert!(low_rendered.contains("Activity:"));
+    assert!(!low_rendered.contains("Read src/main.rs"));
+
+    app.with_config_settings(Config::default(), None);
+    app.scroll_to_bottom();
+    app.scroll_up(4);
+    let scrolled_rendered = render_text(&app);
+    assert!(scrolled_rendered.contains("Jump to latest ↓"));
+    let scroll_before = app.chat_scroll();
+    app.apply(UiEvent::StreamDelta(
+        "\nextra delta 1\nextra delta 2\nextra delta 3".into(),
+    ));
+    assert!(
+        app.chat_scroll() > scroll_before,
+        "sticky scroll should compensate for newly streamed lines while scrolled up"
+    );
+    let after_delta_rendered = render_text(&app);
+    assert!(after_delta_rendered.contains("Jump to latest ↓"));
+
+    let badge_rect = app
+        .jump_to_latest_area()
+        .expect("Jump to latest badge rect recorded");
+    app.apply(UiEvent::MouseClick {
+        x: badge_rect.x + 1,
+        y: badge_rect.y,
+    });
+    assert_eq!(app.chat_scroll(), 0);
+}

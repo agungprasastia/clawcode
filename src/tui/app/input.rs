@@ -306,6 +306,17 @@ impl App {
                 self.copy_transcript();
                 return;
             }
+            if trimmed == "/settings" {
+                self.open_settings_dialog();
+                return;
+            }
+            if trimmed == "/thinking" {
+                self.tui_settings.thinking = self.tui_settings.thinking.toggle();
+                self.persist_tui_settings();
+                self.diagnostic =
+                    format!("thinking display: {}", self.tui_settings.thinking.as_str());
+                return;
+            }
             if let Some(stripped) = trimmed.strip_prefix("/model ") {
                 let arg = stripped.trim();
                 let chosen = if let Some(suggestion) = model_suggestions.get(selected_idx) {
@@ -481,6 +492,7 @@ impl App {
         self.stream_parts.clear();
         self.tool_rows.clear();
         self.expanded_tool_rows.clear();
+        self.collapsed_tool_rows.clear();
         self.status = ConversationStatus::Idle;
         if self.transcript.len() > 1024 {
             let split_idx = self.transcript.len() - 1024;
@@ -675,6 +687,47 @@ impl App {
         }
     }
 
+    fn scroll_step(&mut self) -> u16 {
+        let base = self.tui_settings.scroll_speed.clamp(1, 20);
+        if !self.tui_settings.scroll_acceleration {
+            self.scroll_streak = 0;
+            return base;
+        }
+        let now = std::time::Instant::now();
+        if self
+            .last_scroll_at
+            .is_some_and(|prev| now.duration_since(prev) <= std::time::Duration::from_millis(80))
+        {
+            self.scroll_streak = (self.scroll_streak + 1).min(6);
+        } else {
+            self.scroll_streak = 0;
+        }
+        self.last_scroll_at = Some(now);
+        let multiplier = 1 + (self.scroll_streak / 2);
+        base.saturating_mul(multiplier)
+    }
+
+    pub(crate) fn jump_to_last_user_message(&mut self) {
+        if let Some(last_user_idx) = self
+            .stream_parts
+            .iter()
+            .rposition(|part| matches!(part, StreamPart::User(_)))
+        {
+            let mut lines_below = 0u16;
+            for part in &self.stream_parts[last_user_idx + 1..] {
+                lines_below = lines_below.saturating_add(match part {
+                    StreamPart::Text(text) => (text.lines().count().max(1) as u16) + 1,
+                    StreamPart::Reasoning(_) | StreamPart::ReasoningDone { .. } => 2,
+                    StreamPart::Tool(_) => 1,
+                    StreamPart::User(text) => (text.lines().count().max(1) as u16) + 2,
+                });
+            }
+            self.chat_scroll = lines_below;
+        } else {
+            self.scroll_to_bottom();
+        }
+    }
+
     pub(crate) fn handle_input_key(&mut self, input: Input) {
         if !matches!(
             input,
@@ -764,16 +817,33 @@ impl App {
                 }
             }
             Input::ScrollUp => {
-                self.scroll_up(3);
+                let step = self.scroll_step();
+                self.scroll_up(step);
             }
             Input::ScrollDown => {
-                self.scroll_down(3);
+                let step = self.scroll_step();
+                self.scroll_down(step);
+            }
+            Input::HalfPageUp => {
+                self.scroll_up(8);
+            }
+            Input::HalfPageDown => {
+                self.scroll_down(8);
             }
             Input::PageUp => {
                 self.scroll_up(15);
             }
             Input::PageDown => {
                 self.scroll_down(15);
+            }
+            Input::FirstMessage => {
+                self.scroll_to_top();
+            }
+            Input::LastMessage => {
+                self.scroll_to_bottom();
+            }
+            Input::JumpLastUserMessage => {
+                self.jump_to_last_user_message();
             }
             Input::Home => {
                 if self.prompt.is_empty() {
@@ -813,6 +883,7 @@ impl App {
             }
             Input::Leader => {
                 self.leader_pending = true;
+                self.leader_started_at = Some(std::time::Instant::now());
                 self.which_key.show();
                 self.diagnostic =
                     "Leader: n new · l sessions · m models · a agents · c compact · q quit"

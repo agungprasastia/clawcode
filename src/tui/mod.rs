@@ -28,8 +28,9 @@ pub use dialogs::{
     AgentItem, AgentsDialogState, McpDialogItem, McpDialogState, McpDialogStatus, McpErrorDetail,
     ModelsDialogState, PaletteAction, PaletteDialogState, PermissionDecision,
     PermissionDialogState, PermissionPrompt, QuestionDialogState, SessionRenameDialogState,
-    SessionsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState, render_mcp_dialog,
-    render_permission_dialog, render_question_dialog,
+    SessionsDialogState, SettingKey, SettingsDialogState, StatusDialogState, ThemesDialogState,
+    WhichKeyState, render_mcp_dialog, render_permission_dialog, render_question_dialog,
+    render_settings_dialog,
 };
 pub use diff::{DiffLine, DiffOp, DiffResult, compute_diff};
 pub use home::HomeState;
@@ -70,7 +71,9 @@ pub fn default_data_dir() -> std::path::PathBuf {
 }
 
 pub fn attach_production_runtime(app: &mut App) {
-    let config = crate::config::ConfigLoader.load().unwrap_or_default();
+    let loader = crate::config::ConfigLoader;
+    let config = loader.load().unwrap_or_default();
+    app.with_config_settings(config.clone(), Some(loader.active_config_path()));
     let data_dir = default_data_dir();
     let _ = std::fs::create_dir_all(&data_dir);
     let db_path = data_dir.join("clawcode.db");

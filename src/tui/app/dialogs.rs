@@ -1,10 +1,12 @@
 use super::util::{bounded, is_sensitive_command, split_provider_model};
-use super::{App, ConversationMode, ConversationStatus, Input, MAX_IDENTITY_BYTES, UiEvent};
+use super::{
+    App, ConversationMode, ConversationStatus, Input, MAX_IDENTITY_BYTES, StreamPart, UiEvent,
+};
 use crate::tui::dialogs::{
     AgentsDialogState, GitDialogState, McpDialogItem, McpDialogState, McpDialogStatus,
     ModelsDialogState, PaletteAction, PaletteDialogState, PermissionDecision,
     PermissionDialogState, QuestionDialogState, SessionRenameDialogState, SessionsDialogState,
-    SkillsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState,
+    SettingsDialogState, SkillsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState,
 };
 
 impl App {
@@ -79,7 +81,7 @@ impl App {
 
     pub fn open_sessions_dialog(&mut self) {
         if let Ok(sessions) = self.command_service.list_sessions() {
-            self.diagnostic = format!("{} session(s) — press Esc to close", sessions.len());
+            self.diagnostic = format!("{} session(s) - press Esc to close", sessions.len());
             self.session_listings = sessions.clone();
             self.sessions_dialog = Some(SessionsDialogState::new(sessions, self.active_session_id));
         } else {
@@ -193,12 +195,33 @@ impl App {
     pub fn open_palette(&mut self) {
         self.which_key.hide();
         self.leader_pending = false;
+        self.leader_started_at = None;
         self.palette_dialog = Some(PaletteDialogState::new());
-        self.diagnostic = "Commands — type to filter, Enter to run".to_string();
+        self.diagnostic = "Commands - type to filter, Enter to run".to_string();
     }
 
     pub fn close_palette(&mut self) {
         self.palette_dialog = None;
+    }
+
+    pub fn settings_dialog(&self) -> Option<&SettingsDialogState> {
+        self.settings_dialog.as_ref()
+    }
+
+    pub fn settings_dialog_mut(&mut self) -> Option<&mut SettingsDialogState> {
+        self.settings_dialog.as_mut()
+    }
+
+    pub fn open_settings_dialog(&mut self) {
+        self.which_key.hide();
+        self.leader_pending = false;
+        self.leader_started_at = None;
+        self.settings_dialog = Some(SettingsDialogState::new());
+        self.diagnostic = "Settings - Left/Right/Enter to change, Esc to close".to_string();
+    }
+
+    pub fn close_settings_dialog(&mut self) {
+        self.settings_dialog = None;
     }
 
     pub fn open_session_rename_dialog(&mut self) {
@@ -504,14 +527,16 @@ impl App {
             }
             PaletteAction::ReleaseHighlights => {
                 self.diagnostic = format!(
-                    "clawcode v{} — release notes are not bundled with this build",
+                    "clawcode v{} - release notes are not bundled with this build",
                     env!("CARGO_PKG_VERSION")
                 );
             }
-            PaletteAction::Settings => {
+            PaletteAction::Settings => self.open_settings_dialog(),
+            PaletteAction::ToggleThinking => {
+                self.tui_settings.thinking = self.tui_settings.thinking.toggle();
+                self.persist_tui_settings();
                 self.diagnostic =
-                    "Settings live in the clawcode config file; use `clawcode debug config` to inspect it."
-                        .to_string();
+                    format!("thinking display: {}", self.tui_settings.thinking.as_str());
             }
             PaletteAction::ViewStatus | PaletteAction::DebugInfo => self.open_status_dialog(),
             PaletteAction::Update => {
@@ -552,6 +577,7 @@ impl App {
     pub(crate) fn handle_leader_input(&mut self, input: Input) {
         self.which_key.hide();
         self.leader_pending = false;
+        self.leader_started_at = None;
         match input {
             Input::Quit | Input::ClearOrExit => self.running = false,
             Input::Cancel | Input::Leader => {}
@@ -598,9 +624,8 @@ impl App {
                 self.copy_transcript();
             }
             Input::Character('y') => self.copy_transcript(),
-            Input::Character('u') => {
-                self.diagnostic = "Session undo is not available in this build.".to_string();
-            }
+            Input::Character('u') => self.jump_to_last_user_message(),
+            Input::Character(',') => self.open_settings_dialog(),
             Input::Character('r') => {
                 self.diagnostic = "Session redo is not available in this build.".to_string();
             }
@@ -870,6 +895,7 @@ impl App {
             || self.git_dialog.is_some()
             || self.skills_dialog.is_some()
             || self.mcp_dialog.is_some()
+            || self.settings_dialog.is_some()
             || self.palette_dialog.is_some()
             || self.session_rename_dialog.is_some();
         if !has_dialog {
@@ -878,11 +904,59 @@ impl App {
         match event {
             UiEvent::Resize { .. } => return true,
             UiEvent::StreamDelta(delta) => {
+                self.push_stream_part(StreamPart::Text(delta.clone()));
                 self.transcript.push_str(delta);
                 self.truncate_transcript();
                 return true;
             }
             _ => {}
+        }
+
+        if self.settings_dialog.is_some() {
+            let mut close = false;
+            let mut cycle_delta: Option<isize> = None;
+            let mut selected_key = None;
+            if let Some(dialog) = &mut self.settings_dialog {
+                match event {
+                    UiEvent::Input(Input::Quit | Input::Cancel) => close = true,
+                    UiEvent::Input(Input::Character(character)) => dialog.push_char(*character),
+                    UiEvent::Input(Input::Backspace) => dialog.pop_char(),
+                    UiEvent::Input(
+                        Input::Up | Input::ScrollUp | Input::PageUp | Input::Palette,
+                    ) => dialog.previous(),
+                    UiEvent::Input(
+                        Input::Down | Input::ScrollDown | Input::PageDown | Input::ToggleMode,
+                    ) => dialog.next(),
+                    UiEvent::Input(Input::Home) => dialog.selected = 0,
+                    UiEvent::Input(Input::End) => {
+                        dialog.selected = dialog.filtered_items().len().saturating_sub(1);
+                    }
+                    UiEvent::Input(Input::Left) => {
+                        selected_key = dialog.selected_key();
+                        cycle_delta = Some(-1);
+                    }
+                    UiEvent::Input(Input::Right | Input::Submit) => {
+                        selected_key = dialog.selected_key();
+                        cycle_delta = Some(1);
+                    }
+                    UiEvent::Paste(text) => {
+                        for character in text.chars().filter(|character| !character.is_control()) {
+                            dialog.push_char(character);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if close {
+                self.settings_dialog = None;
+                self.diagnostic = "settings closed".to_string();
+            } else if let (Some(key), Some(delta)) = (selected_key, cycle_delta) {
+                key.cycle(&mut self.tui_settings, delta);
+                let label = key.value_label(&self.tui_settings);
+                self.diagnostic = format!("{}: {label}", key.title());
+                self.persist_tui_settings();
+            }
+            return true;
         }
 
         if self.permission_dialog.is_some() {

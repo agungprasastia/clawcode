@@ -9,6 +9,7 @@ pub mod question;
 pub mod session_rename;
 pub mod sessions;
 pub mod sessions_panel;
+pub mod settings;
 pub mod skills;
 pub mod status;
 pub mod themes;
@@ -29,6 +30,7 @@ pub use permission::{
 pub use question::{QuestionDialogState, render_question_dialog};
 pub use session_rename::{SessionRenameDialogState, render_session_rename_dialog};
 pub use sessions::{SessionsDialogState, render_sessions_dialog, render_sessions_panel};
+pub use settings::{SettingKey, SettingsDialogState, render_settings_dialog};
 pub use skills::{SkillsDialogState, render_skills_dialog};
 pub use status::{StatusDialogState, render_status_dialog};
 pub use themes::{ThemesDialogState, render_themes_dialog};

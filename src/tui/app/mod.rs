@@ -28,7 +28,8 @@ use crate::runtime::client::RuntimeClient;
 use super::dialogs::{
     AgentsDialogState, GitDialogState, McpDialogState, ModelsDialogState, PaletteDialogState,
     PermissionDecision, PermissionDialogState, QuestionDialogState, SessionRenameDialogState,
-    SessionsDialogState, SkillsDialogState, StatusDialogState, ThemesDialogState, WhichKeyState,
+    SessionsDialogState, SettingsDialogState, SkillsDialogState, StatusDialogState,
+    ThemesDialogState, WhichKeyState,
 };
 use super::home::HomeState;
 
@@ -99,8 +100,13 @@ pub enum Input {
     WordRight,
     ScrollUp,
     ScrollDown,
+    HalfPageUp,
+    HalfPageDown,
     PageUp,
     PageDown,
+    FirstMessage,
+    LastMessage,
+    JumpLastUserMessage,
     Home,
     End,
     WhichKey,
@@ -132,6 +138,7 @@ pub enum UiEvent {
     StreamDelta(String),
     Paste(String),
     MouseClick { x: u16, y: u16 },
+    MouseScroll { up: bool },
 }
 
 pub(crate) struct McpProbeOutcome {
@@ -178,6 +185,10 @@ pub struct App {
     git_dialog: Option<GitDialogState>,
     skills_dialog: Option<SkillsDialogState>,
     mcp_dialog: Option<McpDialogState>,
+    settings_dialog: Option<SettingsDialogState>,
+    config: crate::config::Config,
+    tui_settings: crate::config::TuiSettingsConfig,
+    config_path: Option<std::path::PathBuf>,
     mcp_registry: Option<Arc<crate::mcp::McpRegistry>>,
     mcp_servers: BTreeMap<String, crate::config::McpServerConfig>,
     mcp_probe_tx: mpsc::Sender<McpProbeOutcome>,
@@ -189,6 +200,9 @@ pub struct App {
     which_key: WhichKeyState,
     /// True while Ctrl+X leader mode is waiting for a chord.
     leader_pending: bool,
+    leader_started_at: Option<std::time::Instant>,
+    last_scroll_at: Option<std::time::Instant>,
+    scroll_streak: u16,
     /// Command palette overlay.
     palette_dialog: Option<PaletteDialogState>,
     /// Inline editor for renaming the active session.
@@ -234,11 +248,13 @@ pub struct App {
     stream_parts: Vec<StreamPart>,
     stream_base_len: Option<usize>,
     expanded_tool_rows: HashSet<String>,
+    collapsed_tool_rows: HashSet<String>,
     thought_expanded: bool,
     last_tool_row_clicks: RefCell<Vec<(String, Rect)>>,
     pub current_plan: Vec<(String, String)>,
     last_popup_area: std::cell::Cell<Option<Rect>>,
     last_quick_actions_area: std::cell::Cell<Option<[Rect; 4]>>,
+    last_jump_to_latest_area: std::cell::Cell<Option<Rect>>,
     terminal_size: std::cell::Cell<(u16, u16)>,
 }
 
@@ -256,6 +272,10 @@ impl App {
             cli::runtime_service_with_config(&config).expect("in-memory runtime database");
         let available_models = command_service.models().unwrap_or_default();
         let mcp_servers = config.mcp.clone();
+        let tui_settings = config.tui.clone();
+        let mut typewriter = crate::tui::TypewriterState::new();
+        typewriter.set_animations_enabled(tui_settings.animations);
+        let thought_expanded = tui_settings.thinking == crate::config::ThinkingDisplay::Show;
         let (mcp_probe_tx, mcp_probe_rx) = mpsc::channel();
         Self {
             running: true,
@@ -290,6 +310,10 @@ impl App {
             git_dialog: None,
             skills_dialog: None,
             mcp_dialog: None,
+            settings_dialog: None,
+            config,
+            tui_settings,
+            config_path: None,
             mcp_registry: None,
             mcp_servers,
             mcp_probe_tx,
@@ -298,6 +322,9 @@ impl App {
             theme: crate::tui::ThemeKind::default(),
             which_key: WhichKeyState::default(),
             leader_pending: false,
+            leader_started_at: None,
+            last_scroll_at: None,
+            scroll_streak: 0,
             palette_dialog: None,
             session_rename_dialog: None,
             available_models,
@@ -306,7 +333,7 @@ impl App {
             last_animation_tick: std::time::Instant::now(),
             chat_scroll: 0,
             loaded_until_seq: -1,
-            typewriter: crate::tui::TypewriterState::new(),
+            typewriter,
             wave_spinner: crate::tui::WaveSpinner::new(ratatui::style::Color::Rgb(224, 159, 63)),
             runtime: None,
             runtime_events: None,
@@ -328,11 +355,13 @@ impl App {
             stream_parts: Vec::new(),
             stream_base_len: None,
             expanded_tool_rows: HashSet::new(),
-            thought_expanded: false,
+            collapsed_tool_rows: HashSet::new(),
+            thought_expanded,
             last_tool_row_clicks: RefCell::new(Vec::new()),
             current_plan: Vec::new(),
             last_popup_area: std::cell::Cell::new(None),
             last_quick_actions_area: std::cell::Cell::new(None),
+            last_jump_to_latest_area: std::cell::Cell::new(None),
             terminal_size: std::cell::Cell::new((100, 30)),
         }
     }
@@ -345,8 +374,23 @@ impl App {
             self.terminal_size.set((width, height));
             self.last_popup_area.set(None);
             self.last_quick_actions_area.set(None);
+            self.last_jump_to_latest_area.set(None);
             return;
         }
+
+        if matches!(
+            event,
+            UiEvent::MouseClick { .. } | UiEvent::MouseScroll { .. }
+        ) && !self.tui_settings.mouse
+        {
+            return;
+        }
+
+        let event = match event {
+            UiEvent::MouseScroll { up: true } => UiEvent::Input(Input::ScrollUp),
+            UiEvent::MouseScroll { up: false } => UiEvent::Input(Input::ScrollDown),
+            other => other,
+        };
 
         if self.handle_dialog_input(&event) {
             return;
@@ -362,7 +406,7 @@ impl App {
         match event {
             UiEvent::Input(input) => self.handle_input_key(input),
             UiEvent::Paste(text) => self.insert_str_at_cursor(&text),
-            UiEvent::Resize { .. } | UiEvent::MouseClick { .. } => {}
+            UiEvent::Resize { .. } | UiEvent::MouseClick { .. } | UiEvent::MouseScroll { .. } => {}
             UiEvent::StreamDelta(delta) => {
                 self.push_stream_part(StreamPart::Text(delta.clone()));
                 self.transcript.push_str(&delta);
@@ -567,14 +611,64 @@ impl App {
         &mut self.home_state
     }
 
+    pub fn tui_settings(&self) -> &crate::config::TuiSettingsConfig {
+        &self.tui_settings
+    }
+
+    pub fn with_config_settings(
+        &mut self,
+        config: crate::config::Config,
+        config_path: Option<std::path::PathBuf>,
+    ) {
+        self.tui_settings = config.tui.clone();
+        self.config = config;
+        self.config_path = config_path;
+        self.apply_tui_settings_side_effects();
+    }
+
+    pub(crate) fn apply_tui_settings_side_effects(&mut self) {
+        self.typewriter
+            .set_animations_enabled(self.tui_settings.animations);
+        self.thought_expanded = self.tui_settings.thinking == crate::config::ThinkingDisplay::Show;
+    }
+
+    pub(crate) fn persist_tui_settings(&mut self) {
+        self.config.tui = self.tui_settings.clone();
+        self.apply_tui_settings_side_effects();
+        if let Some(path) = self.config_path.as_deref()
+            && let Err(error) = crate::config::Config::save_tui_settings(path, &self.tui_settings)
+        {
+            self.diagnostic = format!("failed to save settings: {error}");
+        }
+    }
+
+    pub fn compact_spinner_frame(&self) -> &'static str {
+        if self.tui_settings.animations {
+            self.wave_spinner.compact_frame()
+        } else {
+            "⋯"
+        }
+    }
+
     /// Advances periodic UI animations (mascot blinking, wave spinner, typewriter pacing).
     /// Returns true if a visual frame changed and redraw is needed.
     pub fn tick(&mut self) -> bool {
         const ANIMATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
         let mut redraw = false;
+        if self.leader_pending
+            && let Some(started) = self.leader_started_at
+            && started.elapsed()
+                >= std::time::Duration::from_millis(self.tui_settings.leader_timeout_ms)
+        {
+            self.leader_pending = false;
+            self.leader_started_at = None;
+            self.which_key.hide();
+            self.diagnostic = "leader chord timed out".to_string();
+            redraw = true;
+        }
         if self.last_animation_tick.elapsed() >= ANIMATION_INTERVAL {
             self.last_animation_tick = std::time::Instant::now();
-            if self.transcript.is_empty() {
+            if self.tui_settings.animations && self.transcript.is_empty() {
                 let old_frame = self.home_state.frame();
                 self.home_state.tick();
                 if old_frame != self.home_state.frame() {
@@ -642,7 +736,7 @@ impl App {
                 self.diagnostic = format!("{} model(s)", models.len());
             }
             CommandOutput::Sessions(sessions) => {
-                self.diagnostic = format!("{} session(s) — press Esc to close", sessions.len());
+                self.diagnostic = format!("{} session(s) - press Esc to close", sessions.len());
                 self.session_listings = sessions.clone();
                 self.sessions_dialog =
                     Some(SessionsDialogState::new(sessions, self.active_session_id));

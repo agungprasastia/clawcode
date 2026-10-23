@@ -15,7 +15,8 @@ use super::dialogs::{
     render_agents_dialog, render_git_dialog, render_mcp_dialog, render_model_suggestions_popup,
     render_models_dialog, render_palette_dialog, render_permission_dialog, render_question_dialog,
     render_session_rename_dialog, render_sessions_dialog, render_sessions_panel,
-    render_skills_dialog, render_status_dialog, render_themes_dialog, render_which_key,
+    render_settings_dialog, render_skills_dialog, render_status_dialog, render_themes_dialog,
+    render_which_key,
 };
 use super::home::render_home;
 use super::tabs::render_session_tabs;
@@ -79,6 +80,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         render_skills_dialog(frame, area, dialog, &theme);
     } else if let Some(dialog) = app.mcp_dialog() {
         render_mcp_dialog(frame, area, dialog, &theme);
+    } else if let Some(dialog) = app.settings_dialog() {
+        render_settings_dialog(frame, area, dialog, app.tui_settings(), &theme);
     } else if let Some(dialog) = app.sessions_dialog() {
         render_sessions_dialog(frame, area, dialog, app.active_session_id(), &theme);
     } else if let Some(dialog) = app.agents_dialog() {
@@ -591,7 +594,14 @@ pub(crate) fn status_label(app: &App) -> String {
     } else if matches!(app.conversation_status(), super::ConversationStatus::Active)
         || app.is_typing()
     {
-        "STREAMING".to_string()
+        if app.tui_settings().tps
+            && let Some(tps) = app.tokens_per_second()
+            && tps > 0.0
+        {
+            format!("STREAMING · {tps:.1} tok/s")
+        } else {
+            "STREAMING".to_string()
+        }
     } else {
         format!("{:?}", app.conversation_status()).to_ascii_uppercase()
     }

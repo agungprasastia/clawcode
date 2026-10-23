@@ -109,6 +109,16 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
         template: "/new ",
     },
     CommandSuggestion {
+        name: "/settings",
+        description: "Open TUI streaming & display settings",
+        template: "/settings",
+    },
+    CommandSuggestion {
+        name: "/thinking",
+        description: "Toggle thinking block visibility",
+        template: "/thinking",
+    },
+    CommandSuggestion {
         name: "/help",
         description: "Show manual, commands & shortcuts",
         template: "/help",
