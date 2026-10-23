@@ -9,7 +9,8 @@
 //! - Preserves unpromoted pending inputs in SQLite.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Outcome of waking a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub struct SessionConfig {
     pub agent_mode: String,
     pub provider: String,
     pub model: String,
+    pub variant: Option<String>,
 }
 
 /// Process-local state for one session.
@@ -43,8 +45,10 @@ pub struct SessionState {
     pub active: bool,
     pub active_generation_id: Option<i64>,
     pub wake_pending: bool,
+    pub queued_turns: usize,
     pub cleaning_up: bool,
     pub config: Option<SessionConfig>,
+    pub background_flag: Arc<AtomicBool>,
 }
 
 /// Thread-safe coordinator keyed by session id.
@@ -76,17 +80,39 @@ impl SessionCoordinator {
         } else {
             state.active = true;
             state.wake_pending = false;
+            state.queued_turns = 0;
+            WakeOutcome::Scheduled
+        }
+    }
+
+    /// Wake a session for an explicitly queued user input so every admitted input drains in order:
+    /// - If `cleaning_up`, returns [`WakeOutcome::Ignored`].
+    /// - If `active`, increments `queued_turns` and returns [`WakeOutcome::Coalesced`].
+    /// - If idle, marks `active = true` and returns [`WakeOutcome::Scheduled`].
+    pub fn wake_queued(&self, session_id: i64) -> WakeOutcome {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        let state = sessions.entry(session_id).or_default();
+        if state.cleaning_up {
+            WakeOutcome::Ignored
+        } else if state.active {
+            state.queued_turns = state.queued_turns.saturating_add(1);
+            WakeOutcome::Coalesced
+        } else {
+            state.active = true;
+            state.wake_pending = false;
+            state.queued_turns = 0;
             WakeOutcome::Scheduled
         }
     }
 
     /// Complete a turn:
     /// - If `cleaning_up` is true, resets `active = false`, `active_generation_id = None`,
-    ///   `wake_pending = false`, and returns `false`.
+    ///   `wake_pending = false`, `queued_turns = 0`, and returns `false`.
+    /// - If `queued_turns > 0`, decrements `queued_turns`, clears `wake_pending`, keeps
+    ///   `active = true`, clears `active_generation_id`, and returns `true`.
     /// - If `wake_pending` is true, clears `wake_pending`, keeps `active = true`,
     ///   clears `active_generation_id`, and returns `true` (indicating another turn should run).
-    /// - If `wake_pending` is false, marks `active = false`, `active_generation_id = None`,
-    ///   and returns `false`.
+    /// - Otherwise marks `active = false`, `active_generation_id = None`, and returns `false`.
     pub fn complete_turn(&self, session_id: i64) -> bool {
         let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
         let Some(state) = sessions.get_mut(&session_id) else {
@@ -96,7 +122,14 @@ impl SessionCoordinator {
             state.active = false;
             state.active_generation_id = None;
             state.wake_pending = false;
+            state.queued_turns = 0;
             false
+        } else if state.queued_turns > 0 {
+            state.queued_turns -= 1;
+            state.wake_pending = false;
+            state.active = true;
+            state.active_generation_id = None;
+            true
         } else if state.wake_pending {
             state.wake_pending = false;
             state.active = true;
@@ -110,7 +143,7 @@ impl SessionCoordinator {
     }
 
     /// Interrupt a session:
-    /// - Clears `wake_pending`.
+    /// - Clears `wake_pending` and `queued_turns`.
     /// - Marks `cleaning_up = true` if session was active.
     /// - Returns the `active_generation_id` (if any) to cancel.
     /// - Idempotent: returns `None` if session is idle or unknown.
@@ -121,8 +154,44 @@ impl SessionCoordinator {
             return None;
         }
         state.wake_pending = false;
+        state.queued_turns = 0;
         state.cleaning_up = true;
         state.active_generation_id
+    }
+
+    /// Steer a session toward a newly prioritized pending input:
+    /// - Keeps `cleaning_up = false` and marks `wake_pending = true` so `drain_session_loop`
+    ///   immediately promotes the steered input after the active generation cancels.
+    /// - Returns `active_generation_id` if a generation is currently running.
+    pub fn steer(&self, session_id: i64) -> Option<i64> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        let state = sessions.entry(session_id).or_default();
+        if !state.active {
+            return None;
+        }
+        state.cleaning_up = false;
+        state.wake_pending = true;
+        state.active_generation_id
+    }
+
+    /// Return the shared per-session backgrounding flag observed by `ToolWorkers`.
+    pub fn background_flag(&self, session_id: i64) -> Arc<AtomicBool> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        Arc::clone(&sessions.entry(session_id).or_default().background_flag)
+    }
+
+    /// Signal running shell tools in `session_id` to detach to background.
+    /// Returns `true` if the session is currently active.
+    pub fn request_background(&self, session_id: i64) -> bool {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(state) = sessions.get_mut(&session_id) else {
+            return false;
+        };
+        if !state.active {
+            return false;
+        }
+        state.background_flag.store(true, Ordering::Release);
+        true
     }
 
     /// Reset session state to idle (`active = false`, `cleaning_up = false`,
@@ -133,6 +202,7 @@ impl SessionCoordinator {
             state.active = false;
             state.cleaning_up = false;
             state.wake_pending = false;
+            state.queued_turns = 0;
             state.active_generation_id = None;
         }
     }
@@ -144,6 +214,7 @@ impl SessionCoordinator {
             state.active = false;
             state.active_generation_id = None;
             state.wake_pending = false;
+            state.queued_turns = 0;
         }
     }
 
@@ -151,6 +222,7 @@ impl SessionCoordinator {
     pub fn set_active_generation(&self, session_id: i64, generation_id: i64) {
         let mut sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
         let state = sessions.entry(session_id).or_default();
+        state.background_flag.store(false, Ordering::Release);
         state.active_generation_id = Some(generation_id);
     }
 

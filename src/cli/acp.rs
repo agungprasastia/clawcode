@@ -524,6 +524,7 @@ impl AcpServer {
             agent_mode: &agent,
             provider: &provider,
             model: &model,
+            variant: None,
             prompt: &prompt,
             mcp,
         }) {

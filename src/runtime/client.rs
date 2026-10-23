@@ -13,6 +13,7 @@ use crate::persistence::{
 };
 use crate::provider::{FinishReason, Provider, StreamEvent, StreamRequest};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -41,6 +42,7 @@ pub enum ClientCommand {
         agent_mode: String,
         provider: String,
         model: String,
+        variant: Option<String>,
         prompt: String,
         /// When present, the worker reports the admitted input id.
         reply: Option<mpsc::Sender<Result<i64, String>>>,
@@ -49,6 +51,29 @@ pub enum ClientCommand {
     },
     /// Request cancellation of the active generation for a session.
     CancelGeneration { session_id: i64 },
+    /// Prioritize a pending input as `steer` and cancel only the active generation.
+    SteerInput {
+        session_id: i64,
+        input_id: i64,
+        reply: mpsc::Sender<Result<bool, String>>,
+    },
+    /// Discard a pending input before promotion, returning its content for undo/restore.
+    DiscardInput {
+        session_id: i64,
+        input_id: i64,
+        reply: mpsc::Sender<Result<Option<String>, String>>,
+    },
+    /// Detach running shell tools in `session_id` to background execution.
+    BackgroundTools {
+        session_id: i64,
+        reply: mpsc::Sender<Result<bool, String>>,
+    },
+    /// Persist a JSON value in SQLite `kv_state`.
+    SetKv {
+        key: String,
+        value_json: String,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
 }
 
 /// One generation request, including an optional session-scoped MCP registry.
@@ -57,6 +82,7 @@ pub struct GenerationRequest<'a> {
     pub agent_mode: &'a str,
     pub provider: &'a str,
     pub model: &'a str,
+    pub variant: Option<&'a str>,
     pub prompt: &'a str,
     pub mcp: Option<Arc<crate::mcp::McpRegistry>>,
 }
@@ -147,6 +173,28 @@ impl RuntimeClient {
             agent_mode,
             provider,
             model,
+            variant: None,
+            prompt,
+            mcp: None,
+        })
+    }
+
+    /// Queue a generation start with an explicit model variant (`None` uses default).
+    pub fn start_generation_with_variant(
+        &self,
+        session_id: i64,
+        agent_mode: &str,
+        provider: &str,
+        model: &str,
+        variant: Option<&str>,
+        prompt: &str,
+    ) -> Result<(), String> {
+        self.start_generation_request(GenerationRequest {
+            session_id,
+            agent_mode,
+            provider,
+            model,
+            variant,
             prompt,
             mcp: None,
         })
@@ -166,6 +214,11 @@ impl RuntimeClient {
             agent_mode: request.agent_mode.to_string(),
             provider: request.provider.to_string(),
             model: request.model.to_string(),
+            variant: request
+                .variant
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("default"))
+                .map(str::to_string),
             prompt: request.prompt.to_string(),
             reply: None,
             mcp: request.mcp,
@@ -183,6 +236,21 @@ impl RuntimeClient {
         model: &str,
         prompt: &str,
     ) -> Result<i64, String> {
+        self.start_generation_admitted_with_variant(
+            session_id, agent_mode, provider, model, None, prompt,
+        )
+    }
+
+    /// Queue a generation start with an optional model variant and block until durably admitted.
+    pub fn start_generation_admitted_with_variant(
+        &self,
+        session_id: i64,
+        agent_mode: &str,
+        provider: &str,
+        model: &str,
+        variant: Option<&str>,
+        prompt: &str,
+    ) -> Result<i64, String> {
         if prompt.len() > MAX_MESSAGE_BYTES {
             return Err(format!(
                 "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
@@ -195,6 +263,10 @@ impl RuntimeClient {
             agent_mode: agent_mode.to_string(),
             provider: provider.to_string(),
             model: model.to_string(),
+            variant: variant
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("default"))
+                .map(str::to_string),
             prompt: prompt.to_string(),
             reply: Some(reply),
             mcp: None,
@@ -208,6 +280,79 @@ impl RuntimeClient {
     /// never be silently dropped when the command channel is momentarily full.
     pub fn cancel_generation(&self, session_id: i64) -> Result<(), String> {
         self.send(ClientCommand::CancelGeneration { session_id })
+    }
+
+    /// Promote a pending input to `steer` priority and cancel only the active generation
+    /// so the steered prompt executes immediately next.
+    pub fn steer_input(&self, session_id: i64, input_id: i64) -> Result<bool, String> {
+        let (reply, reply_rx) = mpsc::channel();
+        self.send(ClientCommand::SteerInput {
+            session_id,
+            input_id,
+            reply,
+        })?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    /// Discard a pending input before promotion. Returns `Ok(Some(content))` if discarded,
+    /// or `Ok(None)` if it was already promoted or discarded.
+    pub fn discard_input(&self, session_id: i64, input_id: i64) -> Result<Option<String>, String> {
+        let (reply, reply_rx) = mpsc::channel();
+        self.send(ClientCommand::DiscardInput {
+            session_id,
+            input_id,
+            reply,
+        })?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    /// Fetch pending inputs for `session_id` in execution priority order.
+    pub fn pending_inputs(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<crate::persistence::SessionInput>, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .pending_session_inputs(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Detach running shell tools in `session_id` to background execution (`Ctrl+B`).
+    pub fn background_tools(&self, session_id: i64) -> Result<bool, String> {
+        let (reply, reply_rx) = mpsc::channel();
+        self.send(ClientCommand::BackgroundTools { session_id, reply })?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    /// Read a durable JSON value from SQLite `kv_state`.
+    pub fn get_kv(&self, key: &str) -> Result<Option<String>, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard.get_kv(key).map_err(|error| error.to_string())
+    }
+
+    /// Upsert a durable JSON value in SQLite `kv_state` via the writer thread.
+    pub fn set_kv(&self, key: &str, value_json: &str) -> Result<(), String> {
+        if value_json.len() > MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
+                value_json.len()
+            ));
+        }
+        let (reply, reply_rx) = mpsc::channel();
+        self.send(ClientCommand::SetKv {
+            key: key.to_string(),
+            value_json: value_json.to_string(),
+            reply,
+        })?;
+        reply_rx.recv().map_err(|error| error.to_string())?
     }
 
     /// Check if a session has an active drain running.
@@ -492,6 +637,7 @@ fn worker_loop(
                 agent_mode,
                 provider: provider_name,
                 model,
+                variant,
                 prompt,
                 reply,
                 mcp: generation_mcp,
@@ -514,6 +660,7 @@ fn worker_loop(
                         continue;
                     }
                 };
+                let is_queued_admit = reply.is_some();
                 if let Some(reply) = reply {
                     let _ = reply.send(Ok(input.id));
                 }
@@ -526,6 +673,7 @@ fn worker_loop(
                         "input_id": input.id,
                         "session_id": session_id,
                         "delivery": input.delivery.as_str(),
+                        "content": input.content,
                     })
                     .to_string(),
                 });
@@ -536,10 +684,16 @@ fn worker_loop(
                         agent_mode,
                         provider: provider_name,
                         model,
+                        variant,
                     },
                 );
 
-                match coordinator.wake(session_id) {
+                let wake_outcome = if is_queued_admit {
+                    coordinator.wake_queued(session_id)
+                } else {
+                    coordinator.wake(session_id)
+                };
+                match wake_outcome {
                     WakeOutcome::Scheduled => {
                         let drain_db = db.clone();
                         let drain_writer = writer.clone();
@@ -584,6 +738,105 @@ fn worker_loop(
                 } else {
                     publish_status(&bus, session_id, None, "cancel_rejected");
                 }
+            }
+            ClientCommand::SteerInput {
+                session_id,
+                input_id,
+                reply,
+            } => {
+                match writer.update_input_delivery(
+                    session_id,
+                    input_id,
+                    crate::persistence::db::InputDelivery::Steer,
+                ) {
+                    Ok(Some((updated, seq))) => {
+                        bus.publish(RuntimeEvent {
+                            seq,
+                            session_id,
+                            generation_id: None,
+                            kind: "prompt_updated".to_string(),
+                            payload_json: serde_json::json!({
+                                "input_id": updated.id,
+                                "session_id": session_id,
+                                "delivery": updated.delivery.as_str(),
+                            })
+                            .to_string(),
+                        });
+                        if let Some(generation_id) = coordinator.steer(session_id) {
+                            let _ = db.with(|db| db.request_cancel(generation_id));
+                        } else if !coordinator.is_active(session_id)
+                            && coordinator.wake(session_id).is_scheduled()
+                        {
+                            let drain_db = db.clone();
+                            let drain_writer = writer.clone();
+                            let drain_bus = bus.clone();
+                            let drain_coordinator = Arc::clone(&coordinator);
+                            let drain_runtime = runtime.clone();
+                            handles.push(thread::spawn(move || {
+                                let res =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        drain_session_loop(
+                                            drain_db,
+                                            drain_writer,
+                                            drain_bus,
+                                            drain_coordinator.clone(),
+                                            drain_runtime,
+                                            session_id,
+                                        );
+                                    }));
+                                if res.is_err() {
+                                    tracing::error!(session_id, "drain thread panicked");
+                                    drain_coordinator.finish_drain(session_id);
+                                }
+                            }));
+                        }
+                        let _ = reply.send(Ok(true));
+                    }
+                    Ok(None) => {
+                        let _ = reply.send(Ok(false));
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            ClientCommand::DiscardInput {
+                session_id,
+                input_id,
+                reply,
+            } => match writer.discard_pending_input(session_id, input_id) {
+                Ok(Some((discarded, seq))) => {
+                    bus.publish(RuntimeEvent {
+                        seq,
+                        session_id,
+                        generation_id: None,
+                        kind: "prompt_discarded".to_string(),
+                        payload_json: serde_json::json!({
+                            "input_id": discarded.id,
+                            "session_id": session_id,
+                            "content": discarded.content,
+                        })
+                        .to_string(),
+                    });
+                    let _ = reply.send(Ok(Some(discarded.content)));
+                }
+                Ok(None) => {
+                    let _ = reply.send(Ok(None));
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            },
+            ClientCommand::BackgroundTools { session_id, reply } => {
+                let triggered = coordinator.request_background(session_id);
+                let _ = reply.send(Ok(triggered));
+            }
+            ClientCommand::SetKv {
+                key,
+                value_json,
+                reply,
+            } => {
+                let _ = reply.send(writer.set_kv(&key, &value_json));
             }
         }
     }
@@ -669,6 +922,7 @@ fn drain_session_loop(
                             agent_mode: "plan".to_string(),
                             provider: "default".to_string(),
                             model: "default".to_string(),
+                            variant: None,
                         });
                 let mode = if config.agent_mode.eq_ignore_ascii_case("build") {
                     crate::workspace::Mode::Build
@@ -751,6 +1005,7 @@ fn drain_session_loop(
                 agent_mode: "plan".to_string(),
                 provider: "default".to_string(),
                 model: "default".to_string(),
+                variant: None,
             });
 
         let generation = match db.with(|db| {
@@ -790,6 +1045,7 @@ fn drain_session_loop(
                 &ctx,
                 &gen_runtime,
                 &config.model,
+                config.variant.as_deref(),
                 &promoted_input.content,
                 &config.agent_mode,
                 &config.provider,
@@ -929,18 +1185,22 @@ impl SharedGenerationCtx {
         &self,
         call_id: &str,
     ) -> Arc<crate::conversation::tools::ToolProgress> {
-        let ctx = self.clone();
+        let bus = self.bus.clone();
+        let session_id = self.session_id;
+        let generation_id = self.generation_id;
         let call_id = call_id.to_string();
         Arc::new(move |chunk: &str| {
-            ctx.publish(
-                0,
-                "tool_call_progress",
-                serde_json::json!({
+            bus.publish(RuntimeEvent {
+                seq: 0,
+                session_id,
+                generation_id: Some(generation_id),
+                kind: "tool_call_progress".to_string(),
+                payload_json: serde_json::json!({
                     "id": call_id,
                     "output": chunk,
                 })
                 .to_string(),
-            );
+            });
         })
     }
 
@@ -977,12 +1237,30 @@ enum LocalToolOutcome {
     Completed(crate::conversation::tools::ToolExecution),
     Failed(String),
     Cancelled,
+    Backgrounded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskSettlementState {
+    Running,
+    SettledInline,
+    DetachedToBackground,
+}
+
+struct TrackedToolTask {
+    index: usize,
+    can_background: bool,
+    state: Arc<Mutex<TaskSettlementState>>,
 }
 
 struct LocalToolTask {
     index: usize,
-    db: SharedDb,
+    call_id: String,
+    session_id: i64,
     generation_id: i64,
+    db: SharedDb,
+    writer: WriterHandle,
+    bus: EventBus,
     workspace_dir: std::path::PathBuf,
     mode: crate::workspace::Mode,
     tool_name: String,
@@ -992,21 +1270,28 @@ struct LocalToolTask {
 }
 
 /// Runs every local tool call on its own thread, matching OpenCode's fiber per
-/// tool call. Results are collected as they finish; `Drop` drains workers so a
-/// cancelled or failed turn never leaves a detached mutation running.
+/// tool call. Results are collected as they finish; `Drop` drains non-detached
+/// workers so a cancelled or failed turn never leaves a detached mutation running,
+/// while `Ctrl+B` detaches blocking shell commands cleanly to the background.
 struct ToolWorkers {
     tx: mpsc::Sender<(usize, LocalToolOutcome)>,
     rx: mpsc::Receiver<(usize, LocalToolOutcome)>,
+    background_flag: Arc<AtomicBool>,
+    tasks: Vec<TrackedToolTask>,
+    synthetic: VecDeque<(usize, LocalToolOutcome)>,
     expected: usize,
     received: usize,
 }
 
 impl ToolWorkers {
-    fn new() -> Self {
+    fn new(background_flag: Arc<AtomicBool>) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
             tx,
             rx,
+            background_flag,
+            tasks: Vec::new(),
+            synthetic: VecDeque::new(),
             expected: 0,
             received: 0,
         }
@@ -1015,8 +1300,12 @@ impl ToolWorkers {
     fn spawn(&mut self, task: LocalToolTask) {
         let LocalToolTask {
             index,
-            db,
+            call_id,
+            session_id,
             generation_id,
+            db,
+            writer,
+            bus,
             workspace_dir,
             mode,
             tool_name,
@@ -1024,6 +1313,13 @@ impl ToolWorkers {
             progress,
             mcp,
         } = task;
+        let can_background = matches!(tool_name.as_str(), "bash" | "sh" | "shell" | "run_command");
+        let state = Arc::new(Mutex::new(TaskSettlementState::Running));
+        self.tasks.push(TrackedToolTask {
+            index,
+            can_background,
+            state: Arc::clone(&state),
+        });
         self.expected += 1;
         let tx = self.tx.clone();
         let spawned = thread::Builder::new()
@@ -1035,7 +1331,12 @@ impl ToolWorkers {
                     } else {
                         workspace_dir
                     };
-                let outcome = if cancel_requested(&db, generation_id) {
+                let pre_cancelled = cancel_requested(&db, generation_id);
+                // Release SharedDb immediately so detached background shells never
+                // keep an Arc<Mutex<Db>> alive across RuntimeClient::shutdown.
+                drop(db);
+
+                let outcome = if pre_cancelled {
                     LocalToolOutcome::Cancelled
                 } else if let Some(registry) = mcp
                     .as_ref()
@@ -1081,7 +1382,47 @@ impl ToolWorkers {
                         }
                     }
                 };
-                let _ = tx.send((index, outcome));
+
+                let mut guard = state.lock().unwrap_or_else(|p| p.into_inner());
+                if *guard == TaskSettlementState::Running {
+                    *guard = TaskSettlementState::SettledInline;
+                    drop(guard);
+                    let _ = tx.send((index, outcome));
+                } else {
+                    drop(guard);
+                    let (success, output) = match outcome {
+                        LocalToolOutcome::Completed(execution) => {
+                            (true, bound_tool_text(execution.output))
+                        }
+                        LocalToolOutcome::Failed(error) => (false, bound_tool_text(error)),
+                        LocalToolOutcome::Cancelled | LocalToolOutcome::Backgrounded => {
+                            (false, String::new())
+                        }
+                    };
+                    let payload_json = serde_json::json!({
+                        "id": call_id,
+                        "name": tool_name,
+                        "success": success,
+                        "output": output,
+                    })
+                    .to_string();
+                    let seq = writer
+                        .append_event(
+                            session_id,
+                            Some(generation_id),
+                            "tool_background_finished",
+                            &payload_json,
+                        )
+                        .ok()
+                        .unwrap_or(0);
+                    bus.publish(RuntimeEvent {
+                        seq,
+                        session_id,
+                        generation_id: Some(generation_id),
+                        kind: "tool_background_finished".to_string(),
+                        payload_json,
+                    });
+                }
             });
         if let Err(error) = spawned {
             let _ = self.tx.send((
@@ -1091,16 +1432,46 @@ impl ToolWorkers {
         }
     }
 
-    fn recv(&mut self) -> Option<(usize, LocalToolOutcome)> {
-        if self.received >= self.expected {
-            return None;
-        }
-        match self.rx.recv() {
-            Ok(result) => {
-                self.received += 1;
-                Some(result)
+    fn detach_backgroundable_tasks(&mut self) {
+        for tracked in &self.tasks {
+            if !tracked.can_background {
+                continue;
             }
-            Err(_) => None,
+            let mut guard = tracked.state.lock().unwrap_or_else(|p| p.into_inner());
+            if *guard == TaskSettlementState::Running {
+                *guard = TaskSettlementState::DetachedToBackground;
+                self.expected = self.expected.saturating_sub(1);
+                self.synthetic
+                    .push_back((tracked.index, LocalToolOutcome::Backgrounded));
+            }
+        }
+    }
+
+    fn recv(&mut self) -> Option<(usize, LocalToolOutcome)> {
+        loop {
+            if let Some(ready) = self.synthetic.pop_front() {
+                return Some(ready);
+            }
+            if self.received >= self.expected {
+                return None;
+            }
+            if self.background_flag.swap(false, Ordering::AcqRel) {
+                self.detach_backgroundable_tasks();
+                if let Some(ready) = self.synthetic.pop_front() {
+                    return Some(ready);
+                }
+                if self.received >= self.expected {
+                    return None;
+                }
+            }
+            match self.rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(result) => {
+                    self.received += 1;
+                    return Some(result);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
         }
     }
 }
@@ -1140,6 +1511,7 @@ fn run_generation(
     ctx: &SharedGenerationCtx,
     runtime: &GenerationRuntime,
     model: &str,
+    variant: Option<&str>,
     prompt: &str,
     agent_mode: &str,
     provider_name: &str,
@@ -1337,7 +1709,7 @@ fn run_generation(
             messages: messages.clone(),
             provider: Some(provider_name.to_string()),
             tools: tools.clone(),
-            variant: None,
+            variant: variant.map(str::to_string),
         };
 
         let mut stream = match runtime.provider.stream(&request) {
@@ -1357,7 +1729,7 @@ fn run_generation(
         let mut provider_tool_results: Vec<(String, String)> = Vec::new();
         let mut failed = false;
         let mut provider_cancelled = false;
-        let mut tool_workers = ToolWorkers::new();
+        let mut tool_workers = ToolWorkers::new(ctx.coordinator.background_flag(ctx.session_id));
         // Created as soon as the first tool input is complete, so the
         // assistant row exists while tools run and a crash/reload keeps the
         // partial turn. It is updated with the final text before the turn is
@@ -1569,8 +1941,12 @@ fn run_generation(
                         let progress = Some(ctx.tool_progress_callback(&call_id));
                         tool_workers.spawn(LocalToolTask {
                             index,
-                            db: ctx.db.clone(),
+                            call_id,
+                            session_id: ctx.session_id,
                             generation_id: ctx.generation_id,
+                            db: ctx.db.clone(),
+                            writer: ctx.writer.clone(),
+                            bus: ctx.bus.clone(),
                             workspace_dir: workspace_dir.clone(),
                             mode,
                             tool_name,
@@ -1794,6 +2170,21 @@ fn run_generation(
                     None,
                 ),
                 LocalToolOutcome::Cancelled => (ToolCallStatus::Cancelled, None, None, None),
+                LocalToolOutcome::Backgrounded => (
+                    ToolCallStatus::Completed,
+                    Some(format!(
+                        "Command moved to background (shell_id: {call_id}). Output continues streaming in the background."
+                    )),
+                    None,
+                    Some(
+                        serde_json::json!({
+                            "background": true,
+                            "status": "running",
+                            "shell_id": call_id,
+                        })
+                        .to_string(),
+                    ),
+                ),
             };
             let (settled_call, settled_seq) = match ctx.writer.settle_tool_call_with_metadata(
                 created_call.id,
