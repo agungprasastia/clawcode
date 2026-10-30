@@ -5723,3 +5723,199 @@ fn multiple_session_tabs_render_and_close_back_to_single_view() {
         .join("\n");
     assert!(!text.contains("2. New session"), "{text}");
 }
+
+fn render_app_text(app: &App, width: u16, height: u16) -> String {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| clawcode::tui::render(frame, app))
+        .unwrap();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn timeline_dialog_lists_turns_jumps_forks_and_reverts() {
+    let mut app = App::default();
+
+    app.submit_user_prompt("First user turn");
+    app.apply(UiEvent::StreamDelta("First assistant reply".to_string()));
+    app.submit_user_prompt("Second user turn");
+    app.apply(UiEvent::StreamDelta("Second assistant reply".to_string()));
+
+    for ch in "/timeline".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.timeline_dialog().is_some());
+    assert_eq!(app.timeline_dialog().unwrap().items.len(), 2);
+
+    let rendered = render_app_text(&app, 100, 30);
+    assert!(rendered.contains("Session Timeline"), "{rendered}");
+    assert!(rendered.contains("First user turn"), "{rendered}");
+    assert!(rendered.contains("Second user turn"), "{rendered}");
+
+    // Navigate to turn #1 and fork session at turn #1.
+    app.apply(UiEvent::Input(Input::Up));
+    assert_eq!(
+        app.timeline_dialog()
+            .unwrap()
+            .selected_item()
+            .unwrap()
+            .turn_number,
+        1
+    );
+    app.apply(UiEvent::Input(Input::Character('f')));
+    assert!(app.timeline_dialog().is_none());
+    assert_eq!(app.open_session_tabs().len(), 2);
+    assert!(app.diagnostic().contains("forked session"));
+
+    // Switch back to parent session tab and revert turn #2 from timeline.
+    app.select_session(0);
+    app.apply(UiEvent::Input(Input::Leader));
+    app.apply(UiEvent::Input(Input::Character('g')));
+    assert!(app.timeline_dialog().is_some());
+    assert_eq!(
+        app.timeline_dialog().unwrap().items[0].fork_children.len(),
+        1
+    );
+
+    // Selected is latest turn (#2); press 'r' to revert it.
+    app.apply(UiEvent::Input(Input::Character('r')));
+    assert_eq!(app.prompt(), "Second user turn");
+    assert!(app.timeline_dialog().unwrap().items[1].reverted);
+}
+
+#[test]
+fn session_undo_redo_restores_prompt_and_workspace_files_and_diff_dialog_renders() {
+    let rel_dir = format!("target/test-undo-diff-{}", std::process::id());
+    let rel_file = format!("{rel_dir}/sample.txt");
+    let cwd = std::env::current_dir().unwrap();
+    let abs_dir = cwd.join(&rel_dir);
+    let abs_file = cwd.join(&rel_file);
+    std::fs::create_dir_all(&abs_dir).unwrap();
+    std::fs::write(&abs_file, "line one\nline two\n").unwrap();
+
+    let mut app = App::default();
+    app.submit_user_prompt("Update sample.txt");
+    std::fs::write(&abs_file, "line one\nline two updated\nline three\n").unwrap();
+    app.set_tool_rows_for_test(vec![clawcode::tui::ToolRow {
+        call_id: "call-edit-1".to_string(),
+        name: "edit_file".to_string(),
+        desc: rel_file.clone(),
+        arguments: format!(r#"{{"path":"{rel_file}"}}"#),
+        output: "edited sample.txt".to_string(),
+        state: clawcode::tui::ToolRowState::Completed,
+        arguments_complete: true,
+        metadata: Some(serde_json::json!({
+            "filediff": {
+                "file": rel_file,
+                "before_exists": true,
+                "before": "line one\nline two\n",
+                "after_exists": true,
+                "after": "line one\nline two updated\nline three\n",
+                "additions": 2,
+                "deletions": 1
+            }
+        })),
+        started_at: std::time::Instant::now(),
+        expandable: false,
+    }]);
+    app.set_stream_parts_for_test(
+        vec![
+            clawcode::tui::StreamPart::User("Update sample.txt".to_string()),
+            clawcode::tui::StreamPart::Tool("call-edit-1".to_string()),
+            clawcode::tui::StreamPart::Text("Updated sample.txt.".to_string()),
+        ],
+        None,
+    );
+
+    // Open /diff dialog and verify unified + split view rendering.
+    for ch in "/diff".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.diff_review_dialog().is_some());
+    assert_eq!(app.diff_review_dialog().unwrap().files.len(), 1);
+
+    let diff_rendered = render_app_text(&app, 100, 30);
+    assert!(diff_rendered.contains("Session Diff"), "{diff_rendered}");
+    assert!(diff_rendered.contains("sample.txt"), "{diff_rendered}");
+    assert!(diff_rendered.contains("[Unified]"), "{diff_rendered}");
+
+    app.apply(UiEvent::Input(Input::Character('v')));
+    let split_rendered = render_app_text(&app, 100, 30);
+    assert!(split_rendered.contains("[Split]"), "{split_rendered}");
+
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.diff_review_dialog().is_none());
+
+    // Run /undo and verify file on disk and prompt are restored.
+    for ch in "/undo".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.prompt(), "Update sample.txt");
+    assert_eq!(
+        std::fs::read_to_string(&abs_file).unwrap(),
+        "line one\nline two\n"
+    );
+
+    // Clear composer and run /redo to re-apply turn and file changes.
+    app.apply(UiEvent::Input(Input::ClearOrExit));
+    for ch in "/redo".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(
+        std::fs::read_to_string(&abs_file).unwrap(),
+        "line one\nline two updated\nline three\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&abs_dir);
+}
+
+#[test]
+fn terminal_pane_toggles_focuses_runs_commands_and_streams_output() {
+    let mut app = App::default();
+    assert!(!app.terminal_pane().is_visible());
+
+    for ch in "/terminal".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.terminal_pane().is_visible());
+    assert!(app.terminal_pane().is_focused());
+
+    for ch in "pwd".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.terminal_pane().last_exit_code(), Some(0));
+
+    let rendered = render_app_text(&app, 100, 30);
+    assert!(rendered.contains("Terminal"), "{rendered}");
+    assert!(rendered.contains("$ pwd"), "{rendered}");
+
+    // Esc unfocuses terminal pane while keeping it visible.
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.terminal_pane().is_visible());
+    assert!(!app.terminal_pane().is_focused());
+
+    // Ctrl+X Up refocuses terminal pane; typing `exit` closes it.
+    app.apply(UiEvent::Input(Input::Leader));
+    app.apply(UiEvent::Input(Input::Up));
+    assert!(app.terminal_pane().is_focused());
+
+    for ch in "exit".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(!app.terminal_pane().is_visible());
+}

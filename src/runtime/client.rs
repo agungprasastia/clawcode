@@ -336,6 +336,126 @@ impl RuntimeClient {
         reply_rx.recv().map_err(|error| error.to_string())?
     }
 
+    /// List durable messages for `session_id`.
+    pub fn session_messages(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<crate::persistence::Message>, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .messages(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// List durable tool calls for `session_id`.
+    pub fn session_tool_calls(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<crate::persistence::ToolCall>, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .tool_calls(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Fetch session summaries including fork lineage and revert state.
+    pub fn session_summaries(
+        &self,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<Vec<crate::persistence::SessionSummary>, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .session_summaries(include_archived, limit)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Fork `source_id` before `before` (or through the end when `None`).
+    pub fn fork_session_before(
+        &self,
+        source_id: i64,
+        before: Option<i64>,
+    ) -> Result<crate::persistence::Session, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .fork_session_before(source_id, before)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Stage a revert at `message_id`.
+    pub fn stage_revert(
+        &self,
+        session_id: i64,
+        message_id: i64,
+    ) -> Result<crate::persistence::SessionRevert, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .stage_revert(session_id, message_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Clear a staged revert on `session_id`.
+    pub fn clear_revert(&self, session_id: i64) -> Result<(), String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .clear_revert(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Commit a staged revert on `session_id`.
+    pub fn commit_revert(&self, session_id: i64) -> Result<(), String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .commit_revert(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Append a message directly to `session_id` (used when redoing a reverted turn).
+    pub fn append_message(
+        &self,
+        session_id: i64,
+        role: &str,
+        content: &str,
+    ) -> Result<i64, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .append_message(session_id, role, content)
+            .map(|msg| msg.id)
+            .map_err(|error| error.to_string())
+    }
+
     /// Check if a session has an active drain running.
     pub fn is_active(&self, session_id: i64) -> bool {
         self.coordinator.is_active(session_id)

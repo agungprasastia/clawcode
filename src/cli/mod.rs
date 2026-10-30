@@ -441,6 +441,68 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
                     .map_err(|error| ProviderError::Protocol(error.to_string()))
             })
     }
+
+    pub fn session_summaries(
+        &self,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<Vec<crate::persistence::SessionSummary>, ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.session_summaries(include_archived, limit)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn fork_session_before(
+        &self,
+        source_id: i64,
+        before: Option<i64>,
+    ) -> Result<Session, ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.fork_session_before(source_id, before)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn stage_revert(
+        &self,
+        session_id: i64,
+        message_id: i64,
+    ) -> Result<crate::persistence::SessionRevert, ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.stage_revert(session_id, message_id)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn clear_revert(&self, session_id: i64) -> Result<(), ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.clear_revert(session_id)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn commit_revert(&self, session_id: i64) -> Result<(), ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.commit_revert(session_id)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
 }
 
 const MAX_SESSION_TITLE_BYTES: usize = 80;

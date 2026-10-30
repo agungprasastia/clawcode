@@ -1,12 +1,16 @@
+use super::session_sync::RevertedTurnSnapshot;
+use super::tool_rows::ToolRow;
 use super::util::is_sensitive_command;
 use super::{App, ConversationMode, ConversationStatus, Input, StreamPart, UiEvent};
 use crate::tui::dialogs::{
-    AgentsDialogState, GitDialogState, McpDialogItem, McpDialogState, McpDialogStatus,
-    ModelsDialogState, PaletteAction, PaletteDialogState, PermissionDecision,
-    PermissionDialogState, QuestionDialogState, QueuedPromptsDialogState, SessionRenameDialogState,
-    SessionsDialogState, SettingsDialogState, SkillsDialogState, StashDialogState,
-    StatusDialogState, ThemesDialogState, VariantsDialogState, WhichKeyState,
+    AgentsDialogState, DiffReviewDialogState, GitDialogState, McpDialogItem, McpDialogState,
+    McpDialogStatus, ModelsDialogState, PaletteAction, PaletteDialogState, PermissionDecision,
+    PermissionDialogState, QuestionDialogState, QueuedPromptsDialogState, SessionFileDiff,
+    SessionRenameDialogState, SessionsDialogState, SettingsDialogState, SkillsDialogState,
+    StashDialogState, StatusDialogState, ThemesDialogState, TimelineDialogState, TimelineTurnItem,
+    VariantsDialogState, WhichKeyState, format_single_line_preview,
 };
+use crate::tui::terminal_pane::TerminalPaneState;
 
 impl App {
     pub fn selected_provider(&self) -> &str {
@@ -302,6 +306,731 @@ impl App {
 
     pub fn close_variants_dialog(&mut self) {
         self.variants_dialog = None;
+    }
+
+    pub fn timeline_dialog(&self) -> Option<&TimelineDialogState> {
+        self.timeline_dialog.as_ref()
+    }
+
+    pub fn timeline_dialog_mut(&mut self) -> Option<&mut TimelineDialogState> {
+        self.timeline_dialog.as_mut()
+    }
+
+    pub fn close_timeline_dialog(&mut self) {
+        self.timeline_dialog = None;
+    }
+
+    pub fn open_timeline_dialog(&mut self) {
+        self.which_key.hide();
+        self.leader_pending = false;
+        self.leader_started_at = None;
+        let (title, parent_session, items) = self.build_timeline_items();
+        let count = items.len();
+        self.timeline_dialog = Some(TimelineDialogState::new(
+            self.active_session_id,
+            title,
+            parent_session,
+            items,
+        ));
+        self.diagnostic =
+            format!("Session timeline ({count} turn(s)) - Enter jump, f fork, r revert");
+    }
+
+    fn build_timeline_items(&self) -> (String, Option<(i64, String)>, Vec<TimelineTurnItem>) {
+        let summaries = self
+            .runtime
+            .as_ref()
+            .and_then(|r| r.session_summaries(false, 200).ok())
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.command_service.session_summaries(false, 200).ok())
+            .unwrap_or_default();
+
+        let session_title = self
+            .active_session_id
+            .and_then(|id| {
+                self.session_titles.get(&id).cloned().or_else(|| {
+                    summaries
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(|s| s.title.clone())
+                })
+            })
+            .unwrap_or_else(|| "Current session".to_string());
+
+        let parent_session = self.active_session_id.and_then(|id| {
+            let summary = summaries.iter().find(|s| s.id == id)?;
+            let parent_id = summary.parent_id?;
+            let parent_title = summaries
+                .iter()
+                .find(|s| s.id == parent_id)
+                .map(|s| s.title.clone())
+                .unwrap_or_else(|| format!("Session #{parent_id}"));
+            Some((parent_id, parent_title))
+        });
+
+        let db_messages = self
+            .active_session_id
+            .and_then(|id| {
+                self.runtime
+                    .as_ref()
+                    .and_then(|r| r.session_messages(id).ok())
+                    .filter(|m| !m.is_empty())
+                    .or_else(|| self.command_service.session_messages(id).ok())
+            })
+            .unwrap_or_default();
+        let db_user_msgs: Vec<&crate::persistence::Message> =
+            db_messages.iter().filter(|m| m.role == "user").collect();
+
+        let user_indices: Vec<usize> = self
+            .stream_parts
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, part)| matches!(part, StreamPart::User(_)).then_some(idx))
+            .collect();
+
+        let mut items = Vec::new();
+        let total_user_turns = user_indices.len();
+
+        for (turn_idx, &part_idx) in user_indices.iter().enumerate() {
+            let next_part_idx = user_indices
+                .get(turn_idx + 1)
+                .copied()
+                .unwrap_or(self.stream_parts.len());
+            let prompt = match &self.stream_parts[part_idx] {
+                StreamPart::User(text) => format_single_line_preview(text, 72),
+                _ => String::new(),
+            };
+            let mut assistant_chunks = Vec::new();
+            let mut tool_count = 0usize;
+            let mut file_changes = 0usize;
+            for part in &self.stream_parts[part_idx + 1..next_part_idx] {
+                match part {
+                    StreamPart::Text(text) if !text.trim().is_empty() => {
+                        assistant_chunks.push(text.trim());
+                    }
+                    StreamPart::Tool(call_id) => {
+                        tool_count += 1;
+                        if let Some(row) = self.tool_rows.iter().find(|r| r.call_id == *call_id)
+                            && (row
+                                .metadata
+                                .as_ref()
+                                .and_then(|m| m.get("filediff"))
+                                .is_some()
+                                || matches!(
+                                    row.name.as_str(),
+                                    "write_file" | "edit_file" | "apply_patch"
+                                ))
+                        {
+                            file_changes += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let assistant_preview = if assistant_chunks.is_empty() {
+                String::new()
+            } else {
+                format_single_line_preview(&assistant_chunks.join(" "), 72)
+            };
+            let user_message_id = db_user_msgs.get(turn_idx).map(|m| m.id);
+            let next_user_message_id = db_user_msgs.get(turn_idx + 1).map(|m| m.id);
+            let mut fork_children = Vec::new();
+            if let Some(active_id) = self.active_session_id {
+                for summary in &summaries {
+                    if summary.parent_id == Some(active_id) {
+                        let matches_fork_point =
+                            match (next_user_message_id, summary.fork_boundary_message_id) {
+                                (Some(next_id), Some(fork_id)) => next_id == fork_id,
+                                (None, None) => turn_idx + 1 == total_user_turns,
+                                _ => false,
+                            };
+                        if matches_fork_point {
+                            fork_children.push((summary.id, summary.title.clone()));
+                        }
+                    }
+                }
+            }
+            items.push(TimelineTurnItem {
+                turn_number: turn_idx + 1,
+                user_message_id,
+                next_user_message_id,
+                stream_part_index: part_idx,
+                prompt,
+                assistant_preview,
+                tool_count,
+                file_changes,
+                fork_children,
+                reverted: false,
+            });
+        }
+
+        for snap in self.reverted_turns.iter().rev() {
+            let file_changes = snap
+                .tool_rows
+                .iter()
+                .filter(|row| {
+                    row.metadata
+                        .as_ref()
+                        .and_then(|m| m.get("filediff"))
+                        .is_some()
+                        || matches!(
+                            row.name.as_str(),
+                            "write_file" | "edit_file" | "apply_patch"
+                        )
+                })
+                .count();
+            items.push(TimelineTurnItem {
+                turn_number: snap.turn_number,
+                user_message_id: snap.user_message_id,
+                next_user_message_id: None,
+                stream_part_index: self.stream_parts.len(),
+                prompt: format_single_line_preview(&snap.prompt, 72),
+                assistant_preview: format_single_line_preview(&snap.assistant_text, 72),
+                tool_count: snap.tool_rows.len(),
+                file_changes,
+                fork_children: Vec::new(),
+                reverted: true,
+            });
+        }
+
+        (session_title, parent_session, items)
+    }
+
+    pub fn jump_to_turn(&mut self, stream_part_index: usize, turn_number: usize) {
+        if stream_part_index < self.stream_parts.len() {
+            let mut lines_below = 0u16;
+            for part in &self.stream_parts[stream_part_index + 1..] {
+                lines_below = lines_below.saturating_add(match part {
+                    StreamPart::Text(text) => (text.lines().count().max(1) as u16) + 1,
+                    StreamPart::Reasoning(_) | StreamPart::ReasoningDone { .. } => 2,
+                    StreamPart::Tool(_) => 1,
+                    StreamPart::User(text) => (text.lines().count().max(1) as u16) + 2,
+                });
+            }
+            self.chat_scroll = lines_below;
+        } else {
+            self.scroll_to_bottom();
+        }
+        self.timeline_dialog = None;
+        self.diagnostic = format!("jumped to turn #{turn_number}");
+    }
+
+    pub fn fork_session_at_turn(
+        &mut self,
+        turn_number: usize,
+        next_user_message_id: Option<i64>,
+    ) -> Option<i64> {
+        let base_session_id = if let Some(id) = self.active_session_id {
+            id
+        } else {
+            let created = self
+                .runtime
+                .as_ref()
+                .and_then(|r| r.create_session(1, "Session").ok())
+                .or_else(|| {
+                    self.command_service
+                        .create_session("Session")
+                        .ok()
+                        .map(|s| s.id)
+                })?;
+            self.open_session_in_tab_with_title(created, Some("Session"));
+            created
+        };
+
+        let base_title = self
+            .session_titles
+            .get(&base_session_id)
+            .cloned()
+            .unwrap_or_else(|| format!("Session #{base_session_id}"));
+        let fork_title = format!("{base_title} (fork #{turn_number})");
+
+        let forked_id = self
+            .runtime
+            .as_ref()
+            .and_then(|r| {
+                r.fork_session_before(base_session_id, next_user_message_id)
+                    .ok()
+                    .map(|s| s.id)
+            })
+            .or_else(|| {
+                self.command_service
+                    .fork_session_before(base_session_id, next_user_message_id)
+                    .ok()
+                    .map(|s| s.id)
+            })
+            .or_else(|| {
+                self.runtime
+                    .as_ref()
+                    .and_then(|r| r.create_session(1, &fork_title).ok())
+                    .or_else(|| {
+                        self.command_service
+                            .create_session(&fork_title)
+                            .ok()
+                            .map(|s| s.id)
+                    })
+            });
+
+        let Some(new_id) = forked_id else {
+            self.diagnostic = "failed to fork session".to_string();
+            return None;
+        };
+        let _ = self.command_service.rename_session(new_id, &fork_title);
+
+        let user_indices: Vec<usize> = self
+            .stream_parts
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, part)| matches!(part, StreamPart::User(_)).then_some(idx))
+            .collect();
+        let cutoff_idx = user_indices
+            .get(turn_number)
+            .copied()
+            .unwrap_or(self.stream_parts.len());
+        let forked_parts = self.stream_parts[..cutoff_idx].to_vec();
+        let kept_call_ids: std::collections::HashSet<&str> = forked_parts
+            .iter()
+            .filter_map(|p| match p {
+                StreamPart::Tool(id) => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let forked_tools: Vec<ToolRow> = self
+            .tool_rows
+            .iter()
+            .filter(|r| kept_call_ids.contains(r.call_id.as_str()))
+            .cloned()
+            .collect();
+        let forked_transcript = Self::rebuild_transcript_from_parts(&forked_parts);
+
+        self.timeline_dialog = None;
+        self.open_session_in_tab_with_title(new_id, Some(&fork_title));
+        if self.stream_parts.is_empty() && !forked_parts.is_empty() {
+            self.stream_parts = forked_parts;
+            self.tool_rows = forked_tools;
+            self.transcript = forked_transcript;
+        }
+        self.diagnostic = format!("forked session #{new_id} at turn #{turn_number}");
+        Some(new_id)
+    }
+
+    fn rebuild_transcript_from_parts(parts: &[StreamPart]) -> String {
+        let mut out = String::new();
+        for part in parts {
+            match part {
+                StreamPart::User(prompt) => {
+                    if !out.is_empty() && !out.ends_with("\n\n") {
+                        out.push_str("\n\n");
+                    }
+                    out.push_str(&format!("> {}\n\n", prompt.trim()));
+                }
+                StreamPart::Text(text) => {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        if !out.is_empty() && !out.ends_with("\n\n") {
+                            out.push_str("\n\n");
+                        }
+                        out.push_str(&format!("{trimmed}\n\n"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    pub fn undo_last_turn(&mut self) -> bool {
+        if matches!(self.status, ConversationStatus::Active) || self.active_generation_id.is_some()
+        {
+            if let Some(generation_id) = self.active_generation_id {
+                self.ignored_generation_ids.insert(generation_id);
+            }
+            self.request_runtime_cancel();
+            self.reset_turn_view(false);
+            self.status = ConversationStatus::Idle;
+        }
+
+        let user_indices: Vec<usize> = self
+            .stream_parts
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, part)| matches!(part, StreamPart::User(_)).then_some(idx))
+            .collect();
+        let Some(&last_user_idx) = user_indices.last() else {
+            self.diagnostic = "nothing to undo in this session".to_string();
+            return false;
+        };
+        let turn_number = user_indices.len();
+
+        let removed_parts = self.stream_parts.split_off(last_user_idx);
+        let mut prompt = String::new();
+        let mut assistant_chunks = Vec::new();
+        let mut removed_call_ids = Vec::new();
+        for part in &removed_parts {
+            match part {
+                StreamPart::User(text) if prompt.is_empty() => prompt = text.clone(),
+                StreamPart::Text(text) if !text.trim().is_empty() => {
+                    assistant_chunks.push(text.trim().to_string());
+                }
+                StreamPart::Tool(call_id) => removed_call_ids.push(call_id.clone()),
+                _ => {}
+            }
+        }
+        let assistant_text = assistant_chunks.join("\n\n");
+
+        let mut removed_tools = Vec::new();
+        let mut remaining_tools = Vec::with_capacity(self.tool_rows.len());
+        for row in self.tool_rows.drain(..) {
+            if removed_call_ids.iter().any(|id| id == &row.call_id) {
+                removed_tools.push(row);
+            } else {
+                remaining_tools.push(row);
+            }
+        }
+        self.tool_rows = remaining_tools;
+
+        let workspace_dir =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let mut restored_call_ids = std::collections::HashSet::new();
+        for row in removed_tools.iter().rev() {
+            if let Some(filediff) = row.metadata.as_ref().and_then(|m| m.get("filediff")) {
+                let _ = crate::conversation::tools::restore_filediff_snapshot(
+                    &workspace_dir,
+                    filediff,
+                    true,
+                );
+                restored_call_ids.insert(row.call_id.clone());
+            }
+        }
+
+        let mut user_message_id = None;
+        if let Some(session_id) = self.active_session_id {
+            let db_messages = self
+                .runtime
+                .as_ref()
+                .and_then(|r| r.session_messages(session_id).ok())
+                .filter(|m| !m.is_empty())
+                .or_else(|| self.command_service.session_messages(session_id).ok())
+                .unwrap_or_default();
+            if let Some(last_user_msg) = db_messages.iter().rev().find(|m| m.role == "user") {
+                user_message_id = Some(last_user_msg.id);
+                let db_calls = self
+                    .runtime
+                    .as_ref()
+                    .and_then(|r| r.session_tool_calls(session_id).ok())
+                    .filter(|c| !c.is_empty())
+                    .or_else(|| self.command_service.session_tool_calls(session_id).ok())
+                    .unwrap_or_default();
+                for call in db_calls
+                    .iter()
+                    .filter(|c| c.assistant_message_id >= last_user_msg.id)
+                    .rev()
+                {
+                    if !restored_call_ids.contains(&call.call_id)
+                        && let Some(meta_str) = call.metadata_json.as_deref()
+                        && let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_str)
+                        && let Some(filediff) = meta.get("filediff")
+                    {
+                        let _ = crate::conversation::tools::restore_filediff_snapshot(
+                            &workspace_dir,
+                            filediff,
+                            true,
+                        );
+                    }
+                }
+                if let Some(runtime) = self.runtime.as_ref() {
+                    let _ = runtime.stage_revert(session_id, last_user_msg.id);
+                    let _ = runtime.commit_revert(session_id);
+                } else {
+                    let _ = self
+                        .command_service
+                        .stage_revert(session_id, last_user_msg.id);
+                    let _ = self.command_service.commit_revert(session_id);
+                }
+            }
+        }
+
+        let new_transcript = Self::rebuild_transcript_from_parts(&self.stream_parts);
+        let transcript_tail = self
+            .transcript
+            .strip_prefix(&new_transcript)
+            .unwrap_or("")
+            .to_string();
+        self.transcript = new_transcript;
+        self.prompt = prompt.clone();
+        self.cursor_position = self.prompt.chars().count();
+        self.reverted_turns.push(RevertedTurnSnapshot {
+            turn_number,
+            prompt,
+            assistant_text,
+            stream_parts: removed_parts,
+            tool_rows: removed_tools,
+            transcript_tail,
+            user_message_id,
+        });
+        if self.timeline_dialog.is_some() {
+            let (title, parent_session, items) = self.build_timeline_items();
+            self.timeline_dialog = Some(TimelineDialogState::new(
+                self.active_session_id,
+                title,
+                parent_session,
+                items,
+            ));
+        }
+        self.diagnostic = format!("undone turn #{turn_number} (prompt restored; /redo to restore)");
+        true
+    }
+
+    pub fn revert_session_to_turn(&mut self, target_turn_number: usize) -> bool {
+        let mut current_turns = self
+            .stream_parts
+            .iter()
+            .filter(|part| matches!(part, StreamPart::User(_)))
+            .count();
+        if current_turns < target_turn_number || target_turn_number == 0 {
+            self.diagnostic = format!("turn #{target_turn_number} is already reverted");
+            return false;
+        }
+        let mut undone = 0usize;
+        while current_turns >= target_turn_number {
+            if !self.undo_last_turn() {
+                break;
+            }
+            undone += 1;
+            current_turns = self
+                .stream_parts
+                .iter()
+                .filter(|part| matches!(part, StreamPart::User(_)))
+                .count();
+        }
+        if undone > 0 {
+            self.diagnostic =
+                format!("reverted {undone} turn(s) back to turn #{target_turn_number}");
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn redo_last_turn(&mut self) -> bool {
+        let Some(snapshot) = self.reverted_turns.pop() else {
+            self.diagnostic = "nothing to redo".to_string();
+            return false;
+        };
+
+        let workspace_dir =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        for row in &snapshot.tool_rows {
+            if let Some(filediff) = row.metadata.as_ref().and_then(|m| m.get("filediff")) {
+                let _ = crate::conversation::tools::restore_filediff_snapshot(
+                    &workspace_dir,
+                    filediff,
+                    false,
+                );
+            }
+        }
+
+        if self.prompt == snapshot.prompt {
+            self.prompt.clear();
+            self.cursor_position = 0;
+        }
+        self.stream_parts.extend(snapshot.stream_parts);
+        self.tool_rows.extend(snapshot.tool_rows);
+        if !snapshot.transcript_tail.is_empty() {
+            self.transcript.push_str(&snapshot.transcript_tail);
+        } else {
+            self.transcript = Self::rebuild_transcript_from_parts(&self.stream_parts);
+        }
+        self.truncate_transcript();
+
+        if let Some(session_id) = self.active_session_id {
+            if let Some(runtime) = self.runtime.as_ref() {
+                let _ = runtime.clear_revert(session_id);
+                let _ = runtime.append_message(session_id, "user", &snapshot.prompt);
+                if !snapshot.assistant_text.is_empty() {
+                    let _ =
+                        runtime.append_message(session_id, "assistant", &snapshot.assistant_text);
+                }
+            } else {
+                let _ = self.command_service.clear_revert(session_id);
+                let _ = self
+                    .command_service
+                    .append_message(session_id, "user", &snapshot.prompt);
+                if !snapshot.assistant_text.is_empty() {
+                    let _ = self.command_service.append_message(
+                        session_id,
+                        "assistant",
+                        &snapshot.assistant_text,
+                    );
+                }
+            }
+        }
+
+        if self.timeline_dialog.is_some() {
+            let (title, parent_session, items) = self.build_timeline_items();
+            self.timeline_dialog = Some(TimelineDialogState::new(
+                self.active_session_id,
+                title,
+                parent_session,
+                items,
+            ));
+        }
+        self.diagnostic = format!("redone turn #{}", snapshot.turn_number);
+        true
+    }
+
+    pub fn diff_review_dialog(&self) -> Option<&DiffReviewDialogState> {
+        self.diff_review_dialog.as_ref()
+    }
+
+    pub fn diff_review_dialog_mut(&mut self) -> Option<&mut DiffReviewDialogState> {
+        self.diff_review_dialog.as_mut()
+    }
+
+    pub fn close_diff_review_dialog(&mut self) {
+        self.diff_review_dialog = None;
+    }
+
+    pub fn open_diff_review_dialog(&mut self) {
+        self.which_key.hide();
+        self.leader_pending = false;
+        self.leader_started_at = None;
+        let files = self.collect_session_file_diffs();
+        let count = files.len();
+        self.diff_review_dialog = Some(DiffReviewDialogState::new(files));
+        self.diagnostic =
+            format!("Session diff ({count} file(s)) - Tab/v toggle view, Esc to close");
+    }
+
+    pub(crate) fn collect_session_file_diffs(&self) -> Vec<SessionFileDiff> {
+        struct CoalescedDiff {
+            path: String,
+            first_before_exists: bool,
+            first_before: String,
+            latest_after_exists: bool,
+            latest_after: String,
+        }
+
+        let mut coalesced: Vec<CoalescedDiff> = Vec::new();
+        let apply_filediff = |coalesced: &mut Vec<CoalescedDiff>, filediff: &serde_json::Value| {
+            let Some(path) = filediff
+                .get("path")
+                .or_else(|| filediff.get("file"))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+            else {
+                return;
+            };
+            let before_exists = filediff
+                .get("before_exists")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let before = filediff
+                .get("before")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let after_exists = filediff
+                .get("after_exists")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let after = filediff
+                .get("after")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if let Some(existing) = coalesced.iter_mut().find(|item| item.path == path) {
+                existing.latest_after_exists = after_exists;
+                existing.latest_after = after;
+            } else {
+                coalesced.push(CoalescedDiff {
+                    path,
+                    first_before_exists: before_exists,
+                    first_before: before,
+                    latest_after_exists: after_exists,
+                    latest_after: after,
+                });
+            }
+        };
+
+        for row in &self.tool_rows {
+            if let Some(filediff) = row.metadata.as_ref().and_then(|m| m.get("filediff")) {
+                apply_filediff(&mut coalesced, filediff);
+            }
+        }
+
+        if coalesced.is_empty()
+            && let Some(session_id) = self.active_session_id
+        {
+            let db_calls = self
+                .runtime
+                .as_ref()
+                .and_then(|r| r.session_tool_calls(session_id).ok())
+                .filter(|c| !c.is_empty())
+                .or_else(|| self.command_service.session_tool_calls(session_id).ok())
+                .unwrap_or_default();
+            for call in db_calls {
+                if let Some(meta_str) = call.metadata_json.as_deref()
+                    && let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_str)
+                    && let Some(filediff) = meta.get("filediff")
+                {
+                    apply_filediff(&mut coalesced, filediff);
+                }
+            }
+        }
+
+        coalesced
+            .into_iter()
+            .map(|entry| {
+                let status = match (entry.first_before_exists, entry.latest_after_exists) {
+                    (false, true) => 'A',
+                    (true, false) => 'D',
+                    _ => 'M',
+                };
+                let diff =
+                    crate::tui::diff::compute_diff(&entry.first_before, &entry.latest_after, 0);
+                SessionFileDiff {
+                    path: entry.path,
+                    status,
+                    before: entry.first_before,
+                    after: entry.latest_after,
+                    additions: diff.added,
+                    deletions: diff.removed,
+                }
+            })
+            .collect()
+    }
+
+    pub fn terminal_pane(&self) -> &TerminalPaneState {
+        &self.terminal_pane
+    }
+
+    pub fn terminal_pane_mut(&mut self) -> &mut TerminalPaneState {
+        &mut self.terminal_pane
+    }
+
+    pub fn toggle_terminal_pane(&mut self) {
+        self.which_key.hide();
+        self.leader_pending = false;
+        self.leader_started_at = None;
+        if self.terminal_pane.toggle() {
+            self.diagnostic =
+                "Terminal pane opened (Esc or Ctrl+X Down to return to composer)".to_string();
+        } else {
+            self.diagnostic = "Terminal pane closed".to_string();
+        }
+    }
+
+    pub fn focus_terminal_pane(&mut self, focused: bool) {
+        self.which_key.hide();
+        self.leader_pending = false;
+        self.leader_started_at = None;
+        self.terminal_pane.set_focused(focused);
+        self.diagnostic = if self.terminal_pane.is_focused() {
+            "Terminal pane focused (Esc to return to composer)".to_string()
+        } else {
+            "Terminal pane unfocused (composer active)".to_string()
+        };
     }
 
     pub(crate) fn steer_first_queued_prompt(&mut self) -> bool {
@@ -688,6 +1417,15 @@ impl App {
                 self.diagnostic = "Select model".to_string();
             }
             PaletteAction::SwitchVariant => self.open_variants_dialog(),
+            PaletteAction::SessionTimeline => self.open_timeline_dialog(),
+            PaletteAction::UndoLastTurn => {
+                self.undo_last_turn();
+            }
+            PaletteAction::RedoLastTurn => {
+                self.redo_last_turn();
+            }
+            PaletteAction::ViewSessionDiff => self.open_diff_review_dialog(),
+            PaletteAction::ToggleTerminalPane => self.toggle_terminal_pane(),
             PaletteAction::QueuedPrompts => self.open_queued_prompts_dialog(),
             PaletteAction::PromptStash => {
                 if !self.prompt.trim().is_empty() {
@@ -802,13 +1540,10 @@ impl App {
             }
             Input::Character('s') => self.open_status_dialog(),
             Input::Character('c') => self.compact_session(),
-            Input::Character('g') => {
-                self.diagnostic = "Session timeline is not available in this build.".to_string();
-            }
+            Input::Character('g') => self.open_timeline_dialog(),
             Input::Character('b') => self.toggle_sessions_panel(),
-            Input::Character('t') => {
-                self.diagnostic = "Terminal pane is not available in this build.".to_string();
-            }
+            Input::Character('t') => self.toggle_terminal_pane(),
+            Input::Character('d') => self.open_diff_review_dialog(),
             Input::Character('e') => {
                 self.diagnostic = "External editor is not available in this build.".to_string();
             }
@@ -820,7 +1555,7 @@ impl App {
             Input::Character('u') => self.jump_to_last_user_message(),
             Input::Character(',') => self.open_settings_dialog(),
             Input::Character('r') => {
-                self.diagnostic = "Session redo is not available in this build.".to_string();
+                self.redo_last_turn();
             }
             Input::Character('i') => {
                 self.diagnostic = "No image attachments in this session.".to_string();
@@ -836,12 +1571,8 @@ impl App {
             Input::Right => {
                 self.diagnostic = "Right pane focus is not available in this build.".to_string();
             }
-            Input::Up => {
-                self.diagnostic = "Terminal pane is not available in this build.".to_string();
-            }
-            Input::Down => {
-                self.diagnostic = "Terminal pane is not available in this build.".to_string();
-            }
+            Input::Up => self.focus_terminal_pane(true),
+            Input::Down => self.focus_terminal_pane(false),
             _ => self.diagnostic = "Unknown leader shortcut".to_string(),
         }
     }
@@ -1092,6 +1823,8 @@ impl App {
             || self.queued_prompts_dialog.is_some()
             || self.stash_dialog.is_some()
             || self.variants_dialog.is_some()
+            || self.timeline_dialog.is_some()
+            || self.diff_review_dialog.is_some()
             || self.palette_dialog.is_some()
             || self.session_rename_dialog.is_some();
         if !has_dialog {
@@ -1106,6 +1839,129 @@ impl App {
                 return true;
             }
             _ => {}
+        }
+
+        if self.timeline_dialog.is_some() {
+            let mut close = false;
+            let mut jump_target: Option<(usize, usize, bool)> = None;
+            let mut fork_target: Option<(usize, Option<i64>)> = None;
+            let mut revert_target: Option<(usize, bool)> = None;
+            if let Some(dialog) = &mut self.timeline_dialog {
+                match event {
+                    UiEvent::Input(Input::Quit | Input::Cancel) => {
+                        if dialog.search_active || !dialog.filter.is_empty() {
+                            dialog.filter.clear();
+                            dialog.search_active = false;
+                        } else {
+                            close = true;
+                        }
+                    }
+                    UiEvent::Input(
+                        Input::Up | Input::ScrollUp | Input::PageUp | Input::Palette,
+                    ) => dialog.previous(),
+                    UiEvent::Input(
+                        Input::Down | Input::ScrollDown | Input::PageDown | Input::ToggleMode,
+                    ) => dialog.next(),
+                    UiEvent::Input(Input::Home) => dialog.selected = 0,
+                    UiEvent::Input(Input::End) => {
+                        dialog.selected = dialog.filtered_items().len().saturating_sub(1);
+                    }
+                    UiEvent::Input(Input::Backspace) => dialog.pop_char(),
+                    UiEvent::Input(Input::Submit) => {
+                        if let Some(item) = dialog.selected_item() {
+                            jump_target =
+                                Some((item.stream_part_index, item.turn_number, item.reverted));
+                        }
+                    }
+                    UiEvent::Input(Input::Character('/'))
+                        if !dialog.search_active && dialog.filter.is_empty() =>
+                    {
+                        dialog.search_active = true;
+                    }
+                    UiEvent::Input(Input::Character('f' | 'F'))
+                        if !dialog.search_active && dialog.filter.is_empty() =>
+                    {
+                        if let Some(item) = dialog.selected_item() {
+                            fork_target = Some((item.turn_number, item.next_user_message_id));
+                        }
+                    }
+                    UiEvent::Input(Input::Character('r' | 'R' | 'u' | 'U'))
+                        if !dialog.search_active && dialog.filter.is_empty() =>
+                    {
+                        if let Some(item) = dialog.selected_item() {
+                            revert_target = Some((item.turn_number, item.reverted));
+                        }
+                    }
+                    UiEvent::Input(Input::Character(character)) => dialog.push_char(*character),
+                    UiEvent::Paste(text) => {
+                        for character in text.chars().filter(|character| !character.is_control()) {
+                            dialog.push_char(character);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if close {
+                self.timeline_dialog = None;
+                self.diagnostic = "timeline closed".to_string();
+            } else if let Some((part_idx, turn_number, reverted)) = jump_target {
+                if reverted {
+                    self.redo_last_turn();
+                } else {
+                    self.jump_to_turn(part_idx, turn_number);
+                }
+            } else if let Some((turn_number, next_user_id)) = fork_target {
+                self.fork_session_at_turn(turn_number, next_user_id);
+            } else if let Some((turn_number, reverted)) = revert_target {
+                if reverted {
+                    self.redo_last_turn();
+                } else {
+                    self.revert_session_to_turn(turn_number);
+                }
+            }
+            return true;
+        }
+
+        if self.diff_review_dialog.is_some() {
+            let mut close = false;
+            let mut undo_requested = false;
+            if let Some(dialog) = &mut self.diff_review_dialog {
+                match event {
+                    UiEvent::Input(Input::Quit | Input::Cancel) => close = true,
+                    UiEvent::Input(Input::Up | Input::Palette) => dialog.previous(),
+                    UiEvent::Input(Input::Down) => dialog.next(),
+                    UiEvent::Input(Input::ScrollUp | Input::Character('k' | 'K')) => {
+                        dialog.scroll_up(2)
+                    }
+                    UiEvent::Input(Input::ScrollDown | Input::Character('j' | 'J')) => {
+                        dialog.scroll_down(2)
+                    }
+                    UiEvent::Input(Input::PageUp) => dialog.scroll_up(8),
+                    UiEvent::Input(Input::PageDown) => dialog.scroll_down(8),
+                    UiEvent::Input(
+                        Input::ToggleMode | Input::Character('v' | 'V') | Input::Submit,
+                    ) => dialog.toggle_view_mode(),
+                    UiEvent::Input(Input::Character('u' | 'U')) => undo_requested = true,
+                    _ => {}
+                }
+            }
+            if close {
+                self.diff_review_dialog = None;
+                self.diagnostic = "diff review closed".to_string();
+            } else if undo_requested {
+                self.undo_last_turn();
+                let updated_files = self.collect_session_file_diffs();
+                if let Some(dialog) = &mut self.diff_review_dialog {
+                    dialog.files = updated_files;
+                    if dialog.selected >= dialog.files.len() && !dialog.files.is_empty() {
+                        dialog.selected = dialog.files.len() - 1;
+                    } else if dialog.files.is_empty() {
+                        dialog.selected = 0;
+                    }
+                    dialog.diff_scroll = 0;
+                }
+            }
+            return true;
         }
 
         if self.settings_dialog.is_some() {

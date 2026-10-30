@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod diff_review;
 pub mod git;
 pub mod mcp;
 pub mod model_suggestions;
@@ -15,10 +16,14 @@ pub mod skills;
 pub mod stash;
 pub mod status;
 pub mod themes;
+pub mod timeline;
 pub mod variants;
 pub mod which_key;
 
 pub use agents::{AgentItem, AgentsDialogState, render_agents_dialog};
+pub use diff_review::{
+    DiffReviewDialogState, DiffViewMode, SessionFileDiff, render_diff_review_dialog,
+};
 pub use git::{GitDialogState, render_git_dialog};
 pub use mcp::{McpDialogItem, McpDialogState, McpDialogStatus, McpErrorDetail, render_mcp_dialog};
 pub use models::{
@@ -45,5 +50,6 @@ pub use stash::{
 };
 pub use status::{StatusDialogState, render_status_dialog};
 pub use themes::{ThemesDialogState, render_themes_dialog};
+pub use timeline::{TimelineDialogState, TimelineTurnItem, render_timeline_dialog};
 pub use variants::{VariantsDialogState, render_variants_dialog};
 pub use which_key::{WhichKeyState, render_which_key};

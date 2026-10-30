@@ -12,15 +12,16 @@ use super::chat::render_chat;
 
 use super::App;
 use super::dialogs::{
-    format_single_line_preview, render_agents_dialog, render_git_dialog, render_mcp_dialog,
-    render_model_suggestions_popup, render_models_dialog, render_palette_dialog,
+    format_single_line_preview, render_agents_dialog, render_diff_review_dialog, render_git_dialog,
+    render_mcp_dialog, render_model_suggestions_popup, render_models_dialog, render_palette_dialog,
     render_permission_dialog, render_question_dialog, render_queued_prompts_dialog,
     render_session_rename_dialog, render_sessions_dialog, render_sessions_panel,
     render_settings_dialog, render_skills_dialog, render_stash_dialog, render_status_dialog,
-    render_themes_dialog, render_variants_dialog, render_which_key,
+    render_themes_dialog, render_timeline_dialog, render_variants_dialog, render_which_key,
 };
 use super::home::render_home;
 use super::tabs::render_session_tabs;
+use super::terminal_pane::{TERMINAL_PANE_HEIGHT, render_terminal_pane};
 use super::theme::Theme;
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
@@ -55,10 +56,28 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         workspace_area
     };
 
+    let (workspace_area, terminal_area) =
+        if app.terminal_pane().is_visible() && workspace_area.height >= 10 {
+            let pane_height = TERMINAL_PANE_HEIGHT.min(workspace_area.height / 2).max(5);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(5), Constraint::Length(pane_height)])
+                .split(workspace_area);
+            app.set_last_terminal_pane_area(Some(chunks[1]));
+            (chunks[0], Some(chunks[1]))
+        } else {
+            app.set_last_terminal_pane_area(None);
+            (workspace_area, None)
+        };
+
     if app.transcript().is_empty() && app.stream_parts().is_empty() && app.tool_rows().is_empty() {
         render_home(frame, workspace_area, app, &theme, mode_color);
     } else {
         render_chat(frame, workspace_area, app, &theme, mode_color);
+    }
+
+    if let Some(term_area) = terminal_area {
+        render_terminal_pane(frame, term_area, app.terminal_pane(), &theme, mode_color);
     }
 
     render_status_bar(frame, status_bar_area, app, &theme);
@@ -101,6 +120,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
             model_label,
             &theme,
         );
+    } else if let Some(dialog) = app.timeline_dialog() {
+        render_timeline_dialog(frame, area, dialog, &theme);
+    } else if let Some(dialog) = app.diff_review_dialog() {
+        render_diff_review_dialog(frame, area, dialog, &theme);
     } else if let Some(dialog) = app.sessions_dialog() {
         render_sessions_dialog(frame, area, dialog, app.active_session_id(), &theme);
     } else if let Some(dialog) = app.agents_dialog() {
@@ -278,7 +301,9 @@ pub(crate) fn render_input_card(
     if area.height <= 2 {
         let cursor_x =
             content_area.x + (cursor_width as u16).min(content_area.width.saturating_sub(1));
-        frame.set_cursor_position((cursor_x, inner_area.y));
+        if !app.terminal_pane().is_focused() {
+            frame.set_cursor_position((cursor_x, inner_area.y));
+        }
 
         if inner_area.height == 1 {
             frame.render_widget(Paragraph::new(prompt_text), content_area);
@@ -321,7 +346,9 @@ pub(crate) fn render_input_card(
 
         let cursor_x =
             content_area.x + (cursor_width as u16).min(content_area.width.saturating_sub(1));
-        frame.set_cursor_position((cursor_x, mini_chunks[0].y));
+        if !app.terminal_pane().is_focused() {
+            frame.set_cursor_position((cursor_x, mini_chunks[0].y));
+        }
 
         frame.render_widget(
             Paragraph::new(prompt_text),
@@ -380,7 +407,9 @@ pub(crate) fn render_input_card(
 
     let cursor_x = content_area.x + (cursor_width as u16).min(content_area.width.saturating_sub(1));
     let cursor_y = v_chunks[1].y + (cursor_line.saturating_sub(start) as u16);
-    frame.set_cursor_position((cursor_x, cursor_y));
+    if !app.terminal_pane().is_focused() {
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 
     frame.render_widget(
         Paragraph::new(visible_lines),

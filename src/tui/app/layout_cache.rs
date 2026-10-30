@@ -36,6 +36,14 @@ impl App {
         self.last_jump_to_latest_area.set(area);
     }
 
+    pub fn last_terminal_pane_area(&self) -> Option<Rect> {
+        self.last_terminal_pane_area.get()
+    }
+
+    pub fn set_last_terminal_pane_area(&self, area: Option<Rect>) {
+        self.last_terminal_pane_area.set(area);
+    }
+
     pub fn get_or_compute_popup_area(&self) -> Option<Rect> {
         if let Some(area) = self.last_popup_area.get() {
             return Some(area);
@@ -107,6 +115,23 @@ impl App {
     pub fn handle_mouse_click(&mut self, x: u16, y: u16) {
         if !self.tui_settings.mouse {
             return;
+        }
+        if self.terminal_pane.is_visible()
+            && let Some(term_area) = self.last_terminal_pane_area.get()
+        {
+            if x >= term_area.x
+                && x < term_area.x + term_area.width
+                && y >= term_area.y
+                && y < term_area.y + term_area.height
+            {
+                self.terminal_pane.set_focused(true);
+                self.diagnostic =
+                    "Terminal pane focused (Esc or Ctrl+X Down to return to composer)".to_string();
+                return;
+            }
+            if self.terminal_pane.is_focused() {
+                self.terminal_pane.set_focused(false);
+            }
         }
         if let Some(badge) = self.last_jump_to_latest_area.get()
             && x >= badge.x

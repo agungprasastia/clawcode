@@ -707,9 +707,18 @@ fn fork_error_body(error: ForkSessionError) -> (u16, String) {
 fn stage_revert(id: i64, body: &str, state: &ServerState) -> Result<Value, (u16, String)> {
     ensure_idle(id, state)?;
     let message_id = parse_revert_stage(body)?;
+    let include_files = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("files").and_then(Value::as_bool))
+        .unwrap_or(true);
     let db = open_db().map_err(|error| (500, error.to_string()))?;
     let revert = db.stage_revert(id, message_id).map_err(revert_error_body)?;
-    Ok(public_revert(revert.message_id))
+    let files = if include_files {
+        reverted_files_from_db(&db, id, revert.message_id)
+    } else {
+        Vec::new()
+    };
+    Ok(public_revert_with_files(revert.message_id, files))
 }
 
 fn parse_revert_stage(body: &str) -> Result<i64, (u16, String)> {
@@ -738,7 +747,66 @@ fn clear_revert(id: i64, state: &ServerState) -> Result<(), (u16, String)> {
 fn commit_revert(id: i64, state: &ServerState) -> Result<(), (u16, String)> {
     ensure_idle(id, state)?;
     let db = open_db().map_err(|error| (500, error.to_string()))?;
+    if let Ok(summaries) = db.session_summaries(true, 1_000)
+        && let Some(boundary) = summaries
+            .into_iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.revert_message_id)
+    {
+        restore_reverted_files_from_db(&db, id, boundary, std::path::Path::new(&state.directory));
+    }
     db.commit_revert(id).map_err(revert_error_body)
+}
+
+fn reverted_files_from_db(db: &Db, session_id: i64, boundary_message_id: i64) -> Vec<String> {
+    let Ok(calls) = db.tool_calls(session_id) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for call in calls {
+        if call.assistant_message_id < boundary_message_id {
+            continue;
+        }
+        if let Some(meta_str) = call.metadata_json.as_deref()
+            && let Ok(meta) = serde_json::from_str::<Value>(meta_str)
+            && let Some(path) = meta
+                .get("filediff")
+                .and_then(|fd| fd.get("path"))
+                .and_then(Value::as_str)
+        {
+            let path_s = path.to_string();
+            if !files.contains(&path_s) {
+                files.push(path_s);
+            }
+        }
+    }
+    files
+}
+
+fn restore_reverted_files_from_db(
+    db: &Db,
+    session_id: i64,
+    boundary_message_id: i64,
+    workspace_dir: &std::path::Path,
+) {
+    let Ok(calls) = db.tool_calls(session_id) else {
+        return;
+    };
+    for call in calls.iter().rev() {
+        if call.assistant_message_id < boundary_message_id {
+            continue;
+        }
+        if let Some(meta_str) = call.metadata_json.as_deref()
+            && let Ok(meta) = serde_json::from_str::<Value>(meta_str)
+            && let Some(filediff) = meta.get("filediff")
+        {
+            let _ = crate::conversation::tools::restore_filediff_snapshot(
+                workspace_dir,
+                filediff,
+                true,
+            );
+        }
+    }
 }
 
 fn ensure_idle(id: i64, state: &ServerState) -> Result<(), (u16, String)> {
@@ -767,9 +835,13 @@ fn revert_error_body(error: RevertError) -> (u16, String) {
 }
 
 fn public_revert(message_id: i64) -> Value {
+    public_revert_with_files(message_id, Vec::new())
+}
+
+fn public_revert_with_files(message_id: i64, files: Vec<String>) -> Value {
     json!({
         "messageID": format!("msg_{message_id}"),
-        "files": [],
+        "files": files,
     })
 }
 

@@ -760,6 +760,12 @@ fn execute_tool_inner(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Missing required argument 'content'".to_string())?;
 
+            let (before_exists, before_content) =
+                match workspace.read(path_str, TOOL_READ_MAX_BYTES) {
+                    Ok(read_res) => (true, String::from_utf8_lossy(&read_res.bytes).into_owned()),
+                    Err(_) => (false, String::new()),
+                };
+
             let mutation = Mutation::Write {
                 path: PathBuf::from(path_str),
                 bytes: content.as_bytes().to_vec(),
@@ -767,6 +773,21 @@ fn execute_tool_inner(
             workspace
                 .build(mode, vec![mutation], true)
                 .map_err(|e| format!("Failed to write '{path_str}': {e}"))?;
+
+            let diff = crate::tui::diff::compute_diff(&before_content, content, 0);
+            *metadata = Some(serde_json::json!({
+                "filediff": {
+                    "path": path_str,
+                    "file": path_str,
+                    "before_exists": before_exists,
+                    "before": bound_file_snapshot(&before_content),
+                    "after_exists": true,
+                    "after": bound_file_snapshot(content),
+                    "additions": diff.added,
+                    "deletions": diff.removed,
+                }
+            }));
+
             Ok(format!(
                 "Successfully wrote {} bytes to '{}'",
                 content.len(),
@@ -862,11 +883,25 @@ fn execute_tool_inner(
             let updated = content.replacen(&target_old, &target_new, 1);
             let mutation = Mutation::Write {
                 path: PathBuf::from(path_str),
-                bytes: updated.into_bytes(),
+                bytes: updated.as_bytes().to_vec(),
             };
             workspace
                 .build(mode, vec![mutation], true)
                 .map_err(|e| format!("Failed to apply edit to '{path_str}': {e}"))?;
+
+            let diff = crate::tui::diff::compute_diff(&content, &updated, 0);
+            *metadata = Some(serde_json::json!({
+                "filediff": {
+                    "path": path_str,
+                    "file": path_str,
+                    "before_exists": true,
+                    "before": bound_file_snapshot(&content),
+                    "after_exists": true,
+                    "after": bound_file_snapshot(&updated),
+                    "additions": diff.added,
+                    "deletions": diff.removed,
+                }
+            }));
 
             let old_lines = target_old.lines().count();
             let new_lines = target_new.lines().count();
@@ -1278,6 +1313,77 @@ fn read_shell_pipe(
         }
     }
     collected
+}
+
+pub const MAX_FILE_SNAPSHOT_BYTES: usize = 64 * 1024;
+
+pub fn bound_file_snapshot(text: &str) -> String {
+    if text.len() <= MAX_FILE_SNAPSHOT_BYTES {
+        return text.to_string();
+    }
+    let mut end = MAX_FILE_SNAPSHOT_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// Restore a file snapshot (`before` when `restore_before` is true, or `after` when false)
+/// recorded in a tool call's `"filediff"` metadata object.
+pub fn restore_filediff_snapshot(
+    workspace_dir: &std::path::Path,
+    filediff: &serde_json::Value,
+    restore_before: bool,
+) -> Result<Option<String>, String> {
+    let Some(path_str) = filediff
+        .get("path")
+        .or_else(|| filediff.get("file"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    let exists_key = if restore_before {
+        "before_exists"
+    } else {
+        "after_exists"
+    };
+    let content_key = if restore_before { "before" } else { "after" };
+    let target_exists = filediff
+        .get(exists_key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let target_content = filediff
+        .get(content_key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let workspace = crate::workspace::Workspace::with_filesystem(
+        workspace_dir,
+        crate::workspace::RealFileSystem,
+    )
+    .map_err(|error| error.to_string())?;
+    let resolved = workspace
+        .resolve_path(path_str)
+        .map_err(|error| error.to_string())?;
+    if target_exists {
+        let mutation = Mutation::Write {
+            path: PathBuf::from(path_str),
+            bytes: target_content.as_bytes().to_vec(),
+        };
+        workspace
+            .build(Mode::Build, vec![mutation], true)
+            .map_err(|error| error.to_string())?;
+    } else if resolved.exists() {
+        let mutation = Mutation::Delete {
+            path: PathBuf::from(path_str),
+        };
+        workspace
+            .build(Mode::Build, vec![mutation], true)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(Some(path_str.to_string()))
 }
 
 pub fn execute_webfetch(url: &str) -> Result<String, String> {
