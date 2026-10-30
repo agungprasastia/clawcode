@@ -336,6 +336,24 @@ pub fn parse_read_path(input: &str) -> ParsedReadPath<'_> {
     }
 }
 
+pub fn coding_tools_schemas_for_mode(mode: Mode) -> Vec<serde_json::Value> {
+    let all = coding_tools_schemas();
+    if mode == Mode::Plan {
+        all.into_iter()
+            .filter(|schema| {
+                let name = schema
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                !matches!(name, "write_file" | "edit_file")
+            })
+            .collect()
+    } else {
+        all
+    }
+}
+
 pub fn coding_tools_schemas() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({

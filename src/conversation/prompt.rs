@@ -104,6 +104,52 @@ impl SystemPromptComposer {
         sections.join("\n\n---\n\n")
     }
 
+    pub fn update_mode_section(system_prompt: &str, mode: Mode) -> String {
+        let target_section = match mode {
+            Mode::Plan => Self::mode_instructions_for(Mode::Plan),
+            Mode::Build => Self::mode_instructions_for(Mode::Build),
+        };
+        let mut replaced = false;
+        let updated_sections: Vec<String> = system_prompt
+            .split("\n\n---\n\n")
+            .map(|section| {
+                let trimmed = section.trim_start();
+                if trimmed.starts_with("# MODE: PLAN") || trimmed.starts_with("# MODE: BUILD") {
+                    replaced = true;
+                    target_section.clone()
+                } else {
+                    section.to_string()
+                }
+            })
+            .collect();
+        if replaced {
+            updated_sections.join("\n\n---\n\n")
+        } else {
+            format!("{system_prompt}\n\n---\n\n{target_section}")
+        }
+    }
+
+    pub fn mode_instructions_for(mode: Mode) -> String {
+        match mode {
+            Mode::Plan => r#"# MODE: PLAN (Read-Only Exploration & Planning)
+You are currently operating in PLAN mode.
+- You CANNOT modify or write files, and you CANNOT execute destructive commands.
+- You have read-only tools: `read_file`, `list_dir`, `glob_search`, `grep_search`, `webfetch`, `websearch`, `skill`, `question`, `update_plan`.
+- Investigate the codebase thoroughly: search for symbols, read implementations, trace dependencies.
+- Synthesize your findings into a clear, actionable plan.
+- If changes to files or destructive shell commands are needed, instruct the user to press Tab to switch to BUILD mode."#.to_string(),
+            Mode::Build => r#"# MODE: BUILD (Execution & Implementation)
+You are currently operating in BUILD mode.
+- You have full permission to make code changes and run commands to complete the task.
+- Available tools include: `read_file`, `write_file`, `edit_file`, `list_dir`, `glob_search`, `grep_search`, `bash`, `webfetch`, `websearch`, `skill`, `question`, `update_plan`.
+- ALWAYS read files before editing them to understand context and match existing formatting.
+- Make minimal, surgical edits. Do not refactor unrelated code.
+- CRITICAL: Always use `edit_file` with precise string replacement to update or modify existing files. Use `write_file` ONLY when creating brand-new files or completely replacing a whole file from scratch.
+- Verify your changes with tests or build commands when possible.
+- Once finished, provide a concise summary of what changed and validation results."#.to_string(),
+        }
+    }
+
     fn get_core_prompt(&self) -> String {
         match self.provider_kind {
             ProviderKind::OpenAI => self.get_openai_prompt(),
@@ -184,30 +230,13 @@ Keep responses concise, clear, and direct."#
     }
 
     fn get_mode_instructions(&self) -> String {
-        match self.mode {
-            Mode::Plan => r#"# MODE: PLAN (Read-Only Exploration & Planning)
-You are currently operating in PLAN mode.
-- You CANNOT modify or write files, and you CANNOT execute destructive commands.
-- You have read-only tools: `read_file`, `list_dir`, `glob_search`, `grep_search`, `webfetch`, `websearch`, `skill`, `question`, `update_plan`.
-- Investigate the codebase thoroughly: search for symbols, read implementations, trace dependencies.
-- Synthesize your findings into a clear, actionable plan.
-- If changes to files or destructive shell commands are needed, instruct the user to press Tab to switch to BUILD mode."#.to_string(),
-            Mode::Build => r#"# MODE: BUILD (Execution & Implementation)
-You are currently operating in BUILD mode.
-- You have full permission to make code changes and run commands to complete the task.
-- Available tools include: `read_file`, `write_file`, `edit_file`, `list_dir`, `glob_search`, `grep_search`, `bash`, `webfetch`, `websearch`, `skill`, `question`, `update_plan`.
-- ALWAYS read files before editing them to understand context and match existing formatting.
-- Make minimal, surgical edits. Do not refactor unrelated code.
-- CRITICAL: Always use `edit_file` with precise string replacement to update or modify existing files. Use `write_file` ONLY when creating brand-new files or completely replacing a whole file from scratch.
-- Verify your changes with tests or build commands when possible.
-- Once finished, provide a concise summary of what changed and validation results."#.to_string(),
-        }
+        Self::mode_instructions_for(self.mode)
     }
 
     fn get_tools_guidance(&self) -> String {
         r#"# Tool Calling Guidelines
 - Use the model's native function/tool calling mechanism.
-- Never output speculative diffs or hypothetical file edits in raw text when an action is requested — call the appropriate tool directly.
+- Never output speculative diffs or hypothetical file edits in raw text when an action is requested; call the appropriate tool directly.
 - CRITICAL: Always use `edit_file` with precise string replacement to update or modify existing files. Use `write_file` ONLY when creating brand-new files or completely replacing a whole file from scratch.
 - Inspect files thoroughly using `read_file` or search tools before applying edits.
 - When referencing code in responses, use `file_path:line_number` format.
