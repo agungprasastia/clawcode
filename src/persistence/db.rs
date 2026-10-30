@@ -3,6 +3,7 @@
 
 use crate::persistence::schema;
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashMap;
 
 /// Retention limits. Enforced by [`Db::enforce_retention`].
 pub const MAX_MESSAGES_PER_SESSION: usize = 1_200;
@@ -60,6 +61,193 @@ impl Session {
 
     const SELECT_COLUMNS: &str = "id, title, workspace_id, status, pinned_at";
 }
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SessionSummary {
+    pub id: i64,
+    pub title: String,
+    pub workspace_id: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub pinned: bool,
+    pub archived: bool,
+    pub parent_id: Option<i64>,
+    pub fork_boundary_type: Option<ForkBoundaryType>,
+    pub fork_boundary_message_id: Option<i64>,
+    pub revert_message_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ForkBoundaryType {
+    Before,
+    Through,
+}
+
+impl ForkBoundaryType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Before => "before",
+            Self::Through => "through",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "before" => Some(Self::Before),
+            "through" => Some(Self::Through),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SessionRevert {
+    pub message_id: i64,
+}
+
+#[derive(Debug)]
+pub enum ForkSessionError {
+    SessionNotFound,
+    MessageNotFound(i64),
+    Empty(i64),
+    Database(rusqlite::Error),
+}
+
+impl std::fmt::Display for ForkSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionNotFound => write!(f, "session not found"),
+            Self::MessageNotFound(id) => write!(f, "message not found: msg_{id}"),
+            Self::Empty(id) => write!(f, "cannot fork empty session: ses_{id}"),
+            Self::Database(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ForkSessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<rusqlite::Error> for ForkSessionError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+#[derive(Debug)]
+pub enum RevertError {
+    SessionNotFound,
+    MessageNotFound(i64),
+    Database(rusqlite::Error),
+}
+
+impl std::fmt::Display for RevertError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionNotFound => write!(f, "session not found"),
+            Self::MessageNotFound(id) => write!(f, "message not found: msg_{id}"),
+            Self::Database(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RevertError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<rusqlite::Error> for RevertError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SavedPermission {
+    pub id: i64,
+    pub project_id: String,
+    pub action: String,
+    pub resource: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug)]
+pub enum SavedPermissionError {
+    NotFound(i64),
+    Conflict { action: String, resource: String },
+    Database(rusqlite::Error),
+}
+
+impl std::fmt::Display for SavedPermissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(id) => write!(f, "saved permission not found: psv_{id}"),
+            Self::Conflict { action, resource } => {
+                write!(f, "saved permission already allows {action} for {resource}")
+            }
+            Self::Database(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for SavedPermissionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<rusqlite::Error> for SavedPermissionError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct DbStats {
+    pub sessions: u64,
+    pub prompts: u64,
+    pub steps: u64,
+    pub tool_successes: u64,
+    pub tool_failures: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub active_days: u64,
+}
+
+impl SessionSummary {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let fork_boundary_type = row
+            .get::<_, Option<String>>(8)?
+            .and_then(|value| ForkBoundaryType::from_str(&value));
+        Ok(Self {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            workspace_id: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+            pinned: row.get::<_, Option<String>>(5)?.is_some(),
+            archived: row.get::<_, Option<String>>(6)?.is_some(),
+            parent_id: row.get(7)?,
+            fork_boundary_type,
+            fork_boundary_message_id: row.get(9)?,
+            revert_message_id: row.get(10)?,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct Message {
     pub id: i64,
@@ -170,6 +358,7 @@ pub struct ToolCall {
     pub status: ToolCallStatus,
     pub result: Option<String>,
     pub error: Option<String>,
+    pub metadata_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,6 +596,90 @@ impl Db {
         rows.collect()
     }
 
+    pub fn session_summaries(
+        &self,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<Vec<SessionSummary>, rusqlite::Error> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let archived_filter = if include_archived {
+            ""
+        } else {
+            "WHERE archived_at IS NULL"
+        };
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT id, title, workspace_id, created_at, updated_at, pinned_at, archived_at,
+                    parent_id, fork_boundary_type, fork_boundary_message_id, revert_message_id
+             FROM sessions
+             {archived_filter}
+             ORDER BY pinned_at IS NULL, pinned_at DESC, updated_at DESC, id DESC
+             LIMIT ?1"
+        ))?;
+        let rows = statement.query_map(params![limit], SessionSummary::from_row)?;
+        rows.collect()
+    }
+
+    pub fn rename_session(&self, session_id: i64, title: &str) -> Result<(), rusqlite::Error> {
+        self.connection.execute(
+            "UPDATE sessions SET title = ?2,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1",
+            params![session_id, title],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_session_workspace(
+        &self,
+        session_id: i64,
+        workspace_id: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.connection.execute(
+            "UPDATE sessions SET workspace_id = ?2 WHERE id = ?1",
+            params![session_id, workspace_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn stats(&self) -> Result<DbStats, rusqlite::Error> {
+        let sessions = count(&self.connection, "SELECT COUNT(*) FROM sessions")?;
+        let prompts = count(
+            &self.connection,
+            "SELECT COUNT(*) FROM messages WHERE role = 'user'",
+        )?;
+        let steps = count(&self.connection, "SELECT COUNT(*) FROM tool_calls")?;
+        let tool_successes = count(
+            &self.connection,
+            "SELECT COUNT(*) FROM tool_calls WHERE status = 'completed'",
+        )?;
+        let tool_failures = count(
+            &self.connection,
+            "SELECT COUNT(*) FROM tool_calls WHERE status = 'failed'",
+        )?;
+        let input_tokens = count(
+            &self.connection,
+            "SELECT COALESCE(SUM(json_extract(metrics, '$.input_tokens')), 0) FROM generations",
+        )?;
+        let output_tokens = count(
+            &self.connection,
+            "SELECT COALESCE(SUM(json_extract(metrics, '$.output_tokens')), 0) FROM generations",
+        )?;
+        let active_days = count(
+            &self.connection,
+            "SELECT COUNT(DISTINCT date(created_at)) FROM messages",
+        )?;
+        Ok(DbStats {
+            sessions,
+            prompts,
+            steps,
+            tool_successes,
+            tool_failures,
+            input_tokens,
+            output_tokens,
+            active_days,
+        })
+    }
+
     pub fn session(&self, session_id: i64) -> Result<Option<Session>, rusqlite::Error> {
         self.connection
             .query_row(
@@ -462,6 +735,35 @@ impl Db {
         )
     }
 
+    /// Read a JSON value from the durable `kv_state` store.
+    pub fn get_kv(&self, key: &str) -> Result<Option<String>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT value_json FROM kv_state WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Upsert a JSON value in the durable `kv_state` store.
+    pub fn set_kv(&self, key: &str, value_json: &str) -> Result<(), rusqlite::Error> {
+        if value_json.len() > MAX_MESSAGE_BYTES {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                MessageTooLarge(value_json.len()),
+            )));
+        }
+        self.connection.execute(
+            "INSERT INTO kv_state (key, value_json, updated_at)
+             VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+             ON CONFLICT(key) DO UPDATE SET
+                 value_json = excluded.value_json,
+                 updated_at = excluded.updated_at",
+            params![key, value_json],
+        )?;
+        Ok(())
+    }
+
     /// Fetch one session input by row id.
     pub fn session_input(&self, id: i64) -> Result<Option<SessionInput>, rusqlite::Error> {
         self.connection
@@ -484,7 +786,22 @@ impl Db {
         rows.collect()
     }
 
-    /// Fetch the next pending input for a session in admission order.
+    /// Fetch pending session inputs in execution priority order (`steer` ahead of `queue`, then `id`).
+    pub fn pending_session_inputs(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<SessionInput>, rusqlite::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, session_id, content, delivery, status, created_at, promoted_at, user_message_id
+             FROM session_inputs
+             WHERE session_id = ?1 AND status = 'pending'
+             ORDER BY CASE WHEN delivery = 'steer' THEN 0 ELSE 1 END, id ASC",
+        )?;
+        let rows = statement.query_map(params![session_id], session_input_from_row)?;
+        rows.collect()
+    }
+
+    /// Fetch the next pending input for a session (`steer` ahead of `queue`, then admission order).
     pub fn next_pending_input(
         &self,
         session_id: i64,
@@ -492,7 +809,10 @@ impl Db {
         self.connection
             .query_row(
                 "SELECT id, session_id, content, delivery, status, created_at, promoted_at, user_message_id
-                 FROM session_inputs WHERE session_id = ?1 AND status = 'pending' ORDER BY id LIMIT 1",
+                 FROM session_inputs
+                 WHERE session_id = ?1 AND status = 'pending'
+                 ORDER BY CASE WHEN delivery = 'steer' THEN 0 ELSE 1 END, id ASC
+                 LIMIT 1",
                 params![session_id],
                 session_input_from_row,
             )
@@ -590,12 +910,77 @@ impl Db {
         tx.commit()?;
         Ok((input, message, seq))
     }
+
+    /// Atomically update a pending input's delivery mode (`queue` / `steer`) and record `prompt_updated`.
+    /// Returns `Ok(None)` if the input is not pending or does not belong to `session_id`.
+    pub fn update_input_delivery(
+        &self,
+        session_id: i64,
+        input_id: i64,
+        delivery: InputDelivery,
+    ) -> Result<Option<(SessionInput, i64)>, rusqlite::Error> {
+        let tx = self.write_transaction()?;
+        let updated = tx
+            .query_row(
+                "UPDATE session_inputs
+                 SET delivery = ?1
+                 WHERE id = ?2 AND session_id = ?3 AND status = 'pending'
+                 RETURNING id, session_id, content, delivery, status, created_at, promoted_at, user_message_id",
+                params![delivery.as_str(), input_id, session_id],
+                session_input_from_row,
+            )
+            .optional()?;
+        let Some(input) = updated else {
+            return Ok(None);
+        };
+        let payload = serde_json::json!({
+            "input_id": input.id,
+            "session_id": session_id,
+            "delivery": delivery.as_str(),
+        })
+        .to_string();
+        let seq = append_event_in_transaction(&tx, session_id, None, "prompt_updated", &payload)?;
+        tx.commit()?;
+        Ok(Some((input, seq)))
+    }
+
+    /// Atomically mark a pending input `discarded` and record `prompt_discarded`.
+    /// Returns `Ok(None)` if the input is already promoted/discarded or does not belong to `session_id`.
+    pub fn discard_pending_input(
+        &self,
+        session_id: i64,
+        input_id: i64,
+    ) -> Result<Option<(SessionInput, i64)>, rusqlite::Error> {
+        let tx = self.write_transaction()?;
+        let updated = tx
+            .query_row(
+                "UPDATE session_inputs
+                 SET status = 'discarded'
+                 WHERE id = ?1 AND session_id = ?2 AND status = 'pending'
+                 RETURNING id, session_id, content, delivery, status, created_at, promoted_at, user_message_id",
+                params![input_id, session_id],
+                session_input_from_row,
+            )
+            .optional()?;
+        let Some(input) = updated else {
+            return Ok(None);
+        };
+        let payload = serde_json::json!({
+            "input_id": input.id,
+            "session_id": session_id,
+            "content": input.content,
+        })
+        .to_string();
+        let seq = append_event_in_transaction(&tx, session_id, None, "prompt_discarded", &payload)?;
+        tx.commit()?;
+        Ok(Some((input, seq)))
+    }
     /// Fetch one durable local tool call by row id.
     pub fn tool_call(&self, id: i64) -> Result<Option<ToolCall>, rusqlite::Error> {
         self.connection
             .query_row(
                 "SELECT id, session_id, generation_id, assistant_message_id,
-                        call_id, tool_name, arguments, status, result, error
+                        call_id, tool_name, arguments, status, result, error, metadata_json
                  FROM tool_calls WHERE id = ?1",
                 params![id],
                 tool_call_from_row,
@@ -607,7 +992,7 @@ impl Db {
     pub fn tool_calls(&self, session_id: i64) -> Result<Vec<ToolCall>, rusqlite::Error> {
         let mut statement = self.connection.prepare(
             "SELECT id, session_id, generation_id, assistant_message_id,
-                    call_id, tool_name, arguments, status, result, error
+                    call_id, tool_name, arguments, status, result, error, metadata_json
              FROM tool_calls WHERE session_id = ?1 ORDER BY id",
         )?;
         let rows = statement.query_map(params![session_id], tool_call_from_row)?;
@@ -678,7 +1063,7 @@ impl Db {
         )?;
         let tool_call = tx.query_row(
             "SELECT id, session_id, generation_id, assistant_message_id,
-                    call_id, tool_name, arguments, status, result, error
+                    call_id, tool_name, arguments, status, result, error, metadata_json
              FROM tool_calls WHERE id = ?1",
             params![id],
             tool_call_from_row,
@@ -700,7 +1085,7 @@ impl Db {
         }
         let tool_call = tx.query_row(
             "SELECT id, session_id, generation_id, assistant_message_id,
-                    call_id, tool_name, arguments, status, result, error
+                    call_id, tool_name, arguments, status, result, error, metadata_json
              FROM tool_calls WHERE id = ?1",
             params![id],
             tool_call_from_row,
@@ -725,6 +1110,19 @@ impl Db {
         result: Option<&str>,
         error: Option<&str>,
     ) -> Result<(ToolCall, i64), rusqlite::Error> {
+        self.settle_tool_call_with_metadata(id, status, result, error, None)
+    }
+
+    /// Settle a call while preserving tool-owned metadata (for example a
+    /// background shell's `{ "status": "running" }` marker).
+    pub fn settle_tool_call_with_metadata(
+        &self,
+        id: i64,
+        status: ToolCallStatus,
+        result: Option<&str>,
+        error: Option<&str>,
+        metadata_json: Option<&str>,
+    ) -> Result<(ToolCall, i64), rusqlite::Error> {
         if !matches!(
             status,
             ToolCallStatus::Completed | ToolCallStatus::Failed | ToolCallStatus::Cancelled
@@ -742,14 +1140,16 @@ impl Db {
         let tx = self.write_transaction()?;
         let updated = match status {
             ToolCallStatus::Failed => tx.execute(
-                "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4
+                "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4,
+                     metadata_json = COALESCE(?5, metadata_json)
                  WHERE id = ?1 AND status IN ('created', 'running')",
-                params![id, status.as_str(), result, error],
+                params![id, status.as_str(), result, error, metadata_json],
             )?,
             ToolCallStatus::Completed | ToolCallStatus::Cancelled => tx.execute(
-                "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4
+                "UPDATE tool_calls SET status = ?2, result = ?3, error = ?4,
+                     metadata_json = COALESCE(?5, metadata_json)
                  WHERE id = ?1 AND status = 'running'",
-                params![id, status.as_str(), result, error],
+                params![id, status.as_str(), result, error, metadata_json],
             )?,
             _ => unreachable!(),
         };
@@ -758,7 +1158,7 @@ impl Db {
         }
         let tool_call = tx.query_row(
             "SELECT id, session_id, generation_id, assistant_message_id,
-                    call_id, tool_name, arguments, status, result, error
+                    call_id, tool_name, arguments, status, result, error, metadata_json
              FROM tool_calls WHERE id = ?1",
             params![id],
             tool_call_from_row,
@@ -773,6 +1173,34 @@ impl Db {
         )?;
         tx.commit()?;
         Ok((tool_call, seq))
+    }
+
+    /// Replace an existing message body. Used to grow the assistant placeholder
+    /// created before a streaming turn starts executing tools.
+    pub fn update_message_content(
+        &self,
+        session_id: i64,
+        message_id: i64,
+        content: &str,
+    ) -> Result<Message, rusqlite::Error> {
+        if content.len() > MAX_MESSAGE_BYTES {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                MessageTooLarge(content.len()),
+            )));
+        }
+        self.connection.query_row(
+            "UPDATE messages SET content = ?3
+             WHERE session_id = ?1 AND id = ?2
+             RETURNING id, role, content",
+            params![session_id, message_id, content],
+            |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    role: row.get(1)?,
+                    content: row.get(2)?,
+                })
+            },
+        )
     }
 
     pub fn messages(&self, session_id: i64) -> Result<Vec<Message>, rusqlite::Error> {
@@ -792,6 +1220,423 @@ impl Db {
     pub fn delete_session(&self, session_id: i64) -> Result<(), rusqlite::Error> {
         self.connection
             .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+        Ok(())
+    }
+
+    /// Copy full projected history into a child session.
+    pub fn fork_session(&self, source_id: i64) -> Result<Session, ForkSessionError> {
+        self.fork_session_before(source_id, None)
+    }
+
+    /// Copy projected history up to a boundary. `Some(message_id)` copies
+    /// strictly earlier messages; `None` copies through the newest message.
+    pub fn fork_session_before(
+        &self,
+        source_id: i64,
+        before: Option<i64>,
+    ) -> Result<Session, ForkSessionError> {
+        let tx = self.write_transaction()?;
+        let (title, workspace_id): (String, i64) = tx
+            .query_row(
+                "SELECT title, workspace_id FROM sessions WHERE id = ?1",
+                params![source_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(ForkSessionError::SessionNotFound)?;
+        let boundary_message_id = if let Some(message_id) = before {
+            tx.query_row(
+                "SELECT id FROM messages WHERE session_id = ?1 AND id = ?2",
+                params![source_id, message_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .ok_or(ForkSessionError::MessageNotFound(message_id))?
+        } else {
+            tx.query_row(
+                "SELECT id FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
+                params![source_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .ok_or(ForkSessionError::Empty(source_id))?
+        };
+        let boundary_type = if before.is_some() {
+            ForkBoundaryType::Before
+        } else {
+            ForkBoundaryType::Through
+        };
+        let forked = tx.query_row(
+            "INSERT INTO sessions (
+                 title, workspace_id, parent_id, fork_boundary_type, fork_boundary_message_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             RETURNING id, title, workspace_id, status, pinned_at",
+            params![
+                title,
+                workspace_id,
+                source_id,
+                boundary_type.as_str(),
+                boundary_message_id
+            ],
+            Session::from_row,
+        )?;
+
+        let mut generation_rows = Vec::new();
+        {
+            let mut statement = tx.prepare(
+                "SELECT id, agent_mode, provider, model, status, started_at, ended_at,
+                        cancel_requested_at, metrics
+                 FROM generations WHERE session_id = ?1 ORDER BY id",
+            )?;
+            let mut rows = statement.query(params![source_id])?;
+            while let Some(row) = rows.next()? {
+                generation_rows.push((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ));
+            }
+        }
+        let mut generation_map = HashMap::new();
+        for (old_id, agent_mode, provider, model, status, started_at, ended_at, cancel, metrics) in
+            generation_rows
+        {
+            // A fork has no worker, so an active source generation becomes a
+            // terminal one rather than an orphan that looks runnable.
+            let status = if matches!(
+                status.as_str(),
+                "running" | "cancelling" | "waiting_permission"
+            ) {
+                "completed".to_string()
+            } else {
+                status
+            };
+            let new_id: i64 = tx.query_row(
+                "INSERT INTO generations (
+                     session_id, agent_mode, provider, model, status,
+                     started_at, ended_at, cancel_requested_at, metrics
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 RETURNING id",
+                params![
+                    forked.id, agent_mode, provider, model, status, started_at, ended_at, cancel,
+                    metrics
+                ],
+                |row| row.get(0),
+            )?;
+            generation_map.insert(old_id, new_id);
+        }
+
+        let mut message_rows = Vec::new();
+        {
+            let comparison = if before.is_some() { "<" } else { "<=" };
+            let mut statement = tx.prepare(&format!(
+                "SELECT id, role, content FROM messages
+                 WHERE session_id = ?1 AND id {comparison} ?2 ORDER BY id"
+            ))?;
+            let mut rows = statement.query(params![source_id, boundary_message_id])?;
+            while let Some(row) = rows.next()? {
+                message_rows.push((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ));
+            }
+        }
+        let mut message_map = HashMap::new();
+        for (old_id, role, content) in message_rows {
+            let new_id: i64 = tx.query_row(
+                "INSERT INTO messages (session_id, role, content) VALUES (?1, ?2, ?3)
+                 RETURNING id",
+                params![forked.id, role, content],
+                |row| row.get(0),
+            )?;
+            message_map.insert(old_id, new_id);
+        }
+
+        let mut tool_rows = Vec::new();
+        {
+            let mut statement = tx.prepare(
+                "SELECT generation_id, assistant_message_id, call_id, tool_name, arguments,
+                        status, result, error, created_at, settled_at, metadata_json
+                 FROM tool_calls WHERE session_id = ?1 ORDER BY id",
+            )?;
+            let mut rows = statement.query(params![source_id])?;
+            while let Some(row) = rows.next()? {
+                tool_rows.push((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ));
+            }
+        }
+        for (
+            generation_id,
+            assistant_message_id,
+            call_id,
+            tool_name,
+            arguments,
+            status,
+            result,
+            error,
+            created_at,
+            settled_at,
+            metadata_json,
+        ) in tool_rows
+        {
+            let Some(generation_id) = generation_map.get(&generation_id) else {
+                continue;
+            };
+            let Some(assistant_message_id) = message_map.get(&assistant_message_id) else {
+                continue;
+            };
+            tx.execute(
+                "INSERT INTO tool_calls (
+                     session_id, generation_id, assistant_message_id, call_id, tool_name,
+                     arguments, status, result, error, created_at, settled_at, metadata_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    forked.id,
+                    generation_id,
+                    assistant_message_id,
+                    call_id,
+                    tool_name,
+                    arguments,
+                    status,
+                    result,
+                    error,
+                    created_at,
+                    settled_at,
+                    metadata_json
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(forked)
+    }
+
+    /// Stage a revert at `message_id`. The boundary and later messages are
+    /// deleted only when the revert is committed.
+    pub fn stage_revert(
+        &self,
+        session_id: i64,
+        message_id: i64,
+    ) -> Result<SessionRevert, RevertError> {
+        let tx = self.write_transaction()?;
+        let session_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        if !session_exists {
+            return Err(RevertError::SessionNotFound);
+        }
+        let message_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = ?1 AND id = ?2)",
+            params![session_id, message_id],
+            |row| row.get(0),
+        )?;
+        if !message_exists {
+            return Err(RevertError::MessageNotFound(message_id));
+        }
+        tx.execute(
+            "UPDATE sessions SET revert_message_id = ?2,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1",
+            params![session_id, message_id],
+        )?;
+        tx.commit()?;
+        Ok(SessionRevert { message_id })
+    }
+
+    /// Discard a staged revert without deleting history.
+    pub fn clear_revert(&self, session_id: i64) -> Result<(), RevertError> {
+        let tx = self.write_transaction()?;
+        let changed = tx.execute(
+            "UPDATE sessions SET revert_message_id = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1",
+            params![session_id],
+        )?;
+        if changed == 0 {
+            return Err(RevertError::SessionNotFound);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Delete the staged boundary and everything after it, then clear the
+    /// staged revert. No-op when no revert is staged.
+    pub fn commit_revert(&self, session_id: i64) -> Result<(), RevertError> {
+        let tx = self.write_transaction()?;
+        let revert = tx
+            .query_row(
+                "SELECT revert_message_id FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+        let Some(revert) = revert else {
+            return Err(RevertError::SessionNotFound);
+        };
+        let Some(boundary) = revert else {
+            tx.commit()?;
+            return Ok(());
+        };
+        let created_at = tx
+            .query_row(
+                "SELECT created_at FROM messages WHERE id = ?1 AND session_id = ?2",
+                params![boundary, session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(created_at) = created_at else {
+            return Err(RevertError::MessageNotFound(boundary));
+        };
+        tx.execute(
+            "DELETE FROM session_inputs
+             WHERE session_id = ?1
+               AND (
+                   (user_message_id IS NOT NULL AND user_message_id >= ?2)
+                   OR (status = 'pending' AND created_at >= ?3)
+               )",
+            params![session_id, boundary, created_at],
+        )?;
+        tx.execute(
+            "DELETE FROM messages WHERE session_id = ?1 AND id >= ?2",
+            params![session_id, boundary],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET revert_message_id = NULL,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1",
+            params![session_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// List saved permissions, optionally scoped to one project.
+    pub fn saved_permissions(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<SavedPermission>, rusqlite::Error> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, project_id, action, resource, created_at, updated_at
+             FROM saved_permissions
+             WHERE ?1 IS NULL OR project_id = ?1
+             ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![project_id], |row| {
+            Ok(SavedPermission {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                action: row.get(2)?,
+                resource: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Save "always allow" resources. Existing identical rules are ignored.
+    pub fn add_saved_permissions(
+        &self,
+        project_id: &str,
+        action: &str,
+        resources: &[String],
+    ) -> Result<(), rusqlite::Error> {
+        let tx = self.write_transaction()?;
+        {
+            let mut statement = tx.prepare(
+                "INSERT OR IGNORE INTO saved_permissions (project_id, action, resource)
+                 VALUES (?1, ?2, ?3)",
+            )?;
+            for resource in resources {
+                statement.execute(params![project_id, action, resource])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Update the action or resource of a saved permission.
+    pub fn update_saved_permission(
+        &self,
+        id: i64,
+        action: Option<&str>,
+        resource: Option<&str>,
+    ) -> Result<SavedPermission, SavedPermissionError> {
+        let current = self
+            .saved_permission(id)?
+            .ok_or(SavedPermissionError::NotFound(id))?;
+        let action = action.unwrap_or(&current.action);
+        let resource = resource.unwrap_or(&current.resource);
+        let result = self.connection.query_row(
+            "UPDATE saved_permissions SET action = ?2, resource = ?3,
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1
+             RETURNING id, project_id, action, resource, created_at, updated_at",
+            params![id, action, resource],
+            |row| {
+                Ok(SavedPermission {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    action: row.get(2)?,
+                    resource: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        );
+        match result {
+            Ok(saved) => Ok(saved),
+            Err(error) if is_unique_violation(&error) => Err(SavedPermissionError::Conflict {
+                action: action.to_string(),
+                resource: resource.to_string(),
+            }),
+            Err(error) => Err(SavedPermissionError::Database(error)),
+        }
+    }
+
+    fn saved_permission(&self, id: i64) -> Result<Option<SavedPermission>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT id, project_id, action, resource, created_at, updated_at
+                 FROM saved_permissions WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(SavedPermission {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        action: row.get(2)?,
+                        resource: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    /// Remove a saved permission. Missing rows are a successful no-op.
+    pub fn remove_saved_permission(&self, id: i64) -> Result<(), rusqlite::Error> {
+        self.connection
+            .execute("DELETE FROM saved_permissions WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -1016,6 +1861,28 @@ impl Db {
             .optional()
     }
 
+    /// Most recent generation, used to restore a session's agent and model.
+    pub fn last_generation(&self, session_id: i64) -> Result<Option<Generation>, rusqlite::Error> {
+        self.connection
+            .query_row(
+                "SELECT id, session_id, agent_mode, provider, model, status
+                 FROM generations WHERE session_id = ?1
+                 ORDER BY id DESC LIMIT 1",
+                params![session_id],
+                |row| {
+                    Ok(Generation {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        agent_mode: row.get(2)?,
+                        provider: row.get(3)?,
+                        model: row.get(4)?,
+                        status: GenerationStatus::from_str(&row.get::<_, String>(5)?),
+                    })
+                },
+            )
+            .optional()
+    }
+
     /// Generations still active for a session (used by recovery).
     pub fn active_generations(&self, session_id: i64) -> Result<Vec<Generation>, rusqlite::Error> {
         let mut statement = self.connection.prepare(
@@ -1214,7 +2081,13 @@ fn tool_call_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCall> {
         status: ToolCallStatus::from_str(&row.get::<_, String>(7)?),
         result: row.get(8)?,
         error: row.get(9)?,
+        metadata_json: row.get(10)?,
     })
+}
+
+fn count(connection: &Connection, sql: &str) -> rusqlite::Result<u64> {
+    let value: i64 = connection.query_row(sql, [], |row| row.get(0))?;
+    Ok(u64::try_from(value).unwrap_or(0))
 }
 
 fn session_input_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionInput> {
@@ -1240,6 +2113,16 @@ fn context_epoch_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ContextEp
         created_at: row.get(5)?,
     })
 }
+fn is_unique_violation(error: &rusqlite::Error) -> bool {
+    match error {
+        rusqlite::Error::SqliteFailure(details, _) => {
+            details.code == rusqlite::ErrorCode::ConstraintViolation
+                && details.extended_code == 2067
+        }
+        _ => false,
+    }
+}
+
 fn tool_call_payload(tool_call: &ToolCall, result: Option<&str>, error: Option<&str>) -> String {
     serde_json::json!({
         "tool_call_id": tool_call.id,
@@ -1252,6 +2135,8 @@ fn tool_call_payload(tool_call: &ToolCall, result: Option<&str>, error: Option<&
         "status": tool_call.status.as_str(),
         "result": result,
         "error": error,
+        "metadata": tool_call.metadata_json.as_deref()
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
     })
     .to_string()
 }

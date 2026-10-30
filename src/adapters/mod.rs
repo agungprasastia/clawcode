@@ -465,12 +465,39 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                     }));
                 }
 
+                let active_variant = request
+                    .variant
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("default"));
+                let thinking_budget: Option<u32> =
+                    active_variant.map(|variant| match variant.to_ascii_lowercase().as_str() {
+                        "minimal" => 512,
+                        "low" => 1024,
+                        "medium" => 4096,
+                        "high" => 16_000,
+                        "max" => 31_999,
+                        _ => 4096,
+                    });
+                let max_tokens = match thinking_budget {
+                    Some(budget) if request.max_output_tokens <= budget => {
+                        budget.saturating_add(4096)
+                    }
+                    _ => request.max_output_tokens,
+                };
+
                 let mut payload = serde_json::json!({
                     "model": request.model,
                     "messages": anthropic_messages,
-                    "max_tokens": request.max_output_tokens,
+                    "max_tokens": max_tokens,
                     "stream": true,
                 });
+                if let Some(budget) = thinking_budget {
+                    payload["thinking"] = serde_json::json!({
+                        "type": "enabled",
+                        "budget_tokens": budget,
+                    });
+                }
                 if let Some(sys) = system_prompt {
                     payload["system"] = serde_json::Value::String(sys);
                 }
@@ -531,6 +558,14 @@ impl<T: Transport + Clone + 'static> JsonProvider<T> {
                     "max_tokens": request.max_output_tokens,
                     "stream": true,
                 });
+                if let Some(variant) = request
+                    .variant
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("default"))
+                {
+                    payload["reasoning_effort"] = serde_json::Value::String(variant.to_string());
+                }
                 if !request.tools.is_empty() {
                     payload["tools"] = serde_json::Value::Array(request.tools.clone());
                 }

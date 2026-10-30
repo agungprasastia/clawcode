@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod conversation;
 pub mod core;
+pub mod mcp;
 pub mod notify;
 pub mod persistence;
 pub mod platform;

@@ -182,11 +182,36 @@ fn shell_discovery_rejects_empty_and_path_separator_names() {
 #[test]
 fn git_branch_and_repo_detection_in_workspace() {
     assert!(is_git_repo(std::path::Path::new(".")));
-    let branch = get_current_branch();
-    assert!(branch.is_some());
-    let branch = branch.unwrap();
-    assert!(!branch.is_empty());
-    assert_ne!(branch, "HEAD");
+    if let Some(branch) = get_current_branch() {
+        assert!(!branch.is_empty());
+        assert_ne!(branch, "HEAD");
+    }
+
+    let repo = temp_directory("git-branch");
+    let run_git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .expect("git command")
+    };
+    assert!(run_git(&["init"]).status.success());
+    assert!(run_git(&["checkout", "-b", "test-branch"]).status.success());
+    assert!(
+        run_git(&["config", "user.email", "test@example.com"])
+            .status
+            .success()
+    );
+    assert!(run_git(&["config", "user.name", "test"]).status.success());
+    assert!(
+        run_git(&["commit", "--allow-empty", "-m", "init"])
+            .status
+            .success()
+    );
+    assert!(is_git_repo(&repo));
+    assert_eq!(get_branch_for_path(&repo).as_deref(), Some("test-branch"));
+    let _ = fs::remove_dir_all(repo);
 }
 
 #[test]

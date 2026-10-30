@@ -64,6 +64,11 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
         template: "/git",
     },
     CommandSuggestion {
+        name: "/mcps",
+        description: "Connect and inspect MCP servers",
+        template: "/mcps",
+    },
+    CommandSuggestion {
         name: "/skills",
         description: "Interactive skill picker & library",
         template: "/skills",
@@ -102,6 +107,36 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
         name: "/new",
         description: "Create a new conversation session",
         template: "/new ",
+    },
+    CommandSuggestion {
+        name: "/settings",
+        description: "Open TUI streaming & display settings",
+        template: "/settings",
+    },
+    CommandSuggestion {
+        name: "/thinking",
+        description: "Toggle thinking block visibility",
+        template: "/thinking",
+    },
+    CommandSuggestion {
+        name: "/queued",
+        description: "Manage queued or steered follow-up prompts",
+        template: "/queued",
+    },
+    CommandSuggestion {
+        name: "/stash",
+        description: "Open or manage stashed prompt drafts",
+        template: "/stash",
+    },
+    CommandSuggestion {
+        name: "/variant",
+        description: "Switch reasoning/effort variant for active model",
+        template: "/variant",
+    },
+    CommandSuggestion {
+        name: "/background",
+        description: "Move running foreground shell tool to background",
+        template: "/background",
     },
     CommandSuggestion {
         name: "/help",

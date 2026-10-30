@@ -460,7 +460,6 @@ fn clear_and_commands_reset_all_turn_view_state() {
             stream_base_len: Some(1),
             reasoning_buffer: "thinking".into(),
             reasoning_start: Some(std::time::Instant::now()),
-            reasoning_duration: Some(std::time::Duration::from_secs(1)),
             reasoning_active: true,
             current_plan: vec![("step".into(), "pending".into())],
             chat_scroll: 9,
@@ -494,7 +493,6 @@ fn clear_and_commands_reset_all_turn_view_state() {
             app.reasoning_buffer
         );
         assert!(app.reasoning_start.is_none(), "{command}");
-        assert!(app.reasoning_duration.is_none(), "{command}");
         assert!(!app.reasoning_active, "{command}");
         assert!(app.active_tool.is_none(), "{command}");
         assert!(app.tool_rows.is_empty(), "{command}");
@@ -583,4 +581,837 @@ fn runtime_finish_reason_survives_generation_finished() {
         app.conversation_status(),
         ConversationStatus::Finished(FinishReason::Length)
     );
+}
+
+#[test]
+fn reasoning_steps_are_separate_and_restart_timer_after_tools() {
+    let mut app = App::default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("inspect the repository");
+    let session_id = app.active_session_id().unwrap();
+
+    let send = |seq: i64, kind: &str, payload: serde_json::Value| {
+        tx.send(RuntimeEvent {
+            session_id,
+            generation_id: Some(1),
+            seq,
+            kind: kind.to_string(),
+            payload_json: payload.to_string(),
+        })
+        .unwrap();
+    };
+
+    send(1, "generation_started", serde_json::json!({}));
+    send(
+        2,
+        "reasoning_delta",
+        serde_json::json!({ "delta": "**Surveying**\n\nfirst step" }),
+    );
+    app.poll_runtime();
+
+    let first_start = app.reasoning_start.expect("first reasoning timer");
+    assert!(app.is_reasoning());
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    send(
+        3,
+        "tool_call_start",
+        serde_json::json!({ "id": "call-1", "name": "list_dir" }),
+    );
+    send(
+        4,
+        "tool_executing",
+        serde_json::json!({
+            "id": "call-1",
+            "name": "list_dir",
+            "arguments": { "path": "." }
+        }),
+    );
+    send(
+        5,
+        "tool_call_settled",
+        serde_json::json!({
+            "call_id": "call-1",
+            "tool_name": "list_dir",
+            "status": "completed",
+            "result": "src"
+        }),
+    );
+    app.poll_runtime();
+
+    assert!(!app.is_reasoning());
+    assert!(app.reasoning_start.is_none());
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    send(
+        6,
+        "reasoning_delta",
+        serde_json::json!({ "delta": "**Planning**\n\nsecond step" }),
+    );
+    app.poll_runtime();
+
+    let second_start = app.reasoning_start.expect("second reasoning timer");
+    assert!(second_start > first_start);
+    assert!(app.is_reasoning());
+
+    let parts = app.stream_parts();
+    assert_eq!(parts.len(), 4, "unexpected parts: {parts:?}");
+    assert!(matches!(&parts[0], StreamPart::User(prompt) if prompt == "inspect the repository"));
+    match &parts[1] {
+        StreamPart::ReasoningDone { text, .. } => assert!(text.contains("first step")),
+        other => panic!("expected completed first reasoning, got {other:?}"),
+    }
+    assert!(matches!(&parts[2], StreamPart::Tool(id) if id.as_str() == "call-1"));
+    match &parts[3] {
+        StreamPart::Reasoning(text) => assert!(text.contains("second step")),
+        other => panic!("expected active second reasoning, got {other:?}"),
+    }
+}
+
+#[test]
+fn ctrl_c_clears_prompt_before_exiting() {
+    let mut app = App {
+        prompt: "draft text".into(),
+        ..App::default()
+    };
+    app.apply(UiEvent::Input(Input::ClearOrExit));
+    assert!(app.is_running());
+    assert_eq!(app.prompt(), "");
+    assert_eq!(app.cursor_position(), 0);
+
+    app.apply(UiEvent::Input(Input::ClearOrExit));
+    assert!(!app.is_running());
+}
+
+#[test]
+fn ctrl_d_deletes_forward_then_exits_when_empty() {
+    let mut app = App {
+        prompt: "ab".into(),
+        cursor_position: 0,
+        ..App::default()
+    };
+    app.apply(UiEvent::Input(Input::DeleteOrExit));
+    assert_eq!(app.prompt(), "b");
+    assert_eq!(app.cursor_position(), 0);
+
+    app.apply(UiEvent::Input(Input::DeleteOrExit));
+    assert_eq!(app.prompt(), "");
+    assert!(app.is_running());
+
+    app.apply(UiEvent::Input(Input::DeleteOrExit));
+    assert!(!app.is_running());
+}
+
+#[test]
+fn ctrl_x_leader_opens_models_without_inserting_text() {
+    let mut app = App::default();
+    app.apply(UiEvent::Input(Input::Leader));
+    assert!(app.which_key().visible);
+    assert_eq!(app.prompt(), "");
+
+    app.apply(UiEvent::Input(Input::Character('m')));
+    assert!(!app.which_key().visible);
+    assert!(app.models_dialog().is_some());
+    assert_eq!(app.prompt(), "");
+}
+
+#[test]
+fn leader_escape_dismisses_without_cancelling_turn() {
+    let mut app = App {
+        status: ConversationStatus::Active,
+        ..App::default()
+    };
+    app.apply(UiEvent::Input(Input::Leader));
+    app.apply(UiEvent::Input(Input::Cancel));
+
+    assert!(!app.which_key().visible);
+    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+}
+
+#[test]
+fn palette_filters_and_runs_exit_command() {
+    let mut app = App::default();
+    app.apply(UiEvent::Input(Input::Palette));
+    assert!(app.palette_dialog().is_some());
+
+    for character in "exit".chars() {
+        app.apply(UiEvent::Input(Input::Character(character)));
+    }
+    assert_eq!(
+        app.palette_dialog()
+            .and_then(|dialog| dialog.selected_item())
+            .map(|item| item.title),
+        Some("Exit the app")
+    );
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(!app.is_running());
+}
+
+#[test]
+fn rename_dialog_updates_persisted_session_title() {
+    let mut app = App::default();
+    app.new_session();
+    let session_id = app.active_session_id().unwrap();
+    assert!(app.is_running());
+
+    app.open_session_rename_dialog();
+    let dialog = app.session_rename_dialog.as_mut().unwrap();
+    dialog.title = "Renamed session".into();
+    dialog.cursor = dialog.title.chars().count();
+    app.apply(UiEvent::Input(Input::Submit));
+
+    let sessions = app.command_service.list_sessions().unwrap();
+    let session = sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .unwrap();
+    assert_eq!(session.title, "Renamed session");
+    assert!(app.session_rename_dialog().is_none());
+}
+
+#[test]
+fn ctrl_f_toggles_session_pin() {
+    let mut app = App::default();
+    app.new_session();
+    let session_id = app.active_session_id().unwrap();
+
+    app.apply(UiEvent::Input(Input::PinSession));
+    let pinned = app
+        .command_service
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .unwrap()
+        .pinned;
+    assert!(pinned);
+
+    app.apply(UiEvent::Input(Input::PinSession));
+    let pinned = app
+        .command_service
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .unwrap()
+        .pinned;
+    assert!(!pinned);
+}
+
+#[test]
+fn word_deletion_handles_unicode_and_word_boundaries() {
+    let mut app = App {
+        prompt: "alpha beta gamma".into(),
+        cursor_position: 16,
+        ..App::default()
+    };
+    app.handle_input_key(Input::DeleteWord);
+    assert_eq!(app.prompt(), "alpha beta ");
+    assert_eq!(app.cursor_position(), 11);
+
+    app.handle_input_key(Input::WordLeft);
+    assert_eq!(app.cursor_position(), 6);
+    app.handle_input_key(Input::DeleteWordForward);
+    assert_eq!(app.prompt(), "alpha ");
+}
+
+#[test]
+fn session_tabs_cycle_close_and_reopen() {
+    let mut app = App::default();
+    app.new_session();
+    let first = app.active_session_id().unwrap();
+    app.new_session();
+    let second = app.active_session_id().unwrap();
+
+    assert_eq!(app.open_session_tabs(), &[first, second]);
+    assert_eq!(app.active_session_id(), Some(second));
+
+    app.apply(UiEvent::Input(Input::SessionPrevious));
+    assert_eq!(app.active_session_id(), Some(first));
+
+    app.close_active_session_tab();
+    assert_eq!(app.active_session_id(), Some(second));
+    assert_eq!(app.open_session_tabs(), &[second]);
+
+    app.apply(UiEvent::Input(Input::ReopenTab));
+    assert_eq!(app.active_session_id(), Some(first));
+    assert_eq!(app.open_session_tabs(), &[second, first]);
+
+    app.apply(UiEvent::Input(Input::SelectSession(0)));
+    assert_eq!(app.active_session_id(), Some(second));
+}
+
+#[test]
+fn rename_updates_cached_session_tab_title() {
+    let mut app = App::default();
+    app.new_session();
+    let session_id = app.active_session_id().unwrap();
+    app.open_session_rename_dialog();
+    let dialog = app.session_rename_dialog.as_mut().unwrap();
+    dialog.title = "Renamed tab".into();
+    dialog.cursor = dialog.title.chars().count();
+    app.apply(UiEvent::Input(Input::Submit));
+
+    assert_eq!(app.session_tab_title(session_id), Some("Renamed tab"));
+}
+
+#[test]
+fn mcp_dialog_lists_disabled_servers_without_connecting() {
+    use crate::tui::dialogs::McpDialogStatus;
+
+    let mut app = App::default();
+    app.mcp_servers.clear();
+    app.mcp_servers.insert(
+        "offline".to_string(),
+        crate::config::McpServerConfig {
+            enabled: false,
+            command: vec!["definitely-not-a-real-mcp-command".to_string()],
+            ..crate::config::McpServerConfig::default()
+        },
+    );
+    let cwd = std::env::current_dir().unwrap();
+    app.mcp_registry = crate::mcp::McpRegistry::new(&app.mcp_servers, &cwd);
+
+    app.prompt = "/mcps".to_string();
+    app.submit_prompt();
+
+    let dialog = app.mcp_dialog().unwrap();
+    assert_eq!(dialog.items.len(), 1);
+    assert_eq!(dialog.items[0].name, "offline");
+    assert_eq!(dialog.items[0].status, McpDialogStatus::Disabled);
+    assert!(app.mcp_probing.is_empty());
+}
+
+#[test]
+fn mcp_dialog_probe_results_update_status() {
+    use crate::tui::dialogs::{McpDialogItem, McpDialogState, McpDialogStatus};
+
+    let mut app = App {
+        mcp_dialog: Some(McpDialogState::new(vec![McpDialogItem::new(
+            "local",
+            McpDialogStatus::Pending,
+        )])),
+        ..App::default()
+    };
+    app.mcp_probing.insert("local".to_string());
+    app.mcp_probe_tx
+        .send(McpProbeOutcome {
+            name: "local".to_string(),
+            result: Ok(3),
+        })
+        .unwrap();
+
+    assert!(app.poll_mcp_probes());
+    assert!(app.mcp_probing.is_empty());
+    assert_eq!(
+        app.mcp_dialog().unwrap().items[0].status,
+        McpDialogStatus::Connected { tool_count: 3 }
+    );
+
+    app.mcp_probing.insert("local".to_string());
+    app.mcp_probe_tx
+        .send(McpProbeOutcome {
+            name: "local".to_string(),
+            result: Err("connection refused".to_string()),
+        })
+        .unwrap();
+    assert!(app.poll_mcp_probes());
+    assert_eq!(
+        app.mcp_dialog().unwrap().items[0].status,
+        McpDialogStatus::Failed("connection refused".to_string())
+    );
+}
+
+#[test]
+fn mcp_dialog_can_disconnect_and_show_error_details() {
+    use crate::tui::dialogs::{McpDialogItem, McpDialogState, McpDialogStatus};
+
+    let mut app = App::default();
+    app.mcp_servers.clear();
+    app.mcp_servers.insert(
+        "local".to_string(),
+        crate::config::McpServerConfig {
+            enabled: true,
+            command: vec!["definitely-not-a-real-mcp-command".to_string()],
+            ..crate::config::McpServerConfig::default()
+        },
+    );
+    let cwd = std::env::current_dir().unwrap();
+    let registry = crate::mcp::McpRegistry::new(&app.mcp_servers, &cwd).unwrap();
+    app.mcp_registry = Some(registry);
+    app.mcp_dialog = Some(McpDialogState::new(vec![
+        McpDialogItem::new(
+            "broken",
+            McpDialogStatus::Failed("connection refused".to_string()),
+        ),
+        McpDialogItem::new("local", McpDialogStatus::Connected { tool_count: 2 }),
+    ]));
+
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.mcp_dialog().unwrap().detail.is_some());
+    app.apply(UiEvent::Input(Input::Cancel));
+    assert!(app.mcp_dialog().unwrap().detail.is_none());
+
+    app.mcp_dialog.as_mut().unwrap().selected = 1;
+    app.apply(UiEvent::Input(Input::Character(' ')));
+    assert_eq!(
+        app.mcp_dialog().unwrap().items[1].status,
+        McpDialogStatus::Disabled
+    );
+    assert!(!app.mcp_registry.as_ref().unwrap().is_enabled("local"));
+}
+
+#[test]
+fn settings_dialog_cycles_values_and_persists_to_config() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "clawcode_settings_test_{}_{}",
+        std::process::id(),
+        unique
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("clawcode.jsonc");
+    std::fs::write(
+        &config_path,
+        "{\n  // preserve user comment\n  \"schema_version\": 1\n}\n",
+    )
+    .unwrap();
+
+    let mut app = App::default();
+    app.with_config_settings(crate::config::Config::default(), Some(config_path.clone()));
+
+    app.prompt = "/settings".to_string();
+    app.submit_prompt();
+    assert!(app.settings_dialog().is_some());
+
+    for ch in "verbosity".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Right));
+
+    assert_eq!(
+        app.tui_settings().verbosity,
+        crate::config::TranscriptVerbosity::High
+    );
+
+    let saved_raw = std::fs::read_to_string(&config_path).unwrap();
+    assert!(saved_raw.contains("// preserve user comment"));
+    let reloaded = crate::config::ConfigLoader
+        .parse_str(config_path.display().to_string(), &saved_raw)
+        .unwrap();
+    assert_eq!(
+        reloaded.tui.verbosity,
+        crate::config::TranscriptVerbosity::High
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn render_text(app: &App) -> String {
+    let backend = ratatui::backend::TestBackend::new(100, 20);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::tui::render(frame, app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut out = Vec::new();
+    for y in 0..buffer.area.height {
+        let mut row = String::new();
+        for x in 0..buffer.area.width {
+            row.push_str(buffer[(x, y)].symbol());
+        }
+        out.push(row);
+    }
+    out.join("\n")
+}
+
+#[test]
+fn transcript_respects_verbosity_grouping_markdown_and_sticky_scroll() {
+    use crate::config::{
+        Config, MarkdownMode, ThinkingDisplay, ToolGrouping, TranscriptVerbosity, TuiSettingsConfig,
+    };
+
+    let mut app = App::default();
+    let now = std::time::Instant::now();
+    app.set_tool_rows_for_test(vec![
+        ToolRow {
+            call_id: "r1".into(),
+            name: "read".into(),
+            desc: "src/main.rs".into(),
+            arguments: r#"{"path":"src/main.rs"}"#.into(),
+            output: "fn main() {}".into(),
+            state: ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: now,
+            expandable: false,
+        },
+        ToolRow {
+            call_id: "r2".into(),
+            name: "read".into(),
+            desc: "src/lib.rs".into(),
+            arguments: r#"{"path":"src/lib.rs"}"#.into(),
+            output: "pub mod cli;".into(),
+            state: ToolRowState::Completed,
+            arguments_complete: true,
+            metadata: None,
+            started_at: now,
+            expandable: false,
+        },
+    ]);
+    let mut body = String::from("Use **bold** text\n");
+    for idx in 1..=25 {
+        body.push_str(&format!("filler line {idx}\n"));
+    }
+    app.set_stream_parts_for_test(
+        vec![
+            StreamPart::User("inspect".into()),
+            StreamPart::Tool("r1".into()),
+            StreamPart::Tool("r2".into()),
+            StreamPart::ReasoningDone {
+                text: "deep internal check".into(),
+                duration: std::time::Duration::from_secs(1),
+            },
+            StreamPart::Text(body.clone()),
+        ],
+        Some(0),
+    );
+
+    app.scroll_to_top();
+    let default_rendered = render_text(&app);
+    assert!(default_rendered.contains("Explored: 2 reads"));
+    assert!(default_rendered.contains("+ Thought"));
+    assert!(!default_rendered.contains("deep internal check"));
+    assert!(default_rendered.contains("Use bold text"));
+    assert!(!default_rendered.contains("**bold**"));
+
+    let mut source_cfg = Config::default();
+    source_cfg.tui = TuiSettingsConfig {
+        markdown: MarkdownMode::Source,
+        grouping: ToolGrouping::None,
+        thinking: ThinkingDisplay::Show,
+        ..TuiSettingsConfig::default()
+    };
+    app.with_config_settings(source_cfg, None);
+    let source_rendered = render_text(&app);
+    assert!(source_rendered.contains("**bold**"));
+    assert!(source_rendered.contains("Read src/main.rs"));
+    assert!(source_rendered.contains("Read src/lib.rs"));
+    assert!(!source_rendered.contains("Explored: 2 reads"));
+    assert!(source_rendered.contains("deep internal check"));
+
+    let mut low_cfg = Config::default();
+    low_cfg.tui = TuiSettingsConfig {
+        verbosity: TranscriptVerbosity::Low,
+        ..TuiSettingsConfig::default()
+    };
+    app.with_config_settings(low_cfg, None);
+    let low_rendered = render_text(&app);
+    assert!(low_rendered.contains("Activity:"));
+    assert!(!low_rendered.contains("Read src/main.rs"));
+
+    app.with_config_settings(Config::default(), None);
+    app.scroll_to_bottom();
+    app.scroll_up(4);
+    let scrolled_rendered = render_text(&app);
+    assert!(scrolled_rendered.contains("Jump to latest ↓"));
+    let scroll_before = app.chat_scroll();
+    app.apply(UiEvent::StreamDelta(
+        "\nextra delta 1\nextra delta 2\nextra delta 3".into(),
+    ));
+    assert!(
+        app.chat_scroll() > scroll_before,
+        "sticky scroll should compensate for newly streamed lines while scrolled up"
+    );
+    let after_delta_rendered = render_text(&app);
+    assert!(after_delta_rendered.contains("Jump to latest ↓"));
+
+    let badge_rect = app
+        .jump_to_latest_area()
+        .expect("Jump to latest badge rect recorded");
+    app.apply(UiEvent::MouseClick {
+        x: badge_rect.x + 1,
+        y: badge_rect.y,
+    });
+    assert_eq!(app.chat_scroll(), 0);
+}
+
+#[test]
+fn submit_while_active_queues_instead_of_cancelling_and_undo_restores_prompt() {
+    let mut app = App::default();
+    let (_tx, rx) = std::sync::mpsc::channel();
+    app.set_runtime_receiver(rx);
+    app.submit_user_prompt("first active prompt");
+    let session_a = app.active_session_id().expect("session A created");
+    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+    assert!(!app.take_cancellation());
+
+    let queued_text =
+        "cek 🚀日本語フォローアップ multi-byte queue preview panjang sekali agar dipotong aman";
+    for ch in queued_text.chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+
+    assert_eq!(app.conversation_status(), ConversationStatus::Active);
+    assert!(
+        !app.take_cancellation(),
+        "submitting while active must queue instead of cancelling"
+    );
+    assert_eq!(app.pending_prompts().len(), 1);
+    assert_eq!(app.pending_prompts()[0].content, queued_text);
+    assert_eq!(app.pending_prompts()[0].delivery, "queue");
+
+    let rendered = render_text(&app);
+    assert!(rendered.contains("1 queued ·"));
+
+    // Empty Enter steers the first queued prompt.
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.pending_prompts()[0].delivery, "steer");
+
+    // Switching sessions isolates pending prompts per session.
+    app.new_session();
+    let session_b = app.active_session_id().expect("session B created");
+    assert_ne!(session_a, session_b);
+    assert!(app.pending_prompts().is_empty());
+
+    app.switch_session(session_a);
+    assert_eq!(app.pending_prompts().len(), 1);
+
+    // Open /queued dialog and press 'u' (undo) to restore prompt to composer.
+    for ch in "/queued".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.queued_prompts_dialog().is_some());
+    app.apply(UiEvent::Input(Input::Character('u')));
+    assert!(app.queued_prompts_dialog().is_none());
+    assert!(app.pending_prompts().is_empty());
+    assert_eq!(app.prompt(), queued_text);
+}
+
+#[test]
+fn ctrl_b_backgrounds_running_shell_when_prompt_empty_else_moves_cursor() {
+    let mut app = App::default();
+    app.submit_user_prompt("run long build");
+    app.set_tool_rows_for_test(vec![ToolRow {
+        call_id: "shell-1".into(),
+        name: "bash".into(),
+        desc: "cargo test".into(),
+        arguments: r#"{"command":"cargo test"}"#.into(),
+        output: "running suite...\n".into(),
+        state: ToolRowState::Running,
+        arguments_complete: true,
+        metadata: None,
+        started_at: std::time::Instant::now() - std::time::Duration::from_secs(4),
+        expandable: false,
+    }]);
+    app.set_stream_parts_for_test(
+        vec![
+            StreamPart::User("run long build".into()),
+            StreamPart::Tool("shell-1".into()),
+        ],
+        Some(0),
+    );
+
+    // 3-second hint renders inside running shell card.
+    let before_bg = render_text(&app);
+    assert!(before_bg.contains("Ctrl+B to run in background"));
+
+    // Non-empty prompt: Ctrl+B moves cursor left instead of backgrounding.
+    app.apply(UiEvent::Input(Input::Character('h')));
+    app.apply(UiEvent::Input(Input::Character('i')));
+    assert_eq!(app.cursor_position(), 2);
+    app.apply(UiEvent::Input(Input::BackgroundOrLeft));
+    assert_eq!(app.cursor_position(), 1);
+    assert_eq!(app.tool_rows()[0].state, ToolRowState::Running);
+
+    // Clear prompt: Ctrl+B detaches running shell into background.
+    app.apply(UiEvent::Input(Input::ClearOrExit));
+    assert!(app.prompt().is_empty());
+    app.apply(UiEvent::Input(Input::BackgroundOrLeft));
+    assert!(tool_is_background(&app.tool_rows()[0]));
+    let after_bg = render_text(&app);
+    assert!(after_bg.contains("Background"));
+}
+
+#[test]
+fn cycle_variant_and_model_favorites_recent_persist_in_kv_state() {
+    use crate::persistence::{Db, WriterHandle};
+    use crate::provider::{
+        ModelInfo, Provider, ProviderCapabilities, ProviderError, ProviderId, StreamRequest,
+        StreamResponse,
+    };
+
+    #[derive(Debug)]
+    struct TestModelProvider;
+    impl Provider for TestModelProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("openai"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: false,
+                tools: false,
+            }
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            vec![
+                ModelInfo {
+                    id: "openai/o3-mini".into(),
+                    context_window: 200_000,
+                },
+                ModelInfo {
+                    id: "openai/gpt-4o".into(),
+                    context_window: 128_000,
+                },
+                ModelInfo {
+                    id: "anthropic/claude-sonnet-4".into(),
+                    context_window: 200_000,
+                },
+            ]
+        }
+        fn send(&self, _: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            Ok(StreamResponse { events: Vec::new() })
+        }
+    }
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!("clawcode-kv-tui-{nonce}.db"));
+    let db_rt = Db::open(&db_path).unwrap();
+    let db_wr = Db::open(&db_path).unwrap();
+    let writer = WriterHandle::spawn(db_wr);
+
+    let mut app = App::default();
+    app.attach_runtime(db_rt, writer, Box::new(TestModelProvider));
+    app.set_available_models_for_test(vec![
+        ModelInfo {
+            id: "openai/o3-mini".into(),
+            context_window: 200_000,
+        },
+        ModelInfo {
+            id: "openai/gpt-4o".into(),
+            context_window: 128_000,
+        },
+        ModelInfo {
+            id: "anthropic/claude-sonnet-4".into(),
+            context_window: 200_000,
+        },
+    ]);
+
+    for ch in "/model openai/o3-mini".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.selected_provider(), "openai");
+    assert_eq!(app.selected_model(), "o3-mini");
+
+    // Ctrl+T cycles default -> low -> medium -> high -> default for o3-mini.
+    assert_eq!(app.active_variant(), None);
+    app.apply(UiEvent::Input(Input::CycleVariant));
+    assert_eq!(app.active_variant(), Some("low"));
+    let rendered = render_text(&app);
+    assert!(rendered.contains("openai / o3-mini · low") || rendered.contains("o3-mini · low"));
+    app.apply(UiEvent::Input(Input::CycleVariant));
+    assert_eq!(app.active_variant(), Some("medium"));
+    app.apply(UiEvent::Input(Input::CycleVariant));
+    assert_eq!(app.active_variant(), Some("high"));
+    app.apply(UiEvent::Input(Input::CycleVariant));
+    assert_eq!(app.active_variant(), None);
+
+    // Open models dialog via palette / Ctrl+X m, favorite anthropic/claude-sonnet-4 with Ctrl+F (PinSession),
+    // and select openai/gpt-4o so recent has [openai/gpt-4o, openai/o3-mini].
+    app.apply(UiEvent::Input(Input::Leader));
+    app.apply(UiEvent::Input(Input::Character('m')));
+    assert!(app.models_dialog().is_some());
+    // Move to anthropic/claude-sonnet-4 and toggle favorite.
+    app.apply(UiEvent::Input(Input::End));
+    app.apply(UiEvent::Input(Input::PinSession));
+    assert!(
+        app.favorite_models()
+            .contains(&"anthropic/claude-sonnet-4".to_string())
+    );
+    // Select openai/gpt-4o.
+    app.apply(UiEvent::Input(Input::Cancel));
+    for ch in "/model openai/gpt-4o".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.selected_model(), "gpt-4o");
+
+    // F2 cycles through recent models (gpt-4o -> o3-mini).
+    app.apply(UiEvent::Input(Input::CycleModel));
+    assert_eq!(app.selected_model(), "o3-mini");
+    app.apply(UiEvent::Input(Input::CycleModelReverse));
+    assert_eq!(app.selected_model(), "gpt-4o");
+
+    // Verify kv_state persisted favorites, recent, and variants in SQLite.
+    let db_check = Db::open(&db_path).unwrap();
+    let fav_json = db_check
+        .get_kv("model.favorites")
+        .unwrap()
+        .expect("favorites saved");
+    assert!(fav_json.contains("anthropic/claude-sonnet-4"));
+    let recent_json = db_check
+        .get_kv("model.recent")
+        .unwrap()
+        .expect("recent saved");
+    assert!(recent_json.contains("openai/gpt-4o"));
+
+    drop(app);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn prompt_stash_pushes_pops_and_confirms_delete_with_utf8_bounds() {
+    let mut app = App::default();
+    let draft = "draft 🦀日本語 stash entry dengan karakter multi-byte untuk uji batas UTF-8";
+    for ch in draft.chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+
+    // Stash the current composer draft via the command palette.
+    app.open_palette();
+    for ch in "Stash prompt".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.prompt().is_empty(), "composer cleared after stashing");
+    assert_eq!(app.stash_entries().len(), 1);
+    assert_eq!(app.stash_entries()[0].content, draft);
+
+    // Pop via `/stash pop` restores draft to composer.
+    for ch in "/stash pop".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert_eq!(app.prompt(), draft);
+    assert!(app.stash_entries().is_empty());
+
+    // Push again, open `/stash` dialog, and verify double Ctrl+D delete confirmation.
+    app.stash_current_prompt();
+    assert_eq!(app.stash_entries().len(), 1);
+    for ch in "/stash".chars() {
+        app.apply(UiEvent::Input(Input::Character(ch)));
+    }
+    app.apply(UiEvent::Input(Input::Submit));
+    assert!(app.stash_dialog().is_some());
+
+    // First Ctrl+D arms confirmation without deleting.
+    app.apply(UiEvent::Input(Input::DeleteOrExit));
+    assert_eq!(app.stash_entries().len(), 1);
+    assert_eq!(app.stash_dialog().unwrap().confirm_delete_index(), Some(0));
+
+    // Second Ctrl+D confirms deletion.
+    app.apply(UiEvent::Input(Input::DeleteOrExit));
+    assert!(app.stash_entries().is_empty());
 }

@@ -52,10 +52,7 @@ fn scripted_commands_run_through_runtime_step() {
     runtime_step(
         &mut app,
         &mut events,
-        Some(Event::Key(KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        ))),
+        Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
         |_| Ok::<_, Infallible>(()),
     )
     .unwrap();

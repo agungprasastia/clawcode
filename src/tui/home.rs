@@ -8,7 +8,8 @@ use ratatui::{
 
 use super::App;
 use super::render::{
-    mode_label, render_command_popup, render_hints_row, render_input_card, status_label,
+    input_card_height, mode_label, render_command_popup, render_hints_row, render_input_card,
+    status_label,
 };
 use super::theme::{Theme, darken_color};
 
@@ -68,7 +69,13 @@ pub fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
         return;
     }
 
-    let input_height = 5;
+    let content_width = if area.width >= 106 {
+        100
+    } else {
+        area.width.saturating_sub(4)
+    };
+    let input_height =
+        input_card_height(app, content_width).min(area.height.saturating_sub(8).max(5));
     let hints_height = 1;
 
     // Match Crabcode dock layout: top canvas stretches, input card & hints dock at bottom
@@ -117,11 +124,6 @@ pub fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme, 
     let hero_area = inner_chunks[0];
     let cards_area = inner_chunks[2];
 
-    let content_width = if area.width >= 106 {
-        100
-    } else {
-        area.width.saturating_sub(4)
-    };
     let h_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -184,12 +186,13 @@ pub fn render_compact_home(
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let input_height = input_card_height(app, area.width).min(area.height.saturating_sub(4).max(5));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2),
             Constraint::Min(0),
-            Constraint::Length(5),
+            Constraint::Length(input_height),
             Constraint::Length(1),
         ])
         .split(area);

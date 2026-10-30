@@ -62,6 +62,7 @@ enum Command {
         status: ToolCallStatus,
         result: Option<String>,
         error: Option<String>,
+        metadata_json: Option<String>,
         reply: mpsc::Sender<Result<(ToolCall, i64), String>>,
     },
     AdmitInput {
@@ -73,6 +74,22 @@ enum Command {
     PromoteInput {
         input_id: i64,
         reply: mpsc::Sender<Result<(SessionInput, Message, i64), String>>,
+    },
+    UpdateInputDelivery {
+        session_id: i64,
+        input_id: i64,
+        delivery: InputDelivery,
+        reply: mpsc::Sender<Result<Option<(SessionInput, i64)>, String>>,
+    },
+    DiscardPendingInput {
+        session_id: i64,
+        input_id: i64,
+        reply: mpsc::Sender<Result<Option<(SessionInput, i64)>, String>>,
+    },
+    SetKv {
+        key: String,
+        value_json: String,
+        reply: mpsc::Sender<Result<(), String>>,
     },
     InsertContextEpoch {
         session_id: i64,
@@ -177,13 +194,20 @@ impl WriterHandle {
                         status,
                         result,
                         error,
+                        metadata_json,
                         reply,
                     } => {
                         flush_batch(&mut db, &mut pending);
                         flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
-                            db.settle_tool_call(id, status, result.as_deref(), error.as_deref())
-                                .map_err(|error| error.to_string()),
+                            db.settle_tool_call_with_metadata(
+                                id,
+                                status,
+                                result.as_deref(),
+                                error.as_deref(),
+                                metadata_json.as_deref(),
+                            )
+                            .map_err(|error| error.to_string()),
                         );
                     }
                     Command::AdmitInput {
@@ -204,6 +228,43 @@ impl WriterHandle {
                         flush_events(&mut db, &mut pending_events);
                         let _ = reply.send(
                             db.promote_input(input_id)
+                                .map_err(|error| error.to_string()),
+                        );
+                    }
+                    Command::UpdateInputDelivery {
+                        session_id,
+                        input_id,
+                        delivery,
+                        reply,
+                    } => {
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
+                        let _ = reply.send(
+                            db.update_input_delivery(session_id, input_id, delivery)
+                                .map_err(|error| error.to_string()),
+                        );
+                    }
+                    Command::DiscardPendingInput {
+                        session_id,
+                        input_id,
+                        reply,
+                    } => {
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
+                        let _ = reply.send(
+                            db.discard_pending_input(session_id, input_id)
+                                .map_err(|error| error.to_string()),
+                        );
+                    }
+                    Command::SetKv {
+                        key,
+                        value_json,
+                        reply,
+                    } => {
+                        flush_batch(&mut db, &mut pending);
+                        flush_events(&mut db, &mut pending_events);
+                        let _ = reply.send(
+                            db.set_kv(&key, &value_json)
                                 .map_err(|error| error.to_string()),
                         );
                     }
@@ -337,16 +398,18 @@ impl WriterHandle {
                             status,
                             result,
                             error,
+                            metadata_json,
                             reply,
                         } => {
                             flush_batch(&mut db, &mut pending);
                             flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
-                                db.settle_tool_call(
+                                db.settle_tool_call_with_metadata(
                                     id,
                                     status,
                                     result.as_deref(),
                                     error.as_deref(),
+                                    metadata_json.as_deref(),
                                 )
                                 .map_err(|error| error.to_string()),
                             );
@@ -369,6 +432,43 @@ impl WriterHandle {
                             flush_events(&mut db, &mut pending_events);
                             let _ = reply.send(
                                 db.promote_input(input_id)
+                                    .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::UpdateInputDelivery {
+                            session_id,
+                            input_id,
+                            delivery,
+                            reply,
+                        } => {
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
+                            let _ = reply.send(
+                                db.update_input_delivery(session_id, input_id, delivery)
+                                    .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::DiscardPendingInput {
+                            session_id,
+                            input_id,
+                            reply,
+                        } => {
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
+                            let _ = reply.send(
+                                db.discard_pending_input(session_id, input_id)
+                                    .map_err(|error| error.to_string()),
+                            );
+                        }
+                        Command::SetKv {
+                            key,
+                            value_json,
+                            reply,
+                        } => {
+                            flush_batch(&mut db, &mut pending);
+                            flush_events(&mut db, &mut pending_events);
+                            let _ = reply.send(
+                                db.set_kv(&key, &value_json)
                                     .map_err(|error| error.to_string()),
                             );
                         }
@@ -557,6 +657,17 @@ impl WriterHandle {
         result: Option<&str>,
         error: Option<&str>,
     ) -> Result<(ToolCall, i64), String> {
+        self.settle_tool_call_with_metadata(id, status, result, error, None)
+    }
+
+    pub fn settle_tool_call_with_metadata(
+        &self,
+        id: i64,
+        status: ToolCallStatus,
+        result: Option<&str>,
+        error: Option<&str>,
+        metadata_json: Option<&str>,
+    ) -> Result<(ToolCall, i64), String> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.sender()?
             .try_send(Command::SettleToolCall {
@@ -564,6 +675,7 @@ impl WriterHandle {
                 status,
                 result: result.map(str::to_string),
                 error: error.map(str::to_string),
+                metadata_json: metadata_json.map(str::to_string),
                 reply: reply_tx,
             })
             .map_err(|error| error.to_string())?;
@@ -599,6 +711,58 @@ impl WriterHandle {
         self.sender()?
             .try_send(Command::PromoteInput {
                 input_id,
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn update_input_delivery(
+        &self,
+        session_id: i64,
+        input_id: i64,
+        delivery: InputDelivery,
+    ) -> Result<Option<(SessionInput, i64)>, String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::UpdateInputDelivery {
+                session_id,
+                input_id,
+                delivery,
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn discard_pending_input(
+        &self,
+        session_id: i64,
+        input_id: i64,
+    ) -> Result<Option<(SessionInput, i64)>, String> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::DiscardPendingInput {
+                session_id,
+                input_id,
+                reply: reply_tx,
+            })
+            .map_err(|error| error.to_string())?;
+        reply_rx.recv().map_err(|error| error.to_string())?
+    }
+
+    pub fn set_kv(&self, key: &str, value_json: &str) -> Result<(), String> {
+        if value_json.len() > MAX_MESSAGE_BYTES {
+            return Err(format!(
+                "message too large: {} bytes (max {MAX_MESSAGE_BYTES})",
+                value_json.len()
+            ));
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .try_send(Command::SetKv {
+                key: key.to_string(),
+                value_json: value_json.to_string(),
                 reply: reply_tx,
             })
             .map_err(|error| error.to_string())?;

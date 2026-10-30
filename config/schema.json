@@ -15,7 +15,106 @@
     "provider": { "type": "object" },
     "providers": { "type": "object" },
     "agent": { "type": "object" },
-    "agents": { "type": "object" }
+    "agents": { "type": "object" },
+    "theme": { "type": "string" },
+    "keybinds": { "type": "object" },
+    "permission": { "type": "object" },
+    "tools": { "type": "object" },
+    "instructions": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ]
+    },
+    "autoupdate": {
+      "anyOf": [
+        { "type": "boolean" },
+        { "type": "string" }
+      ]
+    },
+    "share": { "type": "string" },
+    "tui": {
+      "type": "object",
+      "properties": {
+        "animations": { "type": "boolean" },
+        "thinking": { "type": "string", "enum": ["hide", "show"] },
+        "grouping": { "type": "string", "enum": ["auto", "none"] },
+        "verbosity": { "type": "string", "enum": ["low", "medium", "high"] },
+        "markdown": { "type": "string", "enum": ["rendered", "source"] },
+        "tps": { "type": "boolean" },
+        "scrollbar": { "type": "boolean" },
+        "scroll_speed": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "scroll_acceleration": { "type": "boolean" },
+        "mouse": { "type": "boolean" },
+        "leader_timeout_ms": { "type": "integer", "minimum": 100, "maximum": 10000 },
+        "turn_tokens": { "type": "string", "enum": ["off", "compact", "verbose"] }
+      },
+      "additionalProperties": false
+    },
+    "animations": { "type": "boolean" },
+    "session": {
+      "type": "object",
+      "properties": {
+        "thinking": { "type": "string", "enum": ["hide", "show"] },
+        "grouping": { "type": "string", "enum": ["auto", "none"] },
+        "verbosity": { "type": "string", "enum": ["low", "medium", "high"] },
+        "markdown": { "type": "string", "enum": ["rendered", "source"] },
+        "tps": { "type": "boolean" },
+        "scrollbar": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "scroll": {
+      "type": "object",
+      "properties": {
+        "speed": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "acceleration": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "mouse": { "type": "boolean" },
+    "leader": {
+      "type": "object",
+      "properties": {
+        "timeout": { "type": "integer", "minimum": 100, "maximum": 10000 }
+      },
+      "additionalProperties": true
+    },
+    "debug": {
+      "type": "object",
+      "properties": {
+        "turn_tokens": { "type": "string", "enum": ["off", "compact", "verbose"] }
+      },
+      "additionalProperties": true
+    },
+    "mcp": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string" },
+          "enabled": { "type": "boolean" },
+          "disabled": { "type": "boolean" },
+          "command": {
+            "anyOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "environment": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "url": { "type": "string" },
+          "headers": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "oauth": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    }
   },
   "additionalProperties": false
 }

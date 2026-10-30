@@ -1,27 +1,49 @@
 pub mod agents;
 pub mod git;
+pub mod mcp;
 pub mod model_suggestions;
 pub mod models;
+pub mod palette;
 pub mod permission;
 pub mod question;
+pub mod queued_prompts;
+pub mod session_rename;
 pub mod sessions;
 pub mod sessions_panel;
+pub mod settings;
 pub mod skills;
+pub mod stash;
 pub mod status;
 pub mod themes;
+pub mod variants;
 pub mod which_key;
 
 pub use agents::{AgentItem, AgentsDialogState, render_agents_dialog};
 pub use git::{GitDialogState, render_git_dialog};
+pub use mcp::{McpDialogItem, McpDialogState, McpDialogStatus, McpErrorDetail, render_mcp_dialog};
 pub use models::{
     ModelsDialogState, format_context_window, render_model_suggestions_popup, render_models_dialog,
+};
+pub use palette::{
+    PALETTE_ITEMS, PaletteAction, PaletteDialogState, PaletteItem, render_palette_dialog,
 };
 pub use permission::{
     PermissionDecision, PermissionDialogState, PermissionPrompt, render_permission_dialog,
 };
 pub use question::{QuestionDialogState, render_question_dialog};
+pub use queued_prompts::{
+    PendingPromptItem, QueuedPromptsDialogState, format_single_line_preview,
+    render_queued_prompts_dialog,
+};
+pub use session_rename::{SessionRenameDialogState, render_session_rename_dialog};
 pub use sessions::{SessionsDialogState, render_sessions_dialog, render_sessions_panel};
+pub use settings::{SettingKey, SettingsDialogState, render_settings_dialog};
 pub use skills::{SkillsDialogState, render_skills_dialog};
+pub use stash::{
+    MAX_STASH_ENTRIES, MAX_STASH_ENTRY_BYTES, StashDialogState, StashEntry, bound_stash_content,
+    render_stash_dialog,
+};
 pub use status::{StatusDialogState, render_status_dialog};
 pub use themes::{ThemesDialogState, render_themes_dialog};
+pub use variants::{VariantsDialogState, render_variants_dialog};
 pub use which_key::{WhichKeyState, render_which_key};

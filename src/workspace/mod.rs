@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+pub(crate) use files::temporary_sibling;
 pub use files::{FileSystem, RealFileSystem};
 pub use policy::{Mode, Operation, Policy, PolicyDecision, Risk};
 pub use root::WorkspaceRoot;

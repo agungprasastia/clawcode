@@ -38,8 +38,26 @@ pub struct ToolRow {
 
 impl ToolRow {
     pub fn compute_expandable(&self) -> bool {
+        if self.state == ToolRowState::Failed && self.output.lines().count() > 1 {
+            return true;
+        }
+        if tool_uses_generic_detail(&self.name) {
+            if !self.arguments.trim().is_empty() || !self.output.trim().is_empty() {
+                return true;
+            }
+            return false;
+        }
         if matches!(self.name.as_str(), "bash" | "sh") {
             self.output.lines().count() > 10
+        } else if matches!(self.name.as_str(), "write_file" | "write") {
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&self.arguments) {
+                args.get("content")
+                    .and_then(|value| value.as_str())
+                    .map(|content| content.lines().count() > 10)
+                    .unwrap_or(false)
+            } else {
+                false
+            }
         } else if matches!(self.name.as_str(), "edit_file" | "edit") {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(&self.arguments)
                 && let Some(old_str) = args
@@ -79,6 +97,358 @@ pub struct ActiveToolInfo {
     pub name: String,
     pub desc: String,
     pub started_at: std::time::Instant,
+}
+
+/// OpenCode renders tools outside its specialized set with the generic
+/// "tool + scalar input" row, where clicking reveals every input and the
+/// output. Keep the same fallback boundary here.
+pub fn tool_uses_generic_detail(name: &str) -> bool {
+    !matches!(
+        name,
+        "bash"
+            | "sh"
+            | "read_file"
+            | "read"
+            | "write_file"
+            | "write"
+            | "edit_file"
+            | "edit"
+            | "patch"
+            | "apply_patch"
+            | "list_dir"
+            | "glob_search"
+            | "glob"
+            | "grep_search"
+            | "grep"
+            | "webfetch"
+            | "fetch"
+            | "websearch"
+            | "question"
+            | "update_plan"
+            | "todowrite"
+            | "task"
+            | "execute"
+            | "skill"
+    )
+}
+
+/// Collapse the internal tool names onto the canonical OpenCode vocabulary.
+pub fn canonical_tool_name(name: &str) -> &str {
+    match name {
+        "read_file" => "read",
+        "write_file" => "write",
+        "edit_file" => "edit",
+        "glob_search" => "glob",
+        "grep_search" => "grep",
+        "apply_patch" => "patch",
+        "sh" => "bash",
+        "fetch" => "webfetch",
+        _ => name,
+    }
+}
+
+/// Exploration calls are the only tools OpenCode folds into the compact
+/// "Exploring"/"Explored" group.
+pub fn exploration_category(name: &str) -> Option<&'static str> {
+    match canonical_tool_name(name) {
+        "read" => Some("read"),
+        "grep" | "glob" | "websearch" => Some("search"),
+        "webfetch" => Some("fetch"),
+        _ => None,
+    }
+}
+
+pub fn tool_completed_icon(name: &str, state: ToolRowState) -> &'static str {
+    if state == ToolRowState::Failed {
+        return "✗";
+    }
+    match canonical_tool_name(name) {
+        "read" => "→",
+        "glob" | "grep" => "✱",
+        "webfetch" => "%",
+        "websearch" => "◈",
+        "write" | "edit" => "←",
+        "skill" | "question" => "→",
+        "update_plan" | "todowrite" => "⚙",
+        "task" | "execute" => {
+            if state == ToolRowState::Completed {
+                "✓"
+            } else {
+                "│"
+            }
+        }
+        _ => "✓",
+    }
+}
+
+/// OpenCode keeps the "Background" badge on a completed part whose durable
+/// metadata still says a process is running.
+pub fn tool_is_background(row: &ToolRow) -> bool {
+    row.state == ToolRowState::Completed
+        && row
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("status"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|status| status == "running")
+}
+
+fn tool_input(row: &ToolRow) -> serde_json::Value {
+    serde_json::from_str::<serde_json::Value>(&row.arguments).unwrap_or(serde_json::Value::Null)
+}
+
+fn text_arg(input: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        input
+            .get(*key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+fn metadata_number(row: &ToolRow, keys: &[&str]) -> Option<u64> {
+    let metadata = row.metadata.as_ref()?;
+    keys.iter()
+        .find_map(|key| metadata.get(*key).and_then(|value| value.as_u64()))
+}
+
+fn output_count(row: &ToolRow) -> usize {
+    let output = row.output.trim();
+    if output.starts_with("No files matched")
+        || output.starts_with("No matches found")
+        || output.starts_with("No search results")
+    {
+        return 0;
+    }
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
+fn match_count(row: &ToolRow, metadata_keys: &[&str]) -> usize {
+    metadata_number(row, metadata_keys)
+        .map(|count| count as usize)
+        .unwrap_or_else(|| output_count(row))
+}
+
+fn path_arg(input: &serde_json::Value) -> Option<String> {
+    text_arg(input, &["path", "file_path", "filePath"])
+}
+
+fn agent_label(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => "General".to_string(),
+    }
+}
+
+fn first_scalar(input: &serde_json::Value) -> Option<(String, String)> {
+    let object = input.as_object()?;
+    const PRIORITY: [&str; 8] = [
+        "command",
+        "id",
+        "pattern",
+        "url",
+        "query",
+        "path",
+        "description",
+        "code",
+    ];
+    let preferred = PRIORITY.iter().find(|key| {
+        object
+            .get(**key)
+            .is_some_and(|value| value.is_string() || value.is_number() || value.is_boolean())
+    });
+    let entry = preferred
+        .and_then(|key| object.get_key_value(*key))
+        .or_else(|| {
+            object
+                .iter()
+                .find(|(_, value)| value.is_string() || value.is_number() || value.is_boolean())
+        })?;
+    let value = match entry.1 {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let value = value.trim().replace('\n', " ");
+    (!value.is_empty()).then(|| (entry.0.clone(), value))
+}
+
+/// The tool-specific first line OpenCode renders for a completed call. The
+/// generic fallback is `<tool> <first scalar input>`.
+pub fn tool_headline(row: &ToolRow) -> String {
+    let input = tool_input(row);
+    match canonical_tool_name(&row.name) {
+        "read" => {
+            let path = path_arg(&input).unwrap_or_else(|| row.desc.clone());
+            let mut label = format!("Read {path}");
+            let offset = input.get("offset").and_then(|value| value.as_u64());
+            let limit = input.get("limit").and_then(|value| value.as_u64());
+            if offset.is_some() || limit.is_some() {
+                let start = offset.unwrap_or(0) + 1;
+                let end = match (offset, limit) {
+                    (_, Some(limit)) => start.saturating_add(limit.saturating_sub(1)),
+                    (Some(offset), None) => offset.saturating_add(1),
+                    _ => start,
+                };
+                label.push_str(&format!(":{start}-{end}"));
+            }
+            label
+        }
+        "glob" => {
+            let pattern = text_arg(&input, &["pattern", "query"]).unwrap_or_default();
+            let mut label = format!("Glob \"{pattern}\"");
+            if let Some(path) = path_arg(&input) {
+                label.push_str(&format!(" in {path}"));
+            }
+            if row.state == ToolRowState::Completed {
+                let count = match_count(row, &["count", "matches"]);
+                if count > 0 {
+                    label.push_str(&format!(
+                        " ({count} {})",
+                        if count == 1 { "match" } else { "matches" }
+                    ));
+                }
+            }
+            label
+        }
+        "grep" => {
+            let pattern = text_arg(&input, &["pattern", "query"]).unwrap_or_default();
+            let mut label = format!("Grep \"{pattern}\"");
+            if let Some(path) = path_arg(&input) {
+                label.push_str(&format!(" in {path}"));
+            }
+            if row.state == ToolRowState::Completed {
+                let count = match_count(row, &["matches", "count"]);
+                if count > 0 {
+                    label.push_str(&format!(
+                        " ({count} {})",
+                        if count == 1 { "match" } else { "matches" }
+                    ));
+                }
+            }
+            label
+        }
+        "webfetch" => {
+            let url = text_arg(&input, &["url"]).unwrap_or_else(|| row.desc.clone());
+            format!("WebFetch {url}")
+        }
+        "websearch" => {
+            let query = text_arg(&input, &["query"]).unwrap_or_else(|| row.desc.clone());
+            match row
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("provider"))
+                .and_then(|value| value.as_str())
+            {
+                Some(provider) => format!("Web Search via {provider} \"{query}\""),
+                None => format!("Web Search \"{query}\""),
+            }
+        }
+        "write" => {
+            let path = path_arg(&input).unwrap_or_else(|| row.desc.clone());
+            format!("Write {path}")
+        }
+        "edit" => {
+            let path = path_arg(&input).unwrap_or_else(|| row.desc.clone());
+            format!("Edit {path}")
+        }
+        "patch" => {
+            let path = text_arg(&input, &["path"]).unwrap_or_default();
+            if path.is_empty() {
+                "Patching".to_string()
+            } else {
+                format!("Patching {path}")
+            }
+        }
+        "list_dir" => {
+            let path = text_arg(&input, &["path"]).unwrap_or_else(|| ".".to_string());
+            format!("List {path}")
+        }
+        "skill" => {
+            let name = row
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("name"))
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+                .or_else(|| text_arg(&input, &["name", "id"]))
+                .unwrap_or_else(|| row.desc.clone());
+            format!("Skill \"{name}\"")
+        }
+        "question" => {
+            let count = input
+                .get("questions")
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .or_else(|| {
+                    input
+                        .get("question")
+                        .and_then(|value| value.as_str())
+                        .map(|_| 1)
+                })
+                .unwrap_or(1);
+            format!(
+                "Asked {count} {}",
+                if count == 1 { "question" } else { "questions" }
+            )
+        }
+        "update_plan" | "todowrite" => {
+            if row.state == ToolRowState::Failed {
+                "Todo update failed".to_string()
+            } else {
+                "Cleared todos".to_string()
+            }
+        }
+        "task" => {
+            let agent = text_arg(&input, &["agent", "subagent_type"])
+                .map(|agent| agent_label(&agent))
+                .unwrap_or_else(|| "General".to_string());
+            let description = text_arg(&input, &["description", "prompt"])
+                .unwrap_or_else(|| "Subagent".to_string());
+            format!("{agent} Subagent — {description}")
+        }
+        "execute" => "execute".to_string(),
+        "bash" => {
+            let command = text_arg(&input, &["command"]).unwrap_or_else(|| row.desc.clone());
+            command
+                .strip_prefix("$ ")
+                .unwrap_or(&command)
+                .trim()
+                .to_string()
+        }
+        _ => match first_scalar(&input) {
+            Some((_, value)) => format!("{} {value}", row.name),
+            None if !row.desc.is_empty() => format!("{} {}", row.name, row.desc),
+            None => row.name.clone(),
+        },
+    }
+}
+
+/// Pending labels mirror OpenCode's tool-specific status copy rather than
+/// exposing the internal tool name.
+pub fn tool_pending_label(name: &str) -> &'static str {
+    match name {
+        "read_file" | "read" => "Reading file…",
+        "glob_search" | "glob" => "Finding files…",
+        "grep_search" | "grep" => "Searching content…",
+        "webfetch" | "fetch" => "Fetching from the web…",
+        "websearch" => "Searching web…",
+        "bash" | "sh" => "Writing command…",
+        "write_file" | "write" => "Preparing write…",
+        "edit_file" | "edit" => "Preparing edit…",
+        "patch" | "apply_patch" => "Patching…",
+        "task" => "Delegating…",
+        "execute" => "execute",
+        "update_plan" | "todowrite" => "Updating todos…",
+        "question" => "Asking questions…",
+        "skill" => "Loading skill…",
+        _ => "Preparing tool…",
+    }
 }
 
 pub(crate) fn tool_names_match(a: &str, b: &str) -> bool {
@@ -361,11 +731,25 @@ impl App {
     }
 
     pub fn is_tool_expanded(&self, call_id: &str) -> bool {
-        self.expanded_tool_rows.contains(call_id)
+        if self.tui_settings.verbosity == crate::config::TranscriptVerbosity::High
+            && !call_id.starts_with("group:")
+            && !call_id.starts_with("activity:")
+        {
+            !self.collapsed_tool_rows.contains(call_id)
+        } else {
+            self.expanded_tool_rows.contains(call_id)
+        }
     }
 
     pub fn toggle_tool_expanded(&mut self, call_id: &str) {
-        if !self.expanded_tool_rows.insert(call_id.to_string()) {
+        if self.tui_settings.verbosity == crate::config::TranscriptVerbosity::High
+            && !call_id.starts_with("group:")
+            && !call_id.starts_with("activity:")
+        {
+            if !self.collapsed_tool_rows.insert(call_id.to_string()) {
+                self.collapsed_tool_rows.remove(call_id);
+            }
+        } else if !self.expanded_tool_rows.insert(call_id.to_string()) {
             self.expanded_tool_rows.remove(call_id);
         }
     }
@@ -438,6 +822,26 @@ impl App {
 
     pub(crate) fn normalized_tool_call_id(call_id: &str) -> String {
         bounded(call_id.to_string(), MAX_IDENTITY_BYTES)
+    }
+
+    /// Append a live shell/tool chunk. Settlement overwrites the accumulated
+    /// preview with the final bounded output.
+    pub(crate) fn append_tool_progress(&mut self, call_id: &str, chunk: &str) {
+        let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == call_id) else {
+            return;
+        };
+        if chunk.is_empty() {
+            return;
+        }
+        row.output = bounded(format!("{}{}", row.output, chunk), MAX_TOOL_OUTPUT_BYTES);
+        row.expandable = row.compute_expandable();
+    }
+
+    pub(crate) fn set_tool_row_metadata(&mut self, call_id: &str, metadata: serde_json::Value) {
+        if let Some(row) = self.tool_rows.iter_mut().find(|row| row.call_id == call_id) {
+            row.metadata = Some(metadata);
+            row.expandable = row.compute_expandable();
+        }
     }
 
     pub(crate) fn complete_tool_row(

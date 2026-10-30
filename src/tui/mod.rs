@@ -25,13 +25,19 @@ pub use chat::{
     format_transcript_lines, format_transcript_lines_with_width, render_chat, strip_ansi_codes,
 };
 pub use dialogs::{
-    AgentItem, AgentsDialogState, ModelsDialogState, PermissionDecision, PermissionDialogState,
-    PermissionPrompt, QuestionDialogState, SessionsDialogState, StatusDialogState,
-    ThemesDialogState, WhichKeyState, render_permission_dialog, render_question_dialog,
+    AgentItem, AgentsDialogState, McpDialogItem, McpDialogState, McpDialogStatus, McpErrorDetail,
+    ModelsDialogState, PaletteAction, PaletteDialogState, PendingPromptItem, PermissionDecision,
+    PermissionDialogState, PermissionPrompt, QuestionDialogState, QueuedPromptsDialogState,
+    SessionRenameDialogState, SessionsDialogState, SettingKey, SettingsDialogState,
+    StashDialogState, StashEntry, StatusDialogState, ThemesDialogState, VariantsDialogState,
+    WhichKeyState, render_mcp_dialog, render_permission_dialog, render_question_dialog,
+    render_queued_prompts_dialog, render_settings_dialog, render_stash_dialog,
+    render_variants_dialog,
 };
 pub use diff::{DiffLine, DiffOp, DiffResult, compute_diff};
 pub use home::HomeState;
 pub use render::render;
+mod tabs;
 pub use theme::{Theme, ThemeKind};
 pub use typewriter::TypewriterState;
 pub use wave_spinner::WaveSpinner;
@@ -67,7 +73,9 @@ pub fn default_data_dir() -> std::path::PathBuf {
 }
 
 pub fn attach_production_runtime(app: &mut App) {
-    let config = crate::config::ConfigLoader.load().unwrap_or_default();
+    let loader = crate::config::ConfigLoader;
+    let config = loader.load().unwrap_or_default();
+    app.with_config_settings(config.clone(), Some(loader.active_config_path()));
     let data_dir = default_data_dir();
     let _ = std::fs::create_dir_all(&data_dir);
     let db_path = data_dir.join("clawcode.db");
@@ -90,8 +98,10 @@ pub fn attach_production_runtime(app: &mut App) {
     }
 
     let writer = crate::persistence::WriterHandle::spawn(db_writer);
+    let mcp_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mcp = crate::mcp::McpRegistry::new(&config.mcp, &mcp_cwd);
     let router = crate::adapters::ConfiguredRouter::new(config);
-    app.attach_runtime(db_runtime, writer, Box::new(router));
+    app.attach_runtime_with_mcp(db_runtime, writer, Box::new(router), mcp);
 }
 
 pub fn run() -> io::Result<()> {

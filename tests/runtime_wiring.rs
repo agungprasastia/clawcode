@@ -280,17 +280,51 @@ fn one_tool_call_is_joined_and_settled_before_generation_finishes() {
 
     let started = std::time::Instant::now();
     let mut finished = None;
+    let mut kinds = Vec::new();
     while started.elapsed() < std::time::Duration::from_secs(3) {
-        if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(50))
-            && event.kind == "generation_finished"
-        {
-            finished = Some(event);
-            break;
+        if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(50)) {
+            let done = event.kind == "generation_finished";
+            kinds.push(event.kind.clone());
+            if done {
+                finished = Some(event);
+                break;
+            }
         }
     }
     let finished = finished.expect("generation must finish after joined tool");
     assert!(finished.payload_json.contains("completed"));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let position = |kind: &str| {
+        kinds
+            .iter()
+            .position(|event_kind| event_kind == kind)
+            .unwrap_or_else(|| panic!("missing {kind} event in {kinds:?}"))
+    };
+    assert!(
+        position("tool_call_start") < position("assistant_message"),
+        "tool arguments must stream before the assistant snapshot: {kinds:?}"
+    );
+    assert!(
+        position("tool_executing") < position("tool_call_settled"),
+        "tool execution must be announced before settlement: {kinds:?}"
+    );
+    assert!(
+        position("tool_executing") < position("assistant_message"),
+        "tool execution must start as soon as its input completes: {kinds:?}"
+    );
+    assert!(
+        position("assistant_message") < position("tool_call_created"),
+        "the assistant placeholder must be durable before the tool call: {kinds:?}"
+    );
+    assert!(
+        position("tool_call_created") < position("tool_call_started"),
+        "durable calls must be created before they start: {kinds:?}"
+    );
+    assert!(
+        position("tool_call_started") < position("tool_call_settled"),
+        "durable calls must start before settlement: {kinds:?}"
+    );
 
     let db = client.shutdown();
     let messages = db.messages(session.id).unwrap();
@@ -549,7 +583,7 @@ impl Provider for ParallelToolProvider {
 }
 
 #[test]
-fn multiple_parallel_tool_calls_execute_sequentially_settle_and_feed_back() {
+fn multiple_parallel_tool_calls_start_together_settle_and_feed_back() {
     let path = temp_db_path("parallel_tools");
     let db = Db::open(&path).expect("runtime db");
     let session = db.create_session("parallel tools").unwrap();
@@ -572,18 +606,48 @@ fn multiple_parallel_tool_calls_execute_sequentially_settle_and_feed_back() {
         .unwrap();
 
     let started = std::time::Instant::now();
+    let mut kinds = Vec::new();
     let mut finished = None;
     while started.elapsed() < std::time::Duration::from_secs(3) {
-        if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(50))
-            && event.kind == "generation_finished"
-        {
-            finished = Some(event);
-            break;
+        if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(50)) {
+            kinds.push(event.kind.clone());
+            if event.kind == "generation_finished" {
+                finished = Some(event);
+                break;
+            }
         }
     }
     let finished = finished.expect("parallel tool generation must finish");
     assert!(finished.payload_json.contains("completed"));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let executing: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, kind)| kind.as_str() == "tool_executing")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        executing.len(),
+        2,
+        "both tool calls must be announced: {kinds:?}"
+    );
+    let first_settled = kinds
+        .iter()
+        .position(|kind| kind == "tool_call_settled")
+        .expect("at least one tool settlement");
+    assert!(
+        executing[1] < first_settled,
+        "both tool calls must start before either settles: {kinds:?}"
+    );
+    let assistant_at = kinds
+        .iter()
+        .position(|kind| kind == "assistant_message_updated")
+        .expect("final assistant snapshot");
+    assert!(
+        executing[1] < assistant_at,
+        "tool execution must overlap the provider stream: {kinds:?}"
+    );
 
     let db = client.shutdown();
     let tool_calls = db.tool_calls(session.id).unwrap();

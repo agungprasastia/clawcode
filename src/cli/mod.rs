@@ -1,3 +1,8 @@
+pub mod acp;
+pub mod opencode;
+pub mod server;
+pub mod spec;
+
 use crate::persistence::{Db, Message, Session};
 use crate::provider::{DiscoveryService, DiscoverySource, ModelInfo, ProviderError, ProviderId};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -152,17 +157,39 @@ pub fn runtime_service_with_config_and_db(
         let pid = ProviderId::new(name);
         custom_models.insert(pid, provider_cfg.to_model_infos());
     }
+    if custom_models.is_empty() {
+        custom_models.insert(
+            ProviderId::new("anthropic"),
+            vec![
+                ModelInfo {
+                    id: "claude-3-7-sonnet".into(),
+                    context_window: 200_000,
+                },
+                ModelInfo {
+                    id: "claude-3-5-sonnet".into(),
+                    context_window: 200_000,
+                },
+                ModelInfo {
+                    id: "gpt-4o".into(),
+                    context_window: 128_000,
+                },
+            ],
+        );
+    }
     let discovery_source = CliDiscovery::with_models(custom_models.clone());
     let mut service = CommandService::with_db(discovery_source, db);
     for (pid, models) in custom_models {
         service.discovery.apply(pid, Ok(models));
     }
     let (default_p, _) = config.initial_provider_and_model();
-    if !default_p.is_empty() {
-        let pid = ProviderId::new(default_p);
-        service.set_default_provider(pid.clone());
-        service.set_provider(pid);
-    }
+    let active_provider = if !default_p.is_empty() {
+        default_p
+    } else {
+        "anthropic".to_string()
+    };
+    let pid = ProviderId::new(active_provider);
+    service.set_default_provider(pid.clone());
+    service.set_provider(pid);
     Ok(service)
 }
 
@@ -361,6 +388,19 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
             })
     }
 
+    pub fn session_tool_calls(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<crate::persistence::ToolCall>, ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.tool_calls(session_id)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<Session>, ProviderError> {
         self.db
             .as_ref()
@@ -377,6 +417,27 @@ impl<D: DiscoverySource + Clone> CommandService<D> {
             .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
             .and_then(|db| {
                 db.delete_session(session_id)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn rename_session(&self, session_id: i64, title: &str) -> Result<(), ProviderError> {
+        let title = bounded_title(title);
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.rename_session(session_id, &title)
+                    .map_err(|error| ProviderError::Protocol(error.to_string()))
+            })
+    }
+
+    pub fn set_session_pinned(&self, session_id: i64, pinned: bool) -> Result<(), ProviderError> {
+        self.db
+            .as_ref()
+            .ok_or_else(|| ProviderError::Protocol("session database unavailable".into()))
+            .and_then(|db| {
+                db.set_session_pinned(session_id, pinned)
                     .map_err(|error| ProviderError::Protocol(error.to_string()))
             })
     }
@@ -397,11 +458,13 @@ fn bounded_title(title: &str) -> String {
 
 pub fn run() -> std::io::Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if arguments.first().map(String::as_str) == Some("--version") {
-        println!("clawcode {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+    if arguments.is_empty() {
+        return crate::tui::run();
     }
-    if !arguments.is_empty() {
+
+    // Slash commands remain available as a compatibility surface for scripts
+    // written against the pre-subcommand CLI.
+    if arguments[0].starts_with('/') {
         let command = parse_command(&arguments.join(" ")).map_err(std::io::Error::other)?;
         let mut service = runtime_service().map_err(|e| std::io::Error::other(e.to_string()))?;
         let output = service
@@ -411,7 +474,7 @@ pub fn run() -> std::io::Result<()> {
         return Ok(());
     }
 
-    crate::tui::run()
+    opencode::run(arguments).map_err(|error| std::io::Error::other(error.0))
 }
 
 #[cfg(test)]

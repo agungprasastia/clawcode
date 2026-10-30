@@ -1,12 +1,15 @@
 use super::App;
-use super::util::{bounded, ceil_char_boundary, find_user_turn_boundary, split_provider_model};
-use super::{ConversationMode, ConversationStatus, Input, MAX_IDENTITY_BYTES, StreamPart};
+use super::util::{ceil_char_boundary, find_user_turn_boundary};
+use super::{ConversationMode, ConversationStatus, Input, InputEditKind, StreamPart};
 use crate::cli::{self, CommandOutput, ConversationMode as CommandMode};
 use crate::conversation::ConversationEvent;
 use crate::platform::SystemClipboard;
-use crate::tui::dialogs::{AgentsDialogState, ThemesDialogState};
+use crate::runtime::client::GenerationRequest;
+use crate::tui::dialogs::{AgentsDialogState, PendingPromptItem, ThemesDialogState};
 
 impl App {
+    const MAX_INPUT_UNDO: usize = 100;
+
     pub fn prompt(&self) -> &str {
         &self.prompt
     }
@@ -15,14 +18,66 @@ impl App {
         self.cursor_position
     }
 
+    fn record_input_edit(&mut self, kind: Option<InputEditKind>) {
+        if let Some(kind) = kind
+            && self.last_input_edit == Some(kind)
+        {
+            self.input_redo.clear();
+            return;
+        }
+        self.input_undo
+            .push((self.prompt.clone(), self.cursor_position));
+        if self.input_undo.len() > Self::MAX_INPUT_UNDO {
+            self.input_undo.remove(0);
+        }
+        self.input_redo.clear();
+        self.last_input_edit = kind;
+    }
+
+    fn clear_input_history(&mut self) {
+        self.input_undo.clear();
+        self.input_redo.clear();
+        self.last_input_edit = None;
+    }
+
+    fn undo_input(&mut self) {
+        let Some((prompt, cursor)) = self.input_undo.pop() else {
+            self.diagnostic = "nothing to undo".to_string();
+            return;
+        };
+        let current = std::mem::replace(&mut self.prompt, prompt);
+        self.input_redo.push((current, self.cursor_position));
+        self.cursor_position = cursor.min(self.prompt.chars().count());
+        self.history_index = None;
+        self.selected_suggestion = 0;
+        self.last_input_edit = None;
+        self.diagnostic = "input undone".to_string();
+    }
+
+    fn redo_input(&mut self) {
+        let Some((prompt, cursor)) = self.input_redo.pop() else {
+            self.diagnostic = "nothing to redo".to_string();
+            return;
+        };
+        let current = std::mem::replace(&mut self.prompt, prompt);
+        self.input_undo.push((current, self.cursor_position));
+        self.cursor_position = cursor.min(self.prompt.chars().count());
+        self.history_index = None;
+        self.selected_suggestion = 0;
+        self.last_input_edit = None;
+        self.diagnostic = "input redone".to_string();
+    }
+
     pub fn insert_str_at_cursor(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.record_input_edit(None);
         let byte_pos = self
             .prompt
             .char_indices()
             .nth(self.cursor_position)
             .map(|(i, _)| i)
             .unwrap_or(self.prompt.len());
-        self.prompt.insert_str(byte_pos, text);
+        self.prompt.insert_str(byte_pos, &text);
         self.cursor_position += text.chars().count();
         self.history_index = None;
         self.selected_suggestion = 0;
@@ -36,6 +91,7 @@ impl App {
         if self.prompt_history.is_empty() {
             return;
         }
+        self.record_input_edit(None);
         match self.history_index {
             None => {
                 self.draft_prompt = self.prompt.clone();
@@ -66,6 +122,7 @@ impl App {
 
     pub fn navigate_history_down(&mut self) {
         if let Some(idx) = self.history_index {
+            self.record_input_edit(None);
             if idx + 1 < self.prompt_history.len() {
                 let next_idx = idx + 1;
                 self.history_index = Some(next_idx);
@@ -97,8 +154,12 @@ impl App {
         self.selected_suggestion = 0;
         self.cursor_position = 0;
         let mut input = std::mem::take(&mut self.prompt);
+        self.clear_input_history();
         let trimmed_start = input.trim_start();
         if trimmed_start.is_empty() {
+            if !self.pending_prompts.is_empty() {
+                self.steer_first_queued_prompt();
+            }
             return;
         }
         let is_slash = trimmed_start.starts_with('/');
@@ -196,6 +257,10 @@ impl App {
                 self.open_git_dialog();
                 return;
             }
+            if trimmed == "/mcps" || trimmed == "/mcp" {
+                self.open_mcp_dialog();
+                return;
+            }
             if trimmed == "/skills" || trimmed == "/skill" {
                 self.open_skills_dialog();
                 return;
@@ -236,48 +301,68 @@ impl App {
                 return;
             }
             if trimmed == "/compact" {
-                self.request_runtime_cancel();
-                self.reset_turn_view(false);
-                self.stream_parts.clear();
-                self.tool_rows.clear();
-                self.expanded_tool_rows.clear();
-                self.status = ConversationStatus::Idle;
-                if self.transcript.len() > 1024 {
-                    let split_idx = self.transcript.len() - 1024;
-                    let boundary = find_user_turn_boundary(&self.transcript, split_idx)
-                        .unwrap_or_else(|| ceil_char_boundary(&self.transcript, split_idx));
-                    let tail = self.transcript[boundary..].to_string();
-                    self.transcript = format!("[earlier transcript compacted]\n{tail}");
-                    self.diagnostic = "session context compacted".to_string();
-                } else {
-                    self.diagnostic = "transcript is already compact".to_string();
-                }
+                self.compact_session();
                 return;
             }
             if trimmed == "/copy" {
-                if !self.transcript.is_empty() {
-                    match SystemClipboard.set_text(&self.transcript) {
-                        Ok(()) => {
-                            self.diagnostic = format!(
-                                "transcript copied to clipboard ({} bytes)",
-                                self.transcript.len()
-                            );
-                        }
-                        Err(err) => {
-                            self.diagnostic = format!("failed to copy transcript: {err}");
-                        }
-                    }
+                self.copy_transcript();
+                return;
+            }
+            if trimmed == "/settings" {
+                self.open_settings_dialog();
+                return;
+            }
+            if trimmed == "/thinking" {
+                self.tui_settings.thinking = self.tui_settings.thinking.toggle();
+                self.persist_tui_settings();
+                self.diagnostic =
+                    format!("thinking display: {}", self.tui_settings.thinking.as_str());
+                return;
+            }
+            if trimmed == "/queued" {
+                self.open_queued_prompts_dialog();
+                return;
+            }
+            if trimmed == "/stash" || trimmed == "/stash list" {
+                self.open_stash_dialog();
+                return;
+            }
+            if trimmed == "/stash pop" {
+                self.pop_stash_to_prompt(0);
+                return;
+            }
+            if let Some(rest) = trimmed.strip_prefix("/stash push") {
+                let text = rest.trim();
+                if text.is_empty() {
+                    self.diagnostic =
+                        "usage: /stash push <text> (or use Palette -> Stash prompt)".to_string();
                 } else {
-                    let status = format!("{} ({})", self.model, self.provider);
-                    match SystemClipboard.set_text(&status) {
-                        Ok(()) => {
-                            self.diagnostic =
-                                format!("copied status: {} ({})", self.model, self.provider);
-                        }
-                        Err(err) => {
-                            self.diagnostic = format!("failed to copy status: {err}");
-                        }
-                    }
+                    self.prompt = text.to_string();
+                    self.stash_current_prompt();
+                }
+                return;
+            }
+            if trimmed == "/variant" {
+                self.open_variants_dialog();
+                return;
+            }
+            if let Some(arg) = trimmed.strip_prefix("/variant ") {
+                let v = arg.trim();
+                if v.is_empty() {
+                    self.open_variants_dialog();
+                } else if v.eq_ignore_ascii_case("default")
+                    || v.eq_ignore_ascii_case("off")
+                    || v.eq_ignore_ascii_case("none")
+                {
+                    self.set_active_variant(None);
+                } else {
+                    self.set_active_variant(Some(v.to_string()));
+                }
+                return;
+            }
+            if trimmed == "/background" {
+                if !self.background_running_tools() {
+                    self.diagnostic = "no running foreground shell to background".to_string();
                 }
                 return;
             }
@@ -291,12 +376,7 @@ impl App {
                     model_suggestions.first().cloned()
                 };
                 if let Some(chosen) = chosen {
-                    if let Some((provider, model)) = split_provider_model(&chosen) {
-                        self.provider = bounded(provider.to_string(), MAX_IDENTITY_BYTES);
-                        self.model = bounded(model.to_string(), MAX_IDENTITY_BYTES);
-                    } else {
-                        self.model = bounded(chosen.clone(), MAX_IDENTITY_BYTES);
-                    }
+                    self.select_provider_and_model(&chosen);
                     self.diagnostic = format!("model switched to: {chosen}");
                     return;
                 }
@@ -315,7 +395,7 @@ impl App {
                 }),
                 Ok(CommandOutput::Exit) => self.running = false,
                 Ok(CommandOutput::SessionCreated(session)) => {
-                    self.switch_session(session.id);
+                    self.open_session_in_tab_with_title(session.id, Some(&session.title));
                     self.transcript.clear();
                     self.active_tool = None;
                     self.tool_rows.clear();
@@ -342,26 +422,99 @@ impl App {
     }
 
     pub fn submit_user_prompt(&mut self, prompt: &str) {
-        if self.status == ConversationStatus::Active || self.active_generation_id.is_some() {
-            self.request_runtime_cancel();
+        if prompt.len() > crate::persistence::MAX_MESSAGE_BYTES {
+            self.diagnostic = format!(
+                "message too large: {} bytes (max {})",
+                prompt.len(),
+                crate::persistence::MAX_MESSAGE_BYTES
+            );
+            return;
         }
+
+        let has_live_turn_driver = self.runtime.is_some()
+            || self.runtime_events.is_some()
+            || self.active_generation_id.is_some();
+        let is_active = self.status == ConversationStatus::Active && has_live_turn_driver;
+        if is_active {
+            let provider = if self.provider.is_empty() {
+                "anthropic".to_string()
+            } else {
+                self.provider.clone()
+            };
+            let model = if self.model.is_empty() {
+                "claude-3-7-sonnet".to_string()
+            } else {
+                self.model.clone()
+            };
+            let agent_mode = match self.mode {
+                ConversationMode::Plan => "plan",
+                ConversationMode::Build => "build",
+            };
+            let variant = self.active_variant().map(ToString::to_string);
+
+            if let Some(runtime) = self.runtime.as_ref() {
+                let Some(session_id) = self.active_session_id else {
+                    return;
+                };
+                match runtime.start_generation_admitted_request(GenerationRequest {
+                    session_id,
+                    agent_mode,
+                    provider: &provider,
+                    model: &model,
+                    variant: variant.as_deref(),
+                    prompt,
+                    mcp: None,
+                }) {
+                    Ok(input_id) => {
+                        if let Ok(pending) = runtime.pending_inputs(session_id)
+                            && !pending.is_empty()
+                        {
+                            self.pending_prompts = pending
+                                .into_iter()
+                                .map(|item| PendingPromptItem {
+                                    id: item.id,
+                                    content: item.content,
+                                    delivery: item.delivery.as_str().to_string(),
+                                })
+                                .collect();
+                        } else if !self.pending_prompts.iter().any(|p| p.id == input_id) {
+                            self.pending_prompts.push(PendingPromptItem {
+                                id: input_id,
+                                content: prompt.to_string(),
+                                delivery: "queue".to_string(),
+                            });
+                        }
+                        self.diagnostic =
+                            "prompt queued (Enter on empty input to steer, /queued to manage)"
+                                .to_string();
+                    }
+                    Err(error) => {
+                        self.diagnostic = error;
+                    }
+                }
+            } else {
+                let id = self.next_local_input_id;
+                self.next_local_input_id += 1;
+                self.pending_prompts.push(PendingPromptItem {
+                    id,
+                    content: prompt.to_string(),
+                    delivery: "queue".to_string(),
+                });
+                self.diagnostic =
+                    "prompt queued (Enter on empty input to steer, /queued to manage)".to_string();
+            }
+            return;
+        }
+
         self.reset_turn_view(false);
         self.status = ConversationStatus::Idle;
         self.session_listings.clear();
         if self.runtime.is_some() {
-            if prompt.len() > crate::persistence::MAX_MESSAGE_BYTES {
-                self.diagnostic = format!(
-                    "message too large: {} bytes (max {})",
-                    prompt.len(),
-                    crate::persistence::MAX_MESSAGE_BYTES
-                );
-                return;
-            }
             if self.active_session_id.is_none()
                 && let Some(runtime) = self.runtime.as_ref()
                 && let Ok(id) = runtime.create_session(1, prompt)
             {
-                self.switch_session(id);
+                self.open_session_in_tab_with_title(id, Some(prompt));
             }
             let Some(session_id) = self.active_session_id else {
                 return;
@@ -381,10 +534,18 @@ impl App {
                 ConversationMode::Plan => "plan",
                 ConversationMode::Build => "build",
             };
+            let variant = self.active_variant().map(ToString::to_string);
 
             if let Some(runtime) = self.runtime.as_ref()
-                && let Err(error) =
-                    runtime.start_generation(session_id, agent_mode, &provider, &model, prompt)
+                && let Err(error) = runtime.start_generation_request(GenerationRequest {
+                    session_id,
+                    agent_mode,
+                    provider: &provider,
+                    model: &model,
+                    variant: variant.as_deref(),
+                    prompt,
+                    mcp: None,
+                })
             {
                 self.diagnostic = error;
                 return;
@@ -408,7 +569,7 @@ impl App {
             if self.active_session_id.is_none()
                 && let Ok(session) = self.command_service.create_session(prompt)
             {
-                self.switch_session(session.id);
+                self.open_session_in_tab_with_title(session.id, Some(prompt));
             }
             if let Some(session_id) = self.active_session_id {
                 let _ = self
@@ -450,24 +611,275 @@ impl App {
         }
     }
 
+    pub(crate) fn compact_session(&mut self) {
+        self.request_runtime_cancel();
+        self.reset_turn_view(false);
+        self.stream_parts.clear();
+        self.tool_rows.clear();
+        self.expanded_tool_rows.clear();
+        self.collapsed_tool_rows.clear();
+        self.status = ConversationStatus::Idle;
+        if self.transcript.len() > 1024 {
+            let split_idx = self.transcript.len() - 1024;
+            let boundary = find_user_turn_boundary(&self.transcript, split_idx)
+                .unwrap_or_else(|| ceil_char_boundary(&self.transcript, split_idx));
+            let tail = self.transcript[boundary..].to_string();
+            self.transcript = format!("[earlier transcript compacted]\n{tail}");
+            self.diagnostic = "session context compacted".to_string();
+        } else {
+            self.diagnostic = "transcript is already compact".to_string();
+        }
+    }
+
+    pub(crate) fn copy_transcript(&mut self) {
+        if !self.transcript.is_empty() {
+            match SystemClipboard.set_text(&self.transcript) {
+                Ok(()) => {
+                    self.diagnostic = format!(
+                        "transcript copied to clipboard ({} bytes)",
+                        self.transcript.len()
+                    );
+                }
+                Err(error) => {
+                    self.diagnostic = format!("failed to copy transcript: {error}");
+                }
+            }
+        } else {
+            let status = format!("{} ({})", self.model, self.provider);
+            match SystemClipboard.set_text(&status) {
+                Ok(()) => {
+                    self.diagnostic = format!("copied status: {} ({})", self.model, self.provider);
+                }
+                Err(error) => {
+                    self.diagnostic = format!("failed to copy status: {error}");
+                }
+            }
+        }
+    }
+
+    fn cursor_byte_index(&self, character_index: usize) -> usize {
+        self.prompt
+            .char_indices()
+            .nth(character_index)
+            .map(|(index, _)| index)
+            .unwrap_or(self.prompt.len())
+    }
+
+    fn delete_char_range(&mut self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        self.record_input_edit(Some(InputEditKind::Deleting));
+        let start_byte = self.cursor_byte_index(start);
+        let end_byte = self.cursor_byte_index(end);
+        self.prompt.replace_range(start_byte..end_byte, "");
+        self.cursor_position = start;
+        self.history_index = None;
+        self.selected_suggestion = 0;
+    }
+
+    fn previous_word_index(chars: &[char], cursor: usize) -> usize {
+        let mut index = cursor.min(chars.len());
+        while index > 0 && !is_word_char(chars[index - 1]) {
+            index -= 1;
+        }
+        while index > 0 && is_word_char(chars[index - 1]) {
+            index -= 1;
+        }
+        index
+    }
+
+    fn next_word_index(chars: &[char], cursor: usize) -> usize {
+        let mut index = cursor.min(chars.len());
+        while index < chars.len() && !is_word_char(chars[index]) {
+            index += 1;
+        }
+        while index < chars.len() && is_word_char(chars[index]) {
+            index += 1;
+        }
+        while index < chars.len() && !is_word_char(chars[index]) {
+            index += 1;
+        }
+        index.min(chars.len())
+    }
+
+    fn line_start_index(chars: &[char], cursor: usize) -> usize {
+        chars[..cursor.min(chars.len())]
+            .iter()
+            .rposition(|character| *character == '\n')
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    }
+
+    fn line_end_index(chars: &[char], cursor: usize) -> usize {
+        chars[cursor.min(chars.len())..]
+            .iter()
+            .position(|character| *character == '\n')
+            .map(|index| cursor + index)
+            .unwrap_or(chars.len())
+    }
+
+    fn move_cursor_vertical(&mut self, delta: isize) -> bool {
+        let chars: Vec<char> = self.prompt.chars().collect();
+        let cursor = self.cursor_position.min(chars.len());
+        let line_start = Self::line_start_index(&chars, cursor);
+        let line_end = Self::line_end_index(&chars, cursor);
+        let column = cursor - line_start;
+        if delta < 0 {
+            if line_start == 0 {
+                return false;
+            }
+            let previous_end = line_start - 1;
+            let previous_start = chars[..previous_end]
+                .iter()
+                .rposition(|character| *character == '\n')
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            self.cursor_position = previous_start + column.min(previous_end - previous_start);
+            true
+        } else {
+            if line_end >= chars.len() {
+                return false;
+            }
+            let next_start = line_end + 1;
+            let next_end = chars[next_start..]
+                .iter()
+                .position(|character| *character == '\n')
+                .map(|index| next_start + index)
+                .unwrap_or(chars.len());
+            self.cursor_position = next_start + column.min(next_end - next_start);
+            true
+        }
+    }
+
+    fn delete_word_backward(&mut self) {
+        let chars: Vec<char> = self.prompt.chars().collect();
+        let start = Self::previous_word_index(&chars, self.cursor_position);
+        self.delete_char_range(start, self.cursor_position);
+    }
+
+    fn delete_word_forward(&mut self) {
+        let chars: Vec<char> = self.prompt.chars().collect();
+        let end = Self::next_word_index(&chars, self.cursor_position);
+        self.delete_char_range(self.cursor_position, end);
+    }
+
+    fn delete_to_line_start(&mut self) {
+        let chars: Vec<char> = self.prompt.chars().collect();
+        let start = Self::line_start_index(&chars, self.cursor_position);
+        self.delete_char_range(start, self.cursor_position);
+    }
+
+    fn delete_to_line_end(&mut self) {
+        let chars: Vec<char> = self.prompt.chars().collect();
+        let end = Self::line_end_index(&chars, self.cursor_position);
+        self.delete_char_range(self.cursor_position, end);
+    }
+
+    fn delete_line(&mut self) {
+        let chars: Vec<char> = self.prompt.chars().collect();
+        let mut start = Self::line_start_index(&chars, self.cursor_position);
+        let mut end = Self::line_end_index(&chars, self.cursor_position);
+        if end < chars.len() && chars[end] == '\n' {
+            end += 1;
+        } else if start > 0 && start == end {
+            start -= 1;
+        }
+        self.delete_char_range(start, end);
+    }
+
+    fn clear_prompt_or_exit(&mut self) {
+        if self.prompt.is_empty() {
+            self.running = false;
+            return;
+        }
+        self.record_input_edit(None);
+        self.prompt.clear();
+        self.cursor_position = 0;
+        self.history_index = None;
+        self.selected_suggestion = 0;
+        self.diagnostic = "input cleared".to_string();
+    }
+
+    fn delete_or_exit(&mut self) {
+        if self.prompt.is_empty() {
+            self.running = false;
+            return;
+        }
+        if self.cursor_position < self.prompt.chars().count() {
+            let cursor = self.cursor_position;
+            self.delete_char_range(cursor, cursor + 1);
+        }
+    }
+
+    fn scroll_step(&mut self) -> u16 {
+        let base = self.tui_settings.scroll_speed.clamp(1, 20);
+        if !self.tui_settings.scroll_acceleration {
+            self.scroll_streak = 0;
+            return base;
+        }
+        let now = std::time::Instant::now();
+        if self
+            .last_scroll_at
+            .is_some_and(|prev| now.duration_since(prev) <= std::time::Duration::from_millis(80))
+        {
+            self.scroll_streak = (self.scroll_streak + 1).min(6);
+        } else {
+            self.scroll_streak = 0;
+        }
+        self.last_scroll_at = Some(now);
+        let multiplier = 1 + (self.scroll_streak / 2);
+        base.saturating_mul(multiplier)
+    }
+
+    pub(crate) fn jump_to_last_user_message(&mut self) {
+        if let Some(last_user_idx) = self
+            .stream_parts
+            .iter()
+            .rposition(|part| matches!(part, StreamPart::User(_)))
+        {
+            let mut lines_below = 0u16;
+            for part in &self.stream_parts[last_user_idx + 1..] {
+                lines_below = lines_below.saturating_add(match part {
+                    StreamPart::Text(text) => (text.lines().count().max(1) as u16) + 1,
+                    StreamPart::Reasoning(_) | StreamPart::ReasoningDone { .. } => 2,
+                    StreamPart::Tool(_) => 1,
+                    StreamPart::User(text) => (text.lines().count().max(1) as u16) + 2,
+                });
+            }
+            self.chat_scroll = lines_below;
+        } else {
+            self.scroll_to_bottom();
+        }
+    }
+
     pub(crate) fn handle_input_key(&mut self, input: Input) {
+        if !matches!(
+            input,
+            Input::Character(_) | Input::Backspace | Input::Delete
+        ) {
+            self.last_input_edit = None;
+        }
         match input {
-            Input::Quit => {
-                if self.session_listings.is_empty() {
-                    self.running = false;
-                } else {
-                    self.session_listings.clear();
-                }
-            }
+            Input::Quit => self.running = false,
             Input::Cancel => {
-                if let Some(generation_id) = self.active_generation_id {
-                    self.ignored_generation_ids.insert(generation_id);
+                if matches!(self.status, ConversationStatus::Active)
+                    || self.active_generation_id.is_some()
+                {
+                    if let Some(generation_id) = self.active_generation_id {
+                        self.ignored_generation_ids.insert(generation_id);
+                    }
+                    self.request_runtime_cancel();
+                    self.reset_turn_view(false);
+                    self.cancellation_pending = true;
+                    self.status = ConversationStatus::Cancelled;
+                    self.diagnostic = "session interrupted".to_string();
+                } else {
+                    self.diagnostic = "nothing to interrupt".to_string();
                 }
-                self.request_runtime_cancel();
-                self.reset_turn_view(false);
-                self.cancellation_pending = true;
-                self.status = ConversationStatus::Cancelled;
             }
+            Input::ClearOrExit => self.clear_prompt_or_exit(),
+            Input::DeleteOrExit => self.delete_or_exit(),
             Input::Clear => {
                 self.request_runtime_cancel();
                 self.reset_turn_view(true);
@@ -475,13 +887,9 @@ impl App {
                 self.diagnostic = "screen cleared".to_string();
             }
             Input::Character(character) => {
+                self.record_input_edit(Some(InputEditKind::Typing));
                 self.history_index = None;
-                let byte_idx = self
-                    .prompt
-                    .char_indices()
-                    .nth(self.cursor_position)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.prompt.len());
+                let byte_idx = self.cursor_byte_index(self.cursor_position);
                 self.prompt.insert(byte_idx, character);
                 self.cursor_position += 1;
                 self.selected_suggestion = 0;
@@ -489,38 +897,63 @@ impl App {
             Input::Backspace => {
                 self.history_index = None;
                 if self.cursor_position > 0 {
-                    let prev_pos = self.cursor_position - 1;
-                    if let Some((byte_idx, _)) = self.prompt.char_indices().nth(prev_pos) {
-                        self.prompt.remove(byte_idx);
-                        self.cursor_position = prev_pos;
-                    }
+                    self.record_input_edit(Some(InputEditKind::Deleting));
+                    let previous = self.cursor_position - 1;
+                    let byte_idx = self.cursor_byte_index(previous);
+                    self.prompt.remove(byte_idx);
+                    self.cursor_position = previous;
                 }
                 self.selected_suggestion = 0;
             }
+            Input::Delete => {
+                if self.cursor_position < self.prompt.chars().count() {
+                    let cursor = self.cursor_position;
+                    self.delete_char_range(cursor, cursor + 1);
+                }
+            }
+            Input::DeleteWord => self.delete_word_backward(),
+            Input::DeleteWordForward => self.delete_word_forward(),
+            Input::DeleteToLineStart => self.delete_to_line_start(),
+            Input::DeleteToLineEnd => self.delete_to_line_end(),
+            Input::DeleteLine => self.delete_line(),
             Input::Paste => {
                 if let Ok(text) = SystemClipboard.get_text() {
                     self.insert_str_at_cursor(&text);
                 }
             }
+            Input::Newline => {
+                self.history_index = None;
+                self.insert_str_at_cursor("\n");
+            }
+            Input::Undo => self.undo_input(),
+            Input::Redo => self.redo_input(),
             Input::Up => {
                 if self.suggestion_count() > 0 {
                     self.previous_suggestion();
-                } else {
+                } else if !self.move_cursor_vertical(-1) {
                     self.navigate_history_up();
                 }
             }
             Input::Down => {
                 if self.suggestion_count() > 0 {
                     self.next_suggestion();
-                } else {
+                } else if !self.move_cursor_vertical(1) {
                     self.navigate_history_down();
                 }
             }
             Input::ScrollUp => {
-                self.scroll_up(3);
+                let step = self.scroll_step();
+                self.scroll_up(step);
             }
             Input::ScrollDown => {
-                self.scroll_down(3);
+                let step = self.scroll_step();
+                self.scroll_down(step);
+            }
+            Input::HalfPageUp => {
+                self.scroll_up(8);
+            }
+            Input::HalfPageDown => {
+                self.scroll_down(8);
             }
             Input::PageUp => {
                 self.scroll_up(15);
@@ -528,24 +961,78 @@ impl App {
             Input::PageDown => {
                 self.scroll_down(15);
             }
-            Input::Home => {
-                self.cursor_position = 0;
+            Input::FirstMessage => {
                 self.scroll_to_top();
             }
-            Input::End => {
-                self.cursor_position = self.prompt.chars().count();
+            Input::LastMessage => {
                 self.scroll_to_bottom();
+            }
+            Input::JumpLastUserMessage => {
+                self.jump_to_last_user_message();
+            }
+            Input::Home => {
+                if self.prompt.is_empty() {
+                    self.cursor_position = 0;
+                    self.scroll_to_top();
+                } else {
+                    let chars: Vec<char> = self.prompt.chars().collect();
+                    self.cursor_position = Self::line_start_index(&chars, self.cursor_position);
+                }
+            }
+            Input::End => {
+                if self.prompt.is_empty() {
+                    self.cursor_position = self.prompt.chars().count();
+                    self.scroll_to_bottom();
+                } else {
+                    let chars: Vec<char> = self.prompt.chars().collect();
+                    self.cursor_position = Self::line_end_index(&chars, self.cursor_position);
+                }
             }
             Input::Left => {
                 self.cursor_position = self.cursor_position.saturating_sub(1);
             }
+            Input::BackgroundOrLeft => {
+                if self.prompt.is_empty() && self.has_running_shell() {
+                    self.background_running_tools();
+                } else {
+                    self.cursor_position = self.cursor_position.saturating_sub(1);
+                }
+            }
             Input::Right => {
                 self.cursor_position = (self.cursor_position + 1).min(self.prompt.chars().count());
+            }
+            Input::WordLeft => {
+                let chars: Vec<char> = self.prompt.chars().collect();
+                self.cursor_position = Self::previous_word_index(&chars, self.cursor_position);
+            }
+            Input::WordRight => {
+                let chars: Vec<char> = self.prompt.chars().collect();
+                self.cursor_position = Self::next_word_index(&chars, self.cursor_position);
             }
             Input::Submit => self.submit_prompt(),
             Input::WhichKey => {
                 self.which_key.toggle();
             }
+            Input::Leader => {
+                self.leader_pending = true;
+                self.leader_started_at = Some(std::time::Instant::now());
+                self.which_key.show();
+                self.diagnostic =
+                    "Leader: n new · l sessions · m models · a agents · c compact · q quit"
+                        .to_string();
+            }
+            Input::Palette => self.open_palette(),
+            Input::OpenMenu => self.open_sessions_dialog(),
+            Input::RenameSession => self.open_session_rename_dialog(),
+            Input::PinSession => self.toggle_active_session_pinned(),
+            Input::CycleModel => self.cycle_model(false),
+            Input::CycleModelReverse => self.cycle_model(true),
+            Input::CycleVariant => self.cycle_variant(),
+            Input::SessionNext => self.cycle_session(true),
+            Input::SessionPrevious => self.cycle_session(false),
+            Input::ReopenTab => self.reopen_closed_session_tab(),
+            Input::SelectSession(index) => self.select_session(index),
+            Input::CycleAgent => self.toggle_mode(),
             Input::ToggleMode => {
                 if !self.matching_suggestions().is_empty()
                     || self.prompt.starts_with("/model ")
@@ -561,4 +1048,8 @@ impl App {
             }
         }
     }
+}
+
+fn is_word_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_' || character == '-'
 }

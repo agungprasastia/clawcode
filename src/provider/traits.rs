@@ -132,6 +132,7 @@ pub struct StreamRequest {
     pub messages: Vec<ChatMessage>,
     pub provider: Option<String>,
     pub tools: Vec<serde_json::Value>,
+    pub variant: Option<String>,
 }
 
 impl StreamRequest {
@@ -154,6 +155,7 @@ impl StreamRequest {
             max_output_tokens,
             provider: None,
             tools: Vec::new(),
+            variant: None,
         }
     }
 
@@ -169,6 +171,13 @@ impl StreamRequest {
 
     pub fn with_tools(mut self, tools: Vec<serde_json::Value>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    pub fn with_variant(mut self, variant: Option<String>) -> Self {
+        self.variant = variant
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         self
     }
 }

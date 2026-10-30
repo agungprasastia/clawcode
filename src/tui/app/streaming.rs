@@ -1,12 +1,32 @@
+use unicode_width::UnicodeWidthStr;
+
 use super::tool_rows::ToolRowState;
 use super::util::{ceil_char_boundary, find_user_turn_boundary, floor_char_boundary};
 use super::{App, ConversationStatus};
+
+fn estimate_visual_rows(text: &str, terminal_width: u16) -> u16 {
+    let wrap_width = terminal_width.saturating_sub(4).max(1) as usize;
+    let mut rows = 0usize;
+    for line in text.split('\n') {
+        let w = UnicodeWidthStr::width(line);
+        let r = if w == 0 { 1 } else { w.div_ceil(wrap_width) };
+        rows = rows.saturating_add(r);
+    }
+    rows.min(u16::MAX as usize) as u16
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamPart {
     User(String),
     Text(String),
+    /// Reasoning that is still streaming. Only the tail of the stream may be
+    /// in this state; completed steps are converted to [`Self::ReasoningDone`]
+    /// so their timer and label stop moving.
     Reasoning(String),
+    ReasoningDone {
+        text: String,
+        duration: std::time::Duration,
+    },
     Tool(String),
 }
 
@@ -20,6 +40,8 @@ impl App {
             self.stream_parts.clear();
             self.tool_rows.clear();
             self.expanded_tool_rows.clear();
+            self.collapsed_tool_rows.clear();
+            self.pending_prompts.clear();
         }
         for row in &mut self.tool_rows {
             if matches!(row.state, ToolRowState::Pending | ToolRowState::Running) {
@@ -31,13 +53,12 @@ impl App {
         self.text_stream_active = false;
         self.reasoning_buffer.clear();
         self.reasoning_start = None;
-        self.reasoning_duration = None;
         self.reasoning_active = false;
         self.active_tool = None;
         if let Some(generation_id) = self.active_generation_id.take() {
             self.ignored_generation_ids.insert(generation_id);
         }
-        self.thought_expanded = false;
+        self.thought_expanded = self.tui_settings.thinking == crate::config::ThinkingDisplay::Show;
         self.chat_scroll = 0;
     }
 
@@ -74,47 +95,43 @@ impl App {
     }
 
     pub fn reasoning_elapsed_seconds(&self) -> Option<f64> {
-        self.reasoning_duration
-            .map(|d| d.as_secs_f64())
-            .or_else(|| self.reasoning_start.map(|t| t.elapsed().as_secs_f64()))
+        self.reasoning_start.map(|t| t.elapsed().as_secs_f64())
     }
 
-    pub(crate) fn record_reasoning_duration(&mut self) {
-        if let Some(start) = self.reasoning_start
-            && self.reasoning_duration.is_none()
-        {
-            self.reasoning_duration = Some(start.elapsed());
-        }
-    }
-
+    /// Finish the current reasoning segment. The live stream part is frozen
+    /// with its duration so later steps get their own "Thinking"/"Thought"
+    /// entry instead of mutating this one.
     pub fn flush_reasoning(&mut self) {
-        if self.reasoning_buffer.trim().is_empty() {
-            self.reasoning_buffer.clear();
-            self.reasoning_start = None;
-            self.reasoning_duration = None;
-            self.reasoning_active = false;
-            return;
-        }
         let duration = self
-            .reasoning_duration
-            .or_else(|| self.reasoning_start.map(|t| t.elapsed()))
-            .unwrap_or_default()
-            .as_secs_f64();
-        let dur_str = format!("{:.1}s", duration.max(0.1));
-
-        let mut snippet = String::new();
-        if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
-            snippet.push('\n');
+            .reasoning_start
+            .map(|t| t.elapsed())
+            .unwrap_or_default();
+        if let Some(index) = self
+            .stream_parts
+            .iter()
+            .rposition(|p| matches!(p, StreamPart::Reasoning(_)))
+        {
+            let text = match &mut self.stream_parts[index] {
+                StreamPart::Reasoning(text) => std::mem::take(text),
+                _ => String::new(),
+            };
+            self.stream_parts[index] = StreamPart::ReasoningDone { text, duration };
         }
-        if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-            snippet.push('\n');
+        if !self.reasoning_buffer.trim().is_empty() {
+            let dur_str = format!("{:.1}s", duration.as_secs_f64().max(0.1));
+            let mut snippet = String::new();
+            if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+                snippet.push('\n');
+            }
+            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                snippet.push('\n');
+            }
+            snippet.push_str(&format!("Thought for {dur_str}\n\n"));
+            self.transcript.push_str(&snippet);
+            self.truncate_transcript();
         }
-        snippet.push_str(&format!("Thought for {dur_str}\n\n"));
-        self.transcript.push_str(&snippet);
-        self.truncate_transcript();
         self.reasoning_buffer.clear();
         self.reasoning_start = None;
-        self.reasoning_duration = None;
         self.reasoning_active = false;
     }
 
@@ -139,39 +156,81 @@ impl App {
 
     pub(crate) fn push_stream_part(&mut self, part: StreamPart) {
         self.ensure_stream_parts();
+        if !matches!(part, StreamPart::Reasoning(_)) {
+            self.flush_reasoning();
+        }
+        let sticky = self.chat_scroll > 0 && self.chat_scroll < u16::MAX;
+        let term_width = self.terminal_size.get().0;
+        let mut added_rows = 0u16;
         match part {
             StreamPart::User(prompt) => {
+                if sticky {
+                    added_rows = estimate_visual_rows(&prompt, term_width).saturating_add(2);
+                }
                 self.stream_parts.push(StreamPart::User(prompt));
             }
             StreamPart::Reasoning(delta) => {
-                let last_user_idx = self
-                    .stream_parts
-                    .iter()
-                    .rposition(|p| matches!(p, StreamPart::User(_)))
-                    .unwrap_or(0);
-                if let Some(StreamPart::Reasoning(existing)) = self.stream_parts[last_user_idx..]
-                    .iter_mut()
-                    .find(|p| matches!(p, StreamPart::Reasoning(_)))
-                {
+                // Only extend the trailing part. A model step that reasons,
+                // calls tools, then reasons again must produce a second
+                // reasoning entry after the tools, not merge into the first.
+                if !matches!(self.stream_parts.last(), Some(StreamPart::Reasoning(_))) {
+                    self.flush_reasoning();
+                }
+                let thought_expanded = self.thought_expanded;
+                if let Some(StreamPart::Reasoning(existing)) = self.stream_parts.last_mut() {
+                    let before = if sticky && thought_expanded {
+                        estimate_visual_rows(existing, term_width)
+                    } else {
+                        0
+                    };
                     existing.push_str(&delta);
                     if existing.len() > Self::MAX_TRANSCRIPT_BYTES {
                         existing
                             .truncate(floor_char_boundary(existing, Self::MAX_TRANSCRIPT_BYTES));
                     }
+                    if sticky && thought_expanded {
+                        let after = estimate_visual_rows(existing, term_width);
+                        added_rows = after.saturating_sub(before);
+                    }
                 } else {
+                    if sticky {
+                        added_rows = if thought_expanded {
+                            estimate_visual_rows(&delta, term_width).saturating_add(1)
+                        } else {
+                            1
+                        };
+                    }
                     self.stream_parts.push(StreamPart::Reasoning(delta));
                 }
             }
             StreamPart::Text(delta) => {
                 if let Some(StreamPart::Text(existing)) = self.stream_parts.last_mut() {
+                    let before = if sticky {
+                        estimate_visual_rows(existing, term_width)
+                    } else {
+                        0
+                    };
                     existing.push_str(&delta);
                     if existing.len() > Self::MAX_TRANSCRIPT_BYTES {
                         existing
                             .truncate(floor_char_boundary(existing, Self::MAX_TRANSCRIPT_BYTES));
                     }
+                    if sticky {
+                        let after = estimate_visual_rows(existing, term_width);
+                        added_rows = after.saturating_sub(before);
+                    }
                 } else {
+                    if sticky {
+                        added_rows = estimate_visual_rows(&delta, term_width).saturating_add(1);
+                    }
                     self.stream_parts.push(StreamPart::Text(delta));
                 }
+            }
+            done @ StreamPart::ReasoningDone { .. } => {
+                if sticky {
+                    added_rows = 2;
+                }
+                self.stream_parts.push(done);
             }
             StreamPart::Tool(call_id) => {
                 if !self
@@ -179,12 +238,18 @@ impl App {
                     .iter()
                     .any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id))
                 {
+                    if sticky {
+                        added_rows = 1;
+                    }
                     self.stream_parts.push(StreamPart::Tool(call_id.clone()));
                 }
                 if let Some(row) = self.tool_rows.iter_mut().find(|r| r.call_id == call_id) {
                     row.expandable = row.compute_expandable();
                 }
             }
+        }
+        if sticky && added_rows > 0 {
+            self.chat_scroll = self.chat_scroll.saturating_add(added_rows);
         }
         if self.stream_parts.len() > 1024 {
             self.stream_parts.drain(..self.stream_parts.len() - 1024);
@@ -193,11 +258,15 @@ impl App {
 
     pub(crate) fn push_tool_part(&mut self, call_id: String) {
         self.ensure_stream_parts();
+        self.flush_reasoning();
         if !self
             .stream_parts
             .iter()
             .any(|part| matches!(part, StreamPart::Tool(id) if id == &call_id))
         {
+            if self.chat_scroll > 0 && self.chat_scroll < u16::MAX {
+                self.chat_scroll = self.chat_scroll.saturating_add(1);
+            }
             self.stream_parts.push(StreamPart::Tool(call_id.clone()));
         }
         if let Some(row) = self.tool_rows.iter_mut().find(|r| r.call_id == call_id) {

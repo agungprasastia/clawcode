@@ -10,7 +10,7 @@ fn version_flag_starts_and_exits_cleanly() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
-        "clawcode 0.1.0"
+        "clawcode v0.1.0"
     );
     assert!(output.stderr.is_empty());
 }

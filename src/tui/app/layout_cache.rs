@@ -28,6 +28,14 @@ impl App {
         self.last_quick_actions_area.set(areas);
     }
 
+    pub fn jump_to_latest_area(&self) -> Option<Rect> {
+        self.last_jump_to_latest_area.get()
+    }
+
+    pub fn set_jump_to_latest_area(&self, area: Option<Rect>) {
+        self.last_jump_to_latest_area.set(area);
+    }
+
     pub fn get_or_compute_popup_area(&self) -> Option<Rect> {
         if let Some(area) = self.last_popup_area.get() {
             return Some(area);
@@ -97,9 +105,39 @@ impl App {
     }
 
     pub fn handle_mouse_click(&mut self, x: u16, y: u16) {
+        if !self.tui_settings.mouse {
+            return;
+        }
+        if let Some(badge) = self.last_jump_to_latest_area.get()
+            && x >= badge.x
+            && x < badge.x + badge.width
+            && y >= badge.y
+            && y < badge.y + badge.height
+        {
+            self.scroll_to_bottom();
+            return;
+        }
         if let Some(call_id) = self.tool_row_at(x, y) {
             if call_id == "__thought__" {
                 self.toggle_thought_expanded();
+                return;
+            }
+            if call_id.starts_with("activity:") {
+                self.toggle_tool_expanded(&call_id);
+                self.diagnostic = if self.is_tool_expanded(&call_id) {
+                    "activity group expanded".to_string()
+                } else {
+                    "activity group collapsed".to_string()
+                };
+                return;
+            }
+            if call_id.starts_with("group:") {
+                self.toggle_tool_expanded(&call_id);
+                self.diagnostic = if self.is_tool_expanded(&call_id) {
+                    "exploration group expanded".to_string()
+                } else {
+                    "exploration group collapsed".to_string()
+                };
                 return;
             }
             let expandable = self

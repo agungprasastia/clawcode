@@ -49,11 +49,28 @@ impl WorkspaceRoot {
         let relative = relative.as_ref();
         let stripped_canonical = strip_unc_prefix(&self.canonical_path);
         let stripped_rel = strip_unc_prefix(relative);
+        let canonical_rel = if relative.is_absolute() {
+            fs::canonicalize(relative).ok().or_else(|| {
+                let parent = relative.parent()?;
+                let name = relative.file_name()?;
+                Some(fs::canonicalize(parent).ok()?.join(name))
+            })
+        } else {
+            None
+        };
         let relative = if let Ok(stripped) = relative.strip_prefix(&self.canonical_path) {
             stripped
         } else if let Ok(stripped) = stripped_rel.strip_prefix(stripped_canonical) {
             stripped
         } else if let Ok(stripped) = relative.strip_prefix(stripped_canonical) {
+            stripped
+        } else if let Some(ref can_rel) = canonical_rel
+            && let Ok(stripped) = can_rel.strip_prefix(&self.canonical_path)
+        {
+            stripped
+        } else if let Some(ref can_rel) = canonical_rel
+            && let Ok(stripped) = strip_unc_prefix(can_rel).strip_prefix(stripped_canonical)
+        {
             stripped
         } else {
             relative
