@@ -139,6 +139,31 @@ pub const AVAILABLE_COMMANDS: &[CommandSuggestion] = &[
         template: "/background",
     },
     CommandSuggestion {
+        name: "/timeline",
+        description: "Open session turn timeline & branching (Ctrl+X g)",
+        template: "/timeline",
+    },
+    CommandSuggestion {
+        name: "/undo",
+        description: "Revert last conversation turn & restore file snapshots",
+        template: "/undo",
+    },
+    CommandSuggestion {
+        name: "/redo",
+        description: "Redo most recently reverted turn (Ctrl+X r)",
+        template: "/redo",
+    },
+    CommandSuggestion {
+        name: "/diff",
+        description: "Review modified workspace files & diffs in session",
+        template: "/diff",
+    },
+    CommandSuggestion {
+        name: "/terminal",
+        description: "Toggle embedded terminal pane (Ctrl+X t)",
+        template: "/terminal",
+    },
+    CommandSuggestion {
         name: "/help",
         description: "Show manual, commands & shortcuts",
         template: "/help",

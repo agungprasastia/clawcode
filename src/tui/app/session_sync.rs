@@ -8,6 +8,17 @@ use crate::provider::FinishReason;
 use crate::runtime::RuntimeEvent;
 use crate::tui::dialogs::PendingPromptItem;
 
+#[derive(Debug, Clone)]
+pub struct RevertedTurnSnapshot {
+    pub turn_number: usize,
+    pub prompt: String,
+    pub assistant_text: String,
+    pub stream_parts: Vec<StreamPart>,
+    pub tool_rows: Vec<ToolRow>,
+    pub transcript_tail: String,
+    pub user_message_id: Option<i64>,
+}
+
 /// View state isolated per session: switching sessions must not reset the
 /// draft, transcript, or scroll position of either side.
 #[derive(Debug, Clone)]
@@ -29,6 +40,7 @@ pub struct ClientSessionState {
     pub expanded_tool_rows: HashSet<String>,
     pub collapsed_tool_rows: HashSet<String>,
     pub pending_prompts: Vec<PendingPromptItem>,
+    pub reverted_turns: Vec<RevertedTurnSnapshot>,
 }
 
 impl Default for ClientSessionState {
@@ -51,6 +63,7 @@ impl Default for ClientSessionState {
             expanded_tool_rows: HashSet::new(),
             collapsed_tool_rows: HashSet::new(),
             pending_prompts: Vec::new(),
+            reverted_turns: Vec::new(),
         }
     }
 }
@@ -84,6 +97,7 @@ impl App {
         state.expanded_tool_rows = std::mem::take(&mut self.expanded_tool_rows);
         state.collapsed_tool_rows = std::mem::take(&mut self.collapsed_tool_rows);
         state.pending_prompts = std::mem::take(&mut self.pending_prompts);
+        state.reverted_turns = std::mem::take(&mut self.reverted_turns);
     }
 
     /// Restore the target session's state into the live view fields.
@@ -106,6 +120,7 @@ impl App {
         self.expanded_tool_rows = std::mem::take(&mut state.expanded_tool_rows);
         self.collapsed_tool_rows = std::mem::take(&mut state.collapsed_tool_rows);
         self.pending_prompts = std::mem::take(&mut state.pending_prompts);
+        self.reverted_turns = std::mem::take(&mut state.reverted_turns);
         if self.pending_prompts.is_empty()
             && let Some(runtime) = self.runtime.as_ref()
             && let Ok(pending) = runtime.pending_inputs(session_id)
@@ -125,33 +140,28 @@ impl App {
         self.diagnostic.clear();
         self.selected_suggestion = 0;
 
-        if self.stream_parts.is_empty()
-            && self.transcript.is_empty()
-            && let Ok(messages) = self.command_service.session_messages(session_id)
-        {
-            let tool_calls = self
-                .command_service
-                .session_tool_calls(session_id)
-                .unwrap_or_default();
-            let generation_active = matches!(self.status, ConversationStatus::Active);
-            let mut rendered_calls = HashSet::new();
-            for msg in messages {
-                let trimmed = msg.content.trim();
-                if msg.role == "user" {
-                    self.stream_parts
-                        .push(StreamPart::User(trimmed.to_string()));
-                    if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
-                        if self.transcript.ends_with('\n') {
-                            self.transcript.push('\n');
-                        } else {
-                            self.transcript.push_str("\n\n");
-                        }
-                    }
-                    self.transcript.push_str(&format!("> {trimmed}\n\n"));
-                } else if msg.role == "assistant" {
-                    if !trimmed.is_empty() {
+        if self.stream_parts.is_empty() && self.transcript.is_empty() {
+            let messages_opt = self
+                .runtime
+                .as_ref()
+                .and_then(|r| r.session_messages(session_id).ok())
+                .filter(|m| !m.is_empty())
+                .or_else(|| self.command_service.session_messages(session_id).ok());
+            if let Some(messages) = messages_opt {
+                let tool_calls = self
+                    .runtime
+                    .as_ref()
+                    .and_then(|r| r.session_tool_calls(session_id).ok())
+                    .filter(|tc| !tc.is_empty())
+                    .or_else(|| self.command_service.session_tool_calls(session_id).ok())
+                    .unwrap_or_default();
+                let generation_active = matches!(self.status, ConversationStatus::Active);
+                let mut rendered_calls = HashSet::new();
+                for msg in messages {
+                    let trimmed = msg.content.trim();
+                    if msg.role == "user" {
                         self.stream_parts
-                            .push(StreamPart::Text(trimmed.to_string()));
+                            .push(StreamPart::User(trimmed.to_string()));
                         if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
                             if self.transcript.ends_with('\n') {
                                 self.transcript.push('\n');
@@ -159,53 +169,67 @@ impl App {
                                 self.transcript.push_str("\n\n");
                             }
                         }
-                        self.transcript.push_str(&format!("{trimmed}\n\n"));
+                        self.transcript.push_str(&format!("> {trimmed}\n\n"));
+                    } else if msg.role == "assistant" {
+                        if !trimmed.is_empty() {
+                            self.stream_parts
+                                .push(StreamPart::Text(trimmed.to_string()));
+                            if !self.transcript.is_empty() && !self.transcript.ends_with("\n\n") {
+                                if self.transcript.ends_with('\n') {
+                                    self.transcript.push('\n');
+                                } else {
+                                    self.transcript.push_str("\n\n");
+                                }
+                            }
+                            self.transcript.push_str(&format!("{trimmed}\n\n"));
+                        }
+                        // Durable calls belong to this assistant row. Rebuild
+                        // them in call order instead of relying on the legacy
+                        // `role = "tool"` messages, which cannot represent a
+                        // call that was still running when the app exited.
+                        for call in tool_calls
+                            .iter()
+                            .filter(|call| call.assistant_message_id == msg.id)
+                        {
+                            self.restore_durable_tool_call(call, generation_active);
+                            rendered_calls.insert(call.id);
+                        }
+                    } else if msg.role == "tool" && tool_calls.is_empty() {
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let call_id = format!("msg-{}", msg.id);
+                        let tool_name = if trimmed.starts_with("Plan updated:") {
+                            "update_plan"
+                        } else {
+                            "tool"
+                        };
+                        self.upsert_tool_row(ToolRowUpdate {
+                            call_id: &call_id,
+                            name: tool_name,
+                            state: ToolRowState::Completed,
+                            desc: trimmed.to_string(),
+                            arguments: String::new(),
+                            metadata: None,
+                        });
+                        if let Some(row) = self.tool_rows.iter_mut().find(|r| r.call_id == call_id)
+                        {
+                            row.output = trimmed.to_string();
+                            row.expandable = row.compute_expandable();
+                        }
+                        self.push_tool_part(call_id);
                     }
-                    // Durable calls belong to this assistant row. Rebuild
-                    // them in call order instead of relying on the legacy
-                    // `role = "tool"` messages, which cannot represent a
-                    // call that was still running when the app exited.
-                    for call in tool_calls
-                        .iter()
-                        .filter(|call| call.assistant_message_id == msg.id)
-                    {
+                }
+                // A call can outlive its message row only if a write was
+                // interrupted. Keep it visible rather than silently dropping it.
+                for call in &tool_calls {
+                    if !rendered_calls.contains(&call.id) {
                         self.restore_durable_tool_call(call, generation_active);
-                        rendered_calls.insert(call.id);
                     }
-                } else if msg.role == "tool" && tool_calls.is_empty() {
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let call_id = format!("msg-{}", msg.id);
-                    let tool_name = if trimmed.starts_with("Plan updated:") {
-                        "update_plan"
-                    } else {
-                        "tool"
-                    };
-                    self.upsert_tool_row(ToolRowUpdate {
-                        call_id: &call_id,
-                        name: tool_name,
-                        state: ToolRowState::Completed,
-                        desc: trimmed.to_string(),
-                        arguments: String::new(),
-                        metadata: None,
-                    });
-                    if let Some(row) = self.tool_rows.iter_mut().find(|r| r.call_id == call_id) {
-                        row.output = trimmed.to_string();
-                        row.expandable = row.compute_expandable();
-                    }
-                    self.push_tool_part(call_id);
                 }
+                self.truncate_transcript();
+                self.scroll_to_bottom();
             }
-            // A call can outlive its message row only if a write was
-            // interrupted. Keep it visible rather than silently dropping it.
-            for call in &tool_calls {
-                if !rendered_calls.contains(&call.id) {
-                    self.restore_durable_tool_call(call, generation_active);
-                }
-            }
-            self.truncate_transcript();
-            self.scroll_to_bottom();
         }
 
         if let Some(runtime) = self.runtime.as_ref() {
