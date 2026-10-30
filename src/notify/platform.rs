@@ -58,7 +58,7 @@ pub fn desktop(notification: &Notification) -> Result<(), String> {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -68,7 +68,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn applescript_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -97,12 +97,16 @@ pub fn sound() -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn xml_escape_escapes_xml_special_characters() {
         assert_eq!(
             xml_escape("test <tag> & 'quote' \"double\""),
             "test &lt;tag&gt; &amp; &apos;quote&apos; &quot;double&quot;"
         );
+    }
+
+    #[test]
+    fn applescript_quote_escapes_quotes_and_backslashes() {
+        assert_eq!(applescript_quote(r#"a\b"c"#), r#""a\\b\"c""#);
     }
 }
