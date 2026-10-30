@@ -157,17 +157,39 @@ pub fn runtime_service_with_config_and_db(
         let pid = ProviderId::new(name);
         custom_models.insert(pid, provider_cfg.to_model_infos());
     }
+    if custom_models.is_empty() {
+        custom_models.insert(
+            ProviderId::new("anthropic"),
+            vec![
+                ModelInfo {
+                    id: "claude-3-7-sonnet".into(),
+                    context_window: 200_000,
+                },
+                ModelInfo {
+                    id: "claude-3-5-sonnet".into(),
+                    context_window: 200_000,
+                },
+                ModelInfo {
+                    id: "gpt-4o".into(),
+                    context_window: 128_000,
+                },
+            ],
+        );
+    }
     let discovery_source = CliDiscovery::with_models(custom_models.clone());
     let mut service = CommandService::with_db(discovery_source, db);
     for (pid, models) in custom_models {
         service.discovery.apply(pid, Ok(models));
     }
     let (default_p, _) = config.initial_provider_and_model();
-    if !default_p.is_empty() {
-        let pid = ProviderId::new(default_p);
-        service.set_default_provider(pid.clone());
-        service.set_provider(pid);
-    }
+    let active_provider = if !default_p.is_empty() {
+        default_p
+    } else {
+        "anthropic".to_string()
+    };
+    let pid = ProviderId::new(active_provider);
+    service.set_default_provider(pid.clone());
+    service.set_provider(pid);
     Ok(service)
 }
 

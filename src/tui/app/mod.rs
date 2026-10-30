@@ -278,10 +278,18 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         let config = crate::config::ConfigLoader.load().unwrap_or_default();
-        let (initial_p, initial_m) = config.initial_provider_and_model();
+        let (mut initial_p, mut initial_m) = config.initial_provider_and_model();
         let mut command_service =
             cli::runtime_service_with_config(&config).expect("in-memory runtime database");
         let available_models = command_service.models().unwrap_or_default();
+        if initial_p.is_empty() {
+            initial_p = "anthropic".to_string();
+        }
+        if initial_m.is_empty()
+            && let Some(first) = available_models.first()
+        {
+            initial_m = first.id.clone();
+        }
         let mcp_servers = config.mcp.clone();
         let tui_settings = config.tui.clone();
         let mut typewriter = crate::tui::TypewriterState::new();

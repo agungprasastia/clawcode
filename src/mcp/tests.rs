@@ -124,6 +124,7 @@ fn start_fake_server(expected: usize) -> (String, thread::JoinHandle<Vec<FakeReq
         while requests.len() < expected && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     let request = read_request(&mut stream);
                     let method = request.body["method"].as_str().unwrap_or_default();
                     let id = request.body["id"].clone();
