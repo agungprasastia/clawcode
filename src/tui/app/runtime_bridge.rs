@@ -743,7 +743,7 @@ impl App {
         {
             self.available_models = models;
         }
-        let mut had_events = self.poll_mcp_probes();
+        let mut had_events = self.poll_mcp_probes() || self.terminal_pane.poll();
         let Some(receiver) = self.runtime_events.take() else {
             return had_events;
         };

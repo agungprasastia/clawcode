@@ -5,6 +5,7 @@ pub mod diff;
 pub mod home;
 mod input;
 mod render;
+pub mod terminal_pane;
 mod theme;
 pub mod typewriter;
 pub mod wave_spinner;
@@ -25,19 +26,24 @@ pub use chat::{
     format_transcript_lines, format_transcript_lines_with_width, render_chat, strip_ansi_codes,
 };
 pub use dialogs::{
-    AgentItem, AgentsDialogState, McpDialogItem, McpDialogState, McpDialogStatus, McpErrorDetail,
-    ModelsDialogState, PaletteAction, PaletteDialogState, PendingPromptItem, PermissionDecision,
-    PermissionDialogState, PermissionPrompt, QuestionDialogState, QueuedPromptsDialogState,
+    AgentItem, AgentsDialogState, DiffReviewDialogState, DiffViewMode, McpDialogItem,
+    McpDialogState, McpDialogStatus, McpErrorDetail, ModelsDialogState, PaletteAction,
+    PaletteDialogState, PendingPromptItem, PermissionDecision, PermissionDialogState,
+    PermissionPrompt, QuestionDialogState, QueuedPromptsDialogState, SessionFileDiff,
     SessionRenameDialogState, SessionsDialogState, SettingKey, SettingsDialogState,
-    StashDialogState, StashEntry, StatusDialogState, ThemesDialogState, VariantsDialogState,
-    WhichKeyState, render_mcp_dialog, render_permission_dialog, render_question_dialog,
+    StashDialogState, StashEntry, StatusDialogState, ThemesDialogState, TimelineDialogState,
+    TimelineTurnItem, VariantsDialogState, WhichKeyState, render_diff_review_dialog,
+    render_mcp_dialog, render_permission_dialog, render_question_dialog,
     render_queued_prompts_dialog, render_settings_dialog, render_stash_dialog,
-    render_variants_dialog,
+    render_timeline_dialog, render_variants_dialog,
 };
 pub use diff::{DiffLine, DiffOp, DiffResult, compute_diff};
 pub use home::HomeState;
 pub use render::render;
 mod tabs;
+pub use terminal_pane::{
+    TERMINAL_PANE_HEIGHT, TerminalLine, TerminalLineKind, TerminalPaneState, render_terminal_pane,
+};
 pub use theme::{Theme, ThemeKind};
 pub use typewriter::TypewriterState;
 pub use wave_spinner::WaveSpinner;

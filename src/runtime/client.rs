@@ -336,6 +336,126 @@ impl RuntimeClient {
         reply_rx.recv().map_err(|error| error.to_string())?
     }
 
+    /// List durable messages for `session_id`.
+    pub fn session_messages(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<crate::persistence::Message>, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .messages(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// List durable tool calls for `session_id`.
+    pub fn session_tool_calls(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<crate::persistence::ToolCall>, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .tool_calls(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Fetch session summaries including fork lineage and revert state.
+    pub fn session_summaries(
+        &self,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<Vec<crate::persistence::SessionSummary>, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .session_summaries(include_archived, limit)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Fork `source_id` before `before` (or through the end when `None`).
+    pub fn fork_session_before(
+        &self,
+        source_id: i64,
+        before: Option<i64>,
+    ) -> Result<crate::persistence::Session, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .fork_session_before(source_id, before)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Stage a revert at `message_id`.
+    pub fn stage_revert(
+        &self,
+        session_id: i64,
+        message_id: i64,
+    ) -> Result<crate::persistence::SessionRevert, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .stage_revert(session_id, message_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Clear a staged revert on `session_id`.
+    pub fn clear_revert(&self, session_id: i64) -> Result<(), String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .clear_revert(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Commit a staged revert on `session_id`.
+    pub fn commit_revert(&self, session_id: i64) -> Result<(), String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .commit_revert(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Append a message directly to `session_id` (used when redoing a reverted turn).
+    pub fn append_message(
+        &self,
+        session_id: i64,
+        role: &str,
+        content: &str,
+    ) -> Result<i64, String> {
+        let db_arc = self
+            .db
+            .as_ref()
+            .ok_or_else(|| "client shut down".to_string())?;
+        let guard = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .append_message(session_id, role, content)
+            .map(|msg| msg.id)
+            .map_err(|error| error.to_string())
+    }
+
     /// Check if a session has an active drain running.
     pub fn is_active(&self, session_id: i64) -> bool {
         self.coordinator.is_active(session_id)
@@ -988,6 +1108,11 @@ fn drain_session_loop(
                 model: "default".to_string(),
                 variant: None,
             });
+        let prior_mode = db
+            .with(|db| db.last_generation(session_id))
+            .ok()
+            .flatten()
+            .map(|g| g.agent_mode);
 
         let generation = match db.with(|db| {
             db.start_generation(
@@ -1022,7 +1147,13 @@ fn drain_session_loop(
 
         let gen_runtime = runtime.clone();
         let gen_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_generation(&ctx, &gen_runtime, &config, &promoted_input.content);
+            run_generation(
+                &ctx,
+                &gen_runtime,
+                &config,
+                prior_mode.as_deref(),
+                &promoted_input.content,
+            );
         }));
 
         if gen_result.is_err() {
@@ -1484,6 +1615,7 @@ fn run_generation(
     ctx: &SharedGenerationCtx,
     runtime: &GenerationRuntime,
     config: &SessionConfig,
+    prior_mode: Option<&str>,
     prompt: &str,
 ) {
     let model = config.model.as_str();
@@ -1534,7 +1666,10 @@ fn run_generation(
         .flatten();
 
     let system_prompt = if let Some(epoch) = active_epoch {
-        epoch.baseline_system_text
+        crate::conversation::prompt::SystemPromptComposer::update_mode_section(
+            &epoch.baseline_system_text,
+            mode,
+        )
     } else {
         let composer = crate::conversation::prompt::SystemPromptComposer::new(
             model,
@@ -1631,7 +1766,8 @@ fn run_generation(
         }
     }
 
-    let mut messages = Vec::with_capacity(history.len() + 2);
+    let has_prior_assistant = history.iter().any(|m| m.role == "assistant");
+    let mut messages = Vec::with_capacity(history.len() + 3);
     messages.push(crate::provider::ChatMessage {
         role: "system".to_string(),
         content: system_prompt,
@@ -1659,7 +1795,30 @@ fn run_generation(
         });
     }
 
-    let mut tools = crate::conversation::tools::coding_tools_schemas();
+    let mode_changed = prior_mode.is_some_and(|prev| !prev.eq_ignore_ascii_case(agent_mode));
+    if has_prior_assistant && mode_changed {
+        let mode_reminder = match mode {
+            crate::workspace::Mode::Build => {
+                "<system-reminder>Active agent mode for this turn: BUILD (Execution & Implementation). You now have full permission to modify files (`write_file`, `edit_file`) and run commands (`bash`). Any earlier PLAN mode restriction mentioned in prior conversation turns is no longer active; execute the requested file changes directly.</system-reminder>"
+            }
+            crate::workspace::Mode::Plan => {
+                "<system-reminder>Active agent mode for this turn: PLAN (Read-Only Exploration & Planning). File modifications (`write_file`, `edit_file`) and mutating shell commands are disabled for this turn.</system-reminder>"
+            }
+        };
+        let insert_idx = messages.len().saturating_sub(1).max(1);
+        messages.insert(
+            insert_idx,
+            crate::provider::ChatMessage {
+                role: "system".to_string(),
+                content: mode_reminder.to_string(),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            },
+        );
+    }
+
+    let mut tools = crate::conversation::tools::coding_tools_schemas_for_mode(mode);
     if let Some(registry) = &runtime.mcp {
         tools.extend(registry.tool_schemas());
     }
@@ -2736,5 +2895,118 @@ mod tests {
             .recv_timeout(std::time::Duration::from_millis(50))
             .unwrap();
         assert_eq!(event.kind, "tool_call_settled");
+    }
+
+    #[derive(Debug)]
+    struct InspectRequestProvider {
+        requests: Arc<Mutex<Vec<StreamRequest>>>,
+    }
+
+    impl Provider for InspectRequestProvider {
+        fn id(&self) -> &ProviderId {
+            static ID: std::sync::LazyLock<ProviderId> =
+                std::sync::LazyLock::new(|| ProviderId::new("inspect"));
+            &ID
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: true,
+            }
+        }
+        fn models(&self) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        fn send(&self, request: &StreamRequest) -> Result<StreamResponse, ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(StreamResponse {
+                events: vec![
+                    StreamEvent::TextDelta("ok".into()),
+                    StreamEvent::Finish {
+                        reason: FinishReason::Stop,
+                    },
+                ],
+            })
+        }
+    }
+
+    #[test]
+    fn switching_session_mode_from_plan_to_build_updates_system_prompt_and_tools() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("clawcode-test-mode-switch-{nonce}.db"));
+        let db = Db::open(&path).unwrap();
+        let session = db.create_session("mode_switch_test").unwrap();
+        let session_id = session.id;
+        let bus = EventBus::new();
+        let (_sub_id, rx) = bus.subscribe(Some(session_id));
+        let writer = WriterHandle::spawn(Db::open(&path).unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = InspectRequestProvider {
+            requests: Arc::clone(&requests),
+        };
+        let client = RuntimeClient::spawn(db, writer, Box::new(provider), bus);
+
+        // Turn 1 in PLAN mode
+        client
+            .start_generation(session_id, "plan", "inspect", "model", "buat readme")
+            .unwrap();
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(2) {
+            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+                && event.kind == "generation_finished"
+            {
+                break;
+            }
+        }
+
+        // Turn 2 after switching to BUILD mode
+        client
+            .start_generation(session_id, "build", "inspect", "model", "lanjut tulis")
+            .unwrap();
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(2) {
+            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50))
+                && event.kind == "generation_finished"
+            {
+                break;
+            }
+        }
+
+        let captured = requests.lock().unwrap().clone();
+        assert_eq!(captured.len(), 2);
+
+        let turn1_sys = &captured[0].messages[0].content;
+        assert!(turn1_sys.contains("# MODE: PLAN"), "{turn1_sys}");
+        assert!(!turn1_sys.contains("# MODE: BUILD"), "{turn1_sys}");
+        let turn1_tools: Vec<&str> = captured[0]
+            .tools
+            .iter()
+            .filter_map(|t| t.get("function")?.get("name")?.as_str())
+            .collect();
+        assert!(!turn1_tools.contains(&"write_file"));
+        assert!(!turn1_tools.contains(&"edit_file"));
+
+        let turn2_sys = &captured[1].messages[0].content;
+        assert!(turn2_sys.contains("# MODE: BUILD"), "{turn2_sys}");
+        assert!(!turn2_sys.contains("# MODE: PLAN"), "{turn2_sys}");
+        let turn2_tools: Vec<&str> = captured[1]
+            .tools
+            .iter()
+            .filter_map(|t| t.get("function")?.get("name")?.as_str())
+            .collect();
+        assert!(turn2_tools.contains(&"write_file"));
+        assert!(turn2_tools.contains(&"edit_file"));
+        assert!(
+            captured[1].messages.iter().any(|m| {
+                m.role == "system" && m.content.contains("Active agent mode for this turn: BUILD")
+            }),
+            "expected system mode reminder before turn 2 user message"
+        );
+
+        let _ = client.shutdown();
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -26,15 +26,17 @@ use crate::runtime::RuntimeEvent;
 use crate::runtime::client::RuntimeClient;
 
 use super::dialogs::{
-    AgentsDialogState, GitDialogState, MAX_STASH_ENTRIES, McpDialogState, ModelsDialogState,
-    PaletteDialogState, PendingPromptItem, PermissionDecision, PermissionDialogState,
-    QuestionDialogState, QueuedPromptsDialogState, SessionRenameDialogState, SessionsDialogState,
-    SettingsDialogState, SkillsDialogState, StashDialogState, StashEntry, StatusDialogState,
-    ThemesDialogState, VariantsDialogState, WhichKeyState, bound_stash_content,
+    AgentsDialogState, DiffReviewDialogState, GitDialogState, MAX_STASH_ENTRIES, McpDialogState,
+    ModelsDialogState, PaletteDialogState, PendingPromptItem, PermissionDecision,
+    PermissionDialogState, QuestionDialogState, QueuedPromptsDialogState, SessionRenameDialogState,
+    SessionsDialogState, SettingsDialogState, SkillsDialogState, StashDialogState, StashEntry,
+    StatusDialogState, ThemesDialogState, TimelineDialogState, VariantsDialogState, WhichKeyState,
+    bound_stash_content,
 };
 use super::home::HomeState;
+use super::terminal_pane::TerminalPaneState;
 
-pub use session_sync::ClientSessionState;
+pub use session_sync::{ClientSessionState, RevertedTurnSnapshot};
 pub use streaming::StreamPart;
 pub use suggestions::{AVAILABLE_COMMANDS, CommandSuggestion};
 pub use tool_rows::{
@@ -191,6 +193,10 @@ pub struct App {
     queued_prompts_dialog: Option<QueuedPromptsDialogState>,
     stash_dialog: Option<StashDialogState>,
     variants_dialog: Option<VariantsDialogState>,
+    timeline_dialog: Option<TimelineDialogState>,
+    diff_review_dialog: Option<DiffReviewDialogState>,
+    terminal_pane: TerminalPaneState,
+    reverted_turns: Vec<RevertedTurnSnapshot>,
     pending_prompts: Vec<PendingPromptItem>,
     next_local_input_id: i64,
     favorite_models: Vec<String>,
@@ -266,6 +272,7 @@ pub struct App {
     last_popup_area: std::cell::Cell<Option<Rect>>,
     last_quick_actions_area: std::cell::Cell<Option<[Rect; 4]>>,
     last_jump_to_latest_area: std::cell::Cell<Option<Rect>>,
+    last_terminal_pane_area: std::cell::Cell<Option<Rect>>,
     terminal_size: std::cell::Cell<(u16, u16)>,
 }
 
@@ -333,6 +340,10 @@ impl App {
             queued_prompts_dialog: None,
             stash_dialog: None,
             variants_dialog: None,
+            timeline_dialog: None,
+            diff_review_dialog: None,
+            terminal_pane: TerminalPaneState::default(),
+            reverted_turns: Vec::new(),
             pending_prompts: Vec::new(),
             next_local_input_id: 1,
             favorite_models: Vec::new(),
@@ -390,6 +401,7 @@ impl App {
             last_popup_area: std::cell::Cell::new(None),
             last_quick_actions_area: std::cell::Cell::new(None),
             last_jump_to_latest_area: std::cell::Cell::new(None),
+            last_terminal_pane_area: std::cell::Cell::new(None),
             terminal_size: std::cell::Cell::new((100, 30)),
         }
     }
@@ -433,7 +445,13 @@ impl App {
 
         match event {
             UiEvent::Input(input) => self.handle_input_key(input),
-            UiEvent::Paste(text) => self.insert_str_at_cursor(&text),
+            UiEvent::Paste(text) => {
+                if self.terminal_pane.is_focused() {
+                    self.terminal_pane.insert_str(&text);
+                } else {
+                    self.insert_str_at_cursor(&text);
+                }
+            }
             UiEvent::Resize { .. } | UiEvent::MouseClick { .. } | UiEvent::MouseScroll { .. } => {}
             UiEvent::StreamDelta(delta) => {
                 self.push_stream_part(StreamPart::Text(delta.clone()));

@@ -366,6 +366,40 @@ impl App {
                 }
                 return;
             }
+            if trimmed == "/timeline" {
+                self.open_timeline_dialog();
+                return;
+            }
+            if trimmed == "/undo" || trimmed == "/revert" {
+                self.undo_last_turn();
+                return;
+            }
+            if trimmed == "/redo" || trimmed == "/unrevert" {
+                self.redo_last_turn();
+                return;
+            }
+            if trimmed == "/diff" {
+                self.open_diff_review_dialog();
+                return;
+            }
+            if trimmed == "/terminal" || trimmed == "/term" {
+                self.toggle_terminal_pane();
+                return;
+            }
+            if let Some(cmd) = trimmed
+                .strip_prefix("/terminal ")
+                .or_else(|| trimmed.strip_prefix("/term "))
+            {
+                self.terminal_pane.open_and_focus();
+                if !cmd.trim().is_empty() {
+                    self.diagnostic = self.terminal_pane.run_command(cmd.trim());
+                } else {
+                    self.diagnostic =
+                        "Terminal pane opened (Esc or Ctrl+X Down to return to composer)"
+                            .to_string();
+                }
+                return;
+            }
             if let Some(stripped) = trimmed.strip_prefix("/model ") {
                 let arg = stripped.trim();
                 let chosen = if let Some(suggestion) = model_suggestions.get(selected_idx) {
@@ -854,6 +888,106 @@ impl App {
     }
 
     pub(crate) fn handle_input_key(&mut self, input: Input) {
+        if self.terminal_pane.is_focused() {
+            match input {
+                Input::Quit => {
+                    self.running = false;
+                    return;
+                }
+                Input::Cancel => {
+                    self.focus_terminal_pane(false);
+                    return;
+                }
+                Input::ClearOrExit => {
+                    if !self.terminal_pane.interrupt_running() {
+                        if !self.terminal_pane.input().is_empty() {
+                            self.terminal_pane.clear_input();
+                            self.diagnostic = "terminal input cleared".to_string();
+                        } else {
+                            self.focus_terminal_pane(false);
+                        }
+                    } else {
+                        self.diagnostic = "terminal command interrupted".to_string();
+                    }
+                    return;
+                }
+                Input::DeleteOrExit => {
+                    if self.terminal_pane.input().is_empty() {
+                        self.terminal_pane.close();
+                        self.diagnostic = "Terminal pane closed".to_string();
+                    } else {
+                        self.terminal_pane.delete();
+                    }
+                    return;
+                }
+                Input::Clear => {
+                    self.terminal_pane.clear_scrollback();
+                    self.diagnostic = "terminal cleared".to_string();
+                    return;
+                }
+                Input::Character(character) => {
+                    self.terminal_pane.insert_char(character);
+                    return;
+                }
+                Input::Backspace => {
+                    self.terminal_pane.backspace();
+                    return;
+                }
+                Input::Delete => {
+                    self.terminal_pane.delete();
+                    return;
+                }
+                Input::DeleteLine | Input::DeleteToLineStart | Input::DeleteToLineEnd => {
+                    self.terminal_pane.clear_input();
+                    return;
+                }
+                Input::Paste => {
+                    if let Ok(text) = SystemClipboard.get_text() {
+                        self.terminal_pane.insert_str(&text);
+                    }
+                    return;
+                }
+                Input::Up => {
+                    self.terminal_pane.history_up();
+                    return;
+                }
+                Input::Down => {
+                    self.terminal_pane.history_down();
+                    return;
+                }
+                Input::Left | Input::BackgroundOrLeft | Input::WordLeft => {
+                    self.terminal_pane.move_left();
+                    return;
+                }
+                Input::Right | Input::WordRight => {
+                    self.terminal_pane.move_right();
+                    return;
+                }
+                Input::Home => {
+                    self.terminal_pane.move_home();
+                    return;
+                }
+                Input::End => {
+                    self.terminal_pane.move_end();
+                    return;
+                }
+                Input::ScrollUp | Input::PageUp | Input::HalfPageUp => {
+                    self.terminal_pane.scroll_up(3);
+                    return;
+                }
+                Input::ScrollDown | Input::PageDown | Input::HalfPageDown => {
+                    self.terminal_pane.scroll_down(3);
+                    return;
+                }
+                Input::Submit => {
+                    if let Some(status) = self.terminal_pane.submit_input() {
+                        self.diagnostic = status;
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         if !matches!(
             input,
             Input::Character(_) | Input::Backspace | Input::Delete

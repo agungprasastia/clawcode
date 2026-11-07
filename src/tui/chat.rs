@@ -417,6 +417,80 @@ fn reasoning_label(text: &str, done: bool) -> String {
     }
 }
 
+fn append_reasoning_body_lines(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    width: u16,
+    theme: &Theme,
+) {
+    let body_width = (width as usize).saturating_sub(10).max(20);
+    for raw_line in text.trim().lines() {
+        if raw_line.trim().is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "      │ ",
+                Style::default().fg(theme.dim),
+            )]));
+        } else {
+            for wrapped in wrap_line_to_width(raw_line, body_width) {
+                lines.push(Line::from(vec![
+                    Span::styled("      │ ", Style::default().fg(theme.dim)),
+                    Span::styled(wrapped, Style::default().fg(theme.quiet)),
+                ]));
+            }
+        }
+    }
+}
+
+fn parse_code_fence(line: &str) -> Option<(char, usize, &str)> {
+    let trimmed = line.trim_start();
+    let fence_char = trimmed.chars().next()?;
+    if fence_char != '`' && fence_char != '~' {
+        return None;
+    }
+    let count = trimmed.chars().take_while(|&c| c == fence_char).count();
+    if count < 3 {
+        return None;
+    }
+    let info = trimmed[count * fence_char.len_utf8()..].trim();
+    if fence_char == '`' && info.contains('`') {
+        return None;
+    }
+    Some((fence_char, count, info))
+}
+
+fn is_nested_markdown_lang(lang: &str) -> bool {
+    let token = lang
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        token.as_str(),
+        "markdown" | "md" | "mdx" | "rmd" | "quarto" | "qmd"
+    )
+}
+
+fn has_later_closing_fence(
+    raw_lines: &[&str],
+    start_idx: usize,
+    fence_char: char,
+    min_count: usize,
+) -> bool {
+    for candidate in &raw_lines[start_idx..] {
+        if candidate.starts_with("> ") || *candidate == "[earlier transcript compacted]" {
+            break;
+        }
+        if let Some((c, count, info)) = parse_code_fence(candidate)
+            && c == fence_char
+            && count >= min_count
+            && info.is_empty()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn tool_row_is_terminal(row: &ToolRow) -> bool {
     matches!(row.state, ToolRowState::Completed | ToolRowState::Failed)
 }
@@ -699,6 +773,18 @@ fn append_stream_parts_inner(
                 ctx.lines.push(Line::from(""));
             }
             StreamPart::Text(text) => {
+                if !ctx.lines.is_empty()
+                    && !ctx
+                        .lines
+                        .last()
+                        .map(|l| {
+                            l.spans.is_empty()
+                                || (l.spans.len() == 1 && l.spans[0].content.is_empty())
+                        })
+                        .unwrap_or(false)
+                {
+                    ctx.lines.push(Line::from(""));
+                }
                 let mut rendered = format_transcript_lines_with_mode(
                     text,
                     ctx.theme,
@@ -730,12 +816,7 @@ fn append_stream_parts_inner(
                     ),
                 ]));
                 if ctx.app.is_thought_expanded() {
-                    for l in text.lines() {
-                        ctx.lines.push(Line::from(vec![
-                            Span::raw("      │ "),
-                            Span::styled(l.to_string(), Style::default().fg(ctx.theme.quiet)),
-                        ]));
-                    }
+                    append_reasoning_body_lines(ctx.lines, text, ctx.width, ctx.theme);
                 }
             }
             StreamPart::ReasoningDone { text, duration } => {
@@ -752,12 +833,7 @@ fn append_stream_parts_inner(
                             Style::default().fg(ctx.theme.amber),
                         ),
                     ]));
-                    for l in text.lines() {
-                        ctx.lines.push(Line::from(vec![
-                            Span::raw("      │ "),
-                            Span::styled(l.to_string(), Style::default().fg(ctx.theme.quiet)),
-                        ]));
-                    }
+                    append_reasoning_body_lines(ctx.lines, text, ctx.width, ctx.theme);
                 } else {
                     ctx.lines.push(Line::from(vec![
                         Span::raw("   "),
@@ -2271,6 +2347,10 @@ pub fn format_transcript_lines_with_mode(
     }
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(raw_lines.len());
     let mut in_code_block = false;
+    let mut code_fence_char = '`';
+    let mut code_fence_len = 3usize;
+    let mut code_block_is_markdown = false;
+    let mut nested_fence_depth = 0usize;
     let mut compaction_marker_seen = false;
     let mut orphan_fence = false;
     for (i, line) in raw_lines.iter().enumerate() {
@@ -2278,51 +2358,86 @@ pub fn format_transcript_lines_with_mode(
             compaction_marker_seen = true;
             orphan_fence = false;
             in_code_block = false;
+            nested_fence_depth = 0;
             lines.push(Line::from(Span::styled(
                 (*line).to_string(),
                 Style::default().fg(theme.dim),
             )));
             continue;
         }
-        if line.trim_start().starts_with("```") {
-            if in_code_block {
-                in_code_block = false;
-                orphan_fence = false;
-                lines.push(Line::from(""));
-            } else {
+        if let Some((fence_char, fence_len, info)) = parse_code_fence(line) {
+            if !in_code_block {
                 in_code_block = true;
-                let lang = line.trim_start().trim_start_matches('`').trim();
+                code_fence_char = fence_char;
+                code_fence_len = fence_len;
+                code_block_is_markdown = is_nested_markdown_lang(info);
+                nested_fence_depth = 0;
                 orphan_fence = compaction_marker_seen
-                    && lang.is_empty()
+                    && info.is_empty()
                     && i > 0
                     && !raw_lines[i - 1].trim().is_empty();
-                if !lang.is_empty() {
+                if !info.is_empty() {
                     let header_line = Line::from(vec![
                         Span::raw("  "),
-                        Span::styled(lang.to_string(), Style::default().fg(theme.dim)),
+                        Span::styled(info.to_string(), Style::default().fg(theme.dim)),
                     ]);
                     lines.push(pad_card_line(header_line, card_width, theme.bg_element));
                 }
+                continue;
             }
-            continue;
+
+            if !info.is_empty() {
+                if fence_char == code_fence_char {
+                    nested_fence_depth = nested_fence_depth.saturating_add(1);
+                }
+            } else if fence_char == code_fence_char && fence_len >= code_fence_len {
+                if nested_fence_depth > 0 {
+                    nested_fence_depth -= 1;
+                } else if code_block_is_markdown
+                    && fence_len == code_fence_len
+                    && has_later_closing_fence(&raw_lines, i + 1, code_fence_char, code_fence_len)
+                {
+                    nested_fence_depth = 1;
+                } else {
+                    in_code_block = false;
+                    orphan_fence = false;
+                    code_block_is_markdown = false;
+                    nested_fence_depth = 0;
+                    lines.push(Line::from(""));
+                    continue;
+                }
+            }
         }
 
         if orphan_fence
             && line.strip_prefix("> ").is_some()
             && (i == 0
                 || raw_lines[i - 1].trim().is_empty()
-                || raw_lines[i - 1].trim_start().starts_with("```")
+                || parse_code_fence(raw_lines[i - 1]).is_some()
                 || raw_lines[i - 1] == "[earlier transcript compacted]")
         {
             in_code_block = false;
             orphan_fence = false;
+            code_block_is_markdown = false;
+            nested_fence_depth = 0;
         }
         if in_code_block {
-            let code_line = Line::from(vec![
-                Span::raw("  "),
-                Span::styled(line.to_string(), Style::default().fg(theme.ink)),
-            ]);
-            lines.push(pad_card_line(code_line, card_width, theme.bg_element));
+            if width.is_some() {
+                let code_content_width = card_width.saturating_sub(2).max(16);
+                for wrapped in wrap_line_to_width(line, code_content_width) {
+                    let code_line = Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(wrapped, Style::default().fg(theme.ink)),
+                    ]);
+                    lines.push(pad_card_line(code_line, card_width, theme.bg_element));
+                }
+            } else {
+                let code_line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(line.to_string(), Style::default().fg(theme.ink)),
+                ]);
+                lines.push(pad_card_line(code_line, card_width, theme.bg_element));
+            }
             continue;
         }
         if line.trim().is_empty() {
@@ -3585,6 +3700,91 @@ mod tests {
         assert_eq!(
             row.metadata.as_ref().and_then(|meta| meta.get("count")),
             Some(&serde_json::json!(2))
+        );
+    }
+
+    #[test]
+    fn nested_fenced_code_blocks_inside_markdown_stay_inside_card() {
+        let theme = ThemeKind::ClawcodeDark.to_theme();
+        let transcript = "Isi draf:\n\n```markdown\n# Clawcode\n\n## Kompilasi\n\n```\ncargo build --release --locked\n```\n\nBiner hasil kompilasi: `target/release/clawcode`.\n\n## Penggunaan\n\n```bash\ncargo run\n```\n```\n\nSelesai.";
+        let lines = format_transcript_lines_with_width(transcript, &theme, Color::Cyan, Some(80));
+
+        let prose_inside_md = lines
+            .iter()
+            .find(|line| line_text(line).contains("Biner hasil kompilasi"))
+            .expect("must contain markdown prose line");
+        let cmd_inside_md = lines
+            .iter()
+            .find(|line| line_text(line).contains("cargo build --release --locked"))
+            .expect("must contain command line");
+        let trailing_text = lines
+            .iter()
+            .find(|line| line_text(line).contains("Selesai."))
+            .expect("must contain trailing text after outer fence");
+
+        assert_eq!(prose_inside_md.style.bg, Some(theme.bg_element));
+        assert_eq!(cmd_inside_md.style.bg, Some(theme.bg_element));
+        assert_eq!(trailing_text.style.bg, None);
+    }
+
+    #[test]
+    fn reasoning_long_lines_wrap_with_indent_bar_and_trim_trailing_blank() {
+        let mut app = App::default();
+        app.toggle_thought_expanded();
+        let long_thought = "The input is a greeting and does not directly relate to editing the README file in the repository.\n\nSecond paragraph that is also quite long so it wraps across multiple rows cleanly.\n\n";
+        let parts = vec![StreamPart::ReasoningDone {
+            text: long_thought.to_string(),
+            duration: std::time::Duration::from_millis(1500),
+        }];
+        let (rendered, _) = render_parts(&app, &parts, 50);
+        let content_lines: Vec<&str> = rendered
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert!(content_lines.len() >= 4, "{rendered}");
+        for line in &content_lines {
+            assert!(
+                line.starts_with("      │ "),
+                "wrapped reasoning line missing bar prefix: {line:?}"
+            );
+            assert!(
+                UnicodeWidthStr::width(*line) <= 50,
+                "wrapped reasoning line exceeds width: {line:?}"
+            );
+        }
+        assert!(
+            content_lines.last().unwrap().trim() != "│",
+            "trailing empty thought line should be trimmed: {rendered}"
+        );
+    }
+
+    #[test]
+    fn exploration_group_has_blank_line_before_following_assistant_text() {
+        let mut app = App::default();
+        app.set_tool_rows_for_test(vec![
+            test_tool_row(
+                "r1",
+                "read_file",
+                ToolRowState::Completed,
+                serde_json::json!({ "path": "README.md" }),
+            ),
+            test_tool_row(
+                "r2",
+                "read_file",
+                ToolRowState::Completed,
+                serde_json::json!({ "path": "Cargo.toml" }),
+            ),
+        ]);
+        let parts = vec![
+            StreamPart::Tool("r1".to_string()),
+            StreamPart::Tool("r2".to_string()),
+            StreamPart::Text("Draft selesai.".to_string()),
+        ];
+        let (rendered, _) = render_parts(&app, &parts, 80);
+        assert!(
+            rendered.contains("Explored: 2 reads\n\n   Draft selesai."),
+            "expected blank line between exploration group and assistant text, got:\n{rendered}"
         );
     }
 }
